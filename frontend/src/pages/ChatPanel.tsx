@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../lib/api'
+import type { McpServer } from './McpSection'
 
 interface Msg {
   id: number
@@ -40,6 +41,8 @@ export default function ChatPanel({ chatId, title }: { chatId: number; title: st
   const [messages, setMessages] = useState<Msg[]>([])
   const [jobs, setJobs] = useState<ImportJob[]>([])
   const [runs, setRuns] = useState<Run[]>([])
+  const [allServers, setAllServers] = useState<McpServer[]>([])
+  const [enabledServers, setEnabledServers] = useState<number[]>([])
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<Hit[] | null>(null)
   const [searching, setSearching] = useState(false)
@@ -50,6 +53,8 @@ export default function ChatPanel({ chatId, title }: { chatId: number; title: st
     api.get<Msg[]>(`/api/chats/${chatId}/messages?limit=20`).then(setMessages).catch(() => {})
     api.get<ImportJob[]>(`/api/chats/${chatId}/imports`).then(setJobs).catch(() => {})
     api.get<Run[]>(`/api/chats/${chatId}/runs?limit=10`).then(setRuns).catch(() => {})
+    api.get<McpServer[]>('/api/mcp-servers').then(setAllServers).catch(() => {})
+    api.get<number[]>(`/api/chats/${chatId}/mcp`).then(setEnabledServers).catch(() => {})
   }, [chatId])
 
   useEffect(() => {
@@ -159,6 +164,30 @@ export default function ChatPanel({ chatId, title }: { chatId: number; title: st
             ))}
           </tbody>
         </table>
+      )}
+
+      {allServers.length > 0 && (
+        <>
+          <h4>MCP tools for this chat</h4>
+          <div className="row" style={{ flexWrap: 'wrap' }}>
+            {allServers.map((s) => (
+              <label key={s.id} style={{ marginRight: '1rem' }}>
+                <input
+                  type="checkbox"
+                  checked={enabledServers.includes(s.id)}
+                  onChange={async (e) => {
+                    const next = e.target.checked
+                      ? [...enabledServers, s.id]
+                      : enabledServers.filter((id) => id !== s.id)
+                    setEnabledServers(next)
+                    await api.put(`/api/chats/${chatId}/mcp`, next)
+                  }}
+                />{' '}
+                {s.name}
+              </label>
+            ))}
+          </div>
+        </>
       )}
 
       {runs.length > 0 && (

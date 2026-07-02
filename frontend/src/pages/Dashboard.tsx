@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '../lib/api'
 import ChatPanel from './ChatPanel'
+import McpSection from './McpSection'
 import ModelsSection from './ModelsSection'
 
 interface Health {
@@ -86,6 +87,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
       </header>
       <main>
         <ModelsSection />
+        <McpSection />
         <section>
           <h2>Bots</h2>
           <form className="row" onSubmit={addBot}>

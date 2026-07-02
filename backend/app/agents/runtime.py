@@ -3,6 +3,7 @@
 import asyncio
 import html
 import logging
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 
 from aiogram import Bot as AiogramBot
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.context import assemble_context
 from app.agents.deps import AgentDeps
+from app.agents.mcp import toolsets_for_chat
 from app.agents.models import ProviderNotConfigured, build_model, get_provider
 from app.agents.tools import AGENT_TOOLS
 from app.memory.embeddings import Embedder
@@ -101,13 +103,14 @@ async def execute_run(
         prompt_context = await assemble_context(
             session, embedder, chat, run.request_text, thread_id=run.thread_id
         )
+        mcp_toolsets = await toolsets_for_chat(session, chat.id)
 
     instructions = INSTRUCTIONS_TEMPLATE.format(
         bot_name=bot_row.name,
         bot_username=bot_row.username,
         chat_title=chat.title or "this chat",
     )
-    agent = build_agent(build_model(provider), instructions, extra_toolsets)
+    agent = build_agent(build_model(provider), instructions, mcp_toolsets + list(extra_toolsets or []))
     deps = AgentDeps(sessionmaker=sessionmaker, embedder=embedder, chat_id=chat.id, run_id=run_id)
 
     try:
@@ -116,7 +119,10 @@ async def execute_run(
         pass
 
     try:
-        result = await agent.run(prompt_context, deps=deps)
+        # MCP connections open for exactly the duration of the run.
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(agent)
+            result = await agent.run(prompt_context, deps=deps)
         reply_text = (result.output or "").strip() or "(no reply)"
     except Exception as e:  # noqa: BLE001 — any model/tool failure ends the run
         log.exception("agent run %s failed", run_id)
