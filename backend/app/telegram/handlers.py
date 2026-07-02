@@ -228,7 +228,10 @@ async def handle_edited_message(session: AsyncSession, bot_row: Bot, msg: TgMess
         # Edit of a message we never saw (sent before authorization) — store it now.
         await handle_message(session, bot_row, msg)
         return
+    from app.memory.store import mark_chunks_stale
+
     existing.text = text
+    await mark_chunks_stale(session, chat.id, msg.message_id)
     existing.edited_at = (
         msg.edit_date.astimezone(timezone.utc)
         if isinstance(msg.edit_date, datetime)

@@ -1,5 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '../lib/api'
+import ChatPanel from './ChatPanel'
 
 interface Health {
   status: string
@@ -34,6 +35,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [token, setToken] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [selectedChat, setSelectedChat] = useState<Chat | null>(null)
 
   const refresh = useCallback(() => {
     api.get<Health>('/api/health').then(setHealth).catch(() => setHealth(null))
@@ -140,7 +142,11 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
               </thead>
               <tbody>
                 {chats.map((c) => (
-                  <tr key={c.id}>
+                  <tr
+                    key={c.id}
+                    className={selectedChat?.id === c.id ? 'selected' : 'clickable'}
+                    onClick={() => setSelectedChat(selectedChat?.id === c.id ? null : c)}
+                  >
                     <td>{c.title || c.tg_chat_id}</td>
                     <td>{c.type}</td>
                     <td>{c.status === 'authorized' ? '✅ authorized' : c.status === 'pending_auth' ? '⏳ waiting for admin' : c.status}</td>
@@ -149,6 +155,9 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
                 ))}
               </tbody>
             </table>
+          )}
+          {selectedChat && (
+            <ChatPanel chatId={selectedChat.id} title={selectedChat.title || String(selectedChat.tg_chat_id)} />
           )}
         </section>
 

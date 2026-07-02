@@ -20,6 +20,9 @@ services:
       CONVOKE_OPERATOR_PASSWORD: ${CONVOKE_OPERATOR_PASSWORD:?set in .env}
       CONVOKE_SECRET_KEY: ${CONVOKE_SECRET_KEY:?set in .env}
       CONVOKE_FERNET_KEY: ${CONVOKE_FERNET_KEY:?set in .env}
+    volumes:
+      - imports:/data/imports
+      - hf-cache:/root/.cache/huggingface
     depends_on:
       db:
         condition: service_healthy
@@ -38,6 +41,8 @@ services:
       CONVOKE_OPERATOR_PASSWORD: ${CONVOKE_OPERATOR_PASSWORD:?set in .env}
       CONVOKE_SECRET_KEY: ${CONVOKE_SECRET_KEY:?set in .env}
       CONVOKE_FERNET_KEY: ${CONVOKE_FERNET_KEY:?set in .env}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
     depends_on:
       db:
         condition: service_healthy
@@ -54,3 +59,5 @@ services:
 
 volumes:
   pgdata:
+  imports:
+  hf-cache:

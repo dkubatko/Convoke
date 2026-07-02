@@ -14,6 +14,8 @@ from app.core.db import (
     get_engine,
     get_sessionmaker,
 )
+from app.memory.loop import MemoryLoop
+from app.memory.runtime import get_embedder
 from app.telegram.consumer import InboxConsumer
 from app.telegram.gateway import Gateway
 
@@ -29,6 +31,7 @@ async def main() -> None:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(Gateway(sessionmaker).run(), name="gateway")
             tg.create_task(InboxConsumer(sessionmaker).run(), name="inbox-consumer")
+            tg.create_task(MemoryLoop(sessionmaker, get_embedder()).run(), name="memory-loop")
     finally:
         await lock_conn.close()
         await get_engine().dispose()

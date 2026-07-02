@@ -105,6 +105,11 @@ class Message(Base):
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     source: Mapped[str] = mapped_column(Text, default="live")  # live | import | self
+    # Provenance: which import brought this message in — makes a poisoned or
+    # wrong-chat import surgically deletable.
+    import_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

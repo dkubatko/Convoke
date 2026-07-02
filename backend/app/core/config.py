@@ -18,6 +18,18 @@ class Settings(BaseSettings):
     session_max_age_seconds: int = 7 * 24 * 3600
     cookie_secure: bool = False  # set true behind HTTPS
 
+    # Memory / embeddings. Changing the model implies changing the dim, which
+    # means a migration + full re-embed — treat as a deployment-time choice.
+    embedding_model: str = "intfloat/multilingual-e5-small"
+    embedding_dim: int = 384
+    embedding_batch_size: int = 64
+    # A conversation segment closes after this much silence (or at max size).
+    chunk_lull_seconds: int = 30 * 60
+    chunk_max_messages: int = 24
+    chunk_overlap_messages: int = 4
+
+    imports_dir: str = "/data/imports"
+
 
 @lru_cache
 def get_settings() -> Settings:

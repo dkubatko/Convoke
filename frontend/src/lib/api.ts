@@ -31,5 +31,20 @@ export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) }),
-  delete: (path: string) => requestVoid(path, { method: 'DELETE' }),
+  delete: <T = void>(path: string) => requestVoid(path, { method: 'DELETE' }) as Promise<T>,
+  async upload<T>(path: string, file: File): Promise<T> {
+    const form = new FormData()
+    form.append('file', file)
+    const resp = await fetch(path, { method: 'POST', credentials: 'same-origin', body: form })
+    if (!resp.ok) {
+      let detail = resp.statusText
+      try {
+        detail = (await resp.json()).detail ?? detail
+      } catch {
+        // non-JSON error body
+      }
+      throw new ApiError(resp.status, detail)
+    }
+    return resp.json() as Promise<T>
+  },
 }
