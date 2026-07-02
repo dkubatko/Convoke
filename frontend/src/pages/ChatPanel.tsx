@@ -25,6 +25,12 @@ interface ImportJob {
   messages_ingested: number
 }
 
+interface Gap {
+  id: number
+  gap_start: string
+  gap_end: string
+}
+
 interface Run {
   id: number
   trigger: string
@@ -43,6 +49,8 @@ export default function ChatPanel({ chatId, title }: { chatId: number; title: st
   const [runs, setRuns] = useState<Run[]>([])
   const [allServers, setAllServers] = useState<McpServer[]>([])
   const [enabledServers, setEnabledServers] = useState<number[]>([])
+  const [gaps, setGaps] = useState<Gap[]>([])
+  const [forgetSender, setForgetSender] = useState('')
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<Hit[] | null>(null)
   const [searching, setSearching] = useState(false)
@@ -55,6 +63,7 @@ export default function ChatPanel({ chatId, title }: { chatId: number; title: st
     api.get<Run[]>(`/api/chats/${chatId}/runs?limit=10`).then(setRuns).catch(() => {})
     api.get<McpServer[]>('/api/mcp-servers').then(setAllServers).catch(() => {})
     api.get<number[]>(`/api/chats/${chatId}/mcp`).then(setEnabledServers).catch(() => {})
+    api.get<Gap[]>(`/api/chats/${chatId}/gaps`).then(setGaps).catch(() => {})
   }, [chatId])
 
   useEffect(() => {
@@ -211,6 +220,57 @@ export default function ChatPanel({ chatId, title }: { chatId: number; title: st
           </table>
         </>
       )}
+
+      {gaps.length > 0 && (
+        <>
+          <h4>Memory gaps</h4>
+          <p className="warn">
+            Convoke was offline longer than Telegram keeps updates (24h) — messages in these
+            ranges were never captured:
+          </p>
+          <ul>
+            {gaps.map((g) => (
+              <li key={g.id}>
+                {new Date(g.gap_start).toLocaleString()} → {new Date(g.gap_end).toLocaleString()}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      <h4>Forget</h4>
+      <p className="hint">
+        Telegram never tells bots about deleted messages — remove stored content here.
+      </p>
+      <div className="row">
+        <input
+          placeholder="Sender id"
+          value={forgetSender}
+          onChange={(e) => setForgetSender(e.target.value)}
+          style={{ width: '140px' }}
+        />
+        <button
+          disabled={!forgetSender}
+          onClick={async () => {
+            if (!confirm(`Forget all stored messages from sender ${forgetSender}?`)) return
+            await api.post(`/api/chats/${chatId}/forget`, { sender_id: Number(forgetSender) })
+            setForgetSender('')
+            refresh()
+          }}
+        >
+          Forget sender
+        </button>
+        <button
+          className="danger"
+          onClick={async () => {
+            if (!confirm('Forget EVERYTHING stored for this chat (messages, memory, notes)?')) return
+            await api.post(`/api/chats/${chatId}/forget`, { everything: true })
+            refresh()
+          }}
+        >
+          Forget entire chat
+        </button>
+      </div>
 
       <h4>Recent messages</h4>
       {messages.length === 0 ? (

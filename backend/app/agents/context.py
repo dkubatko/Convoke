@@ -13,7 +13,7 @@ from app.core.config import get_settings
 from app.memory.chunker import render_message
 from app.memory.embeddings import Embedder
 from app.memory.store import search_chat_history
-from app.models import Chat, Message, Note
+from app.models import Chat, MemoryGap, Message, Note
 
 RECENT_SHARE = 0.55
 HITS_SHARE = 0.30
@@ -84,7 +84,29 @@ async def assemble_context(
         notes_lines.append(line)
         notes_used += len(line)
 
+    gaps = (
+        (
+            await session.execute(
+                select(MemoryGap)
+                .where(MemoryGap.chat_id == chat.id)
+                .order_by(MemoryGap.gap_end.desc())
+                .limit(3)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
     sections: list[str] = []
+    if gaps:
+        sections.append(
+            "## Known gaps in memory (the bot was offline; messages in these "
+            "ranges were never seen)\n"
+            + "\n".join(
+                f"- {g.gap_start:%Y-%m-%d %H:%M} to {g.gap_end:%Y-%m-%d %H:%M} UTC"
+                for g in gaps
+            )
+        )
     if notes_lines:
         sections.append("## Remembered notes about this chat\n" + "\n".join(notes_lines))
     if hits_text:

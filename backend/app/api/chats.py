@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -13,7 +13,7 @@ from app.core.security import require_operator
 from app.ingest.history_import import delete_import, run_import
 from app.memory.runtime import get_embedder
 from app.memory.store import search_chat_history
-from app.models import AgentRun, Chat, ImportJob, Message
+from app.models import AgentRun, Chat, ImportJob, MemoryGap, Message, Note
 
 router = APIRouter(dependencies=[Depends(require_operator)])
 
@@ -160,6 +160,68 @@ async def list_runs(
             )
         ).scalars()
     )
+
+
+class GapOut(BaseModel):
+    id: int
+    gap_start: datetime
+    gap_end: datetime
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/chats/{chat_id}/gaps", response_model=list[GapOut])
+async def list_gaps(chat_id: int, session: AsyncSession = Depends(get_session)) -> list[MemoryGap]:
+    await _chat_or_404(session, chat_id)
+    return list(
+        (
+            await session.execute(
+                select(MemoryGap)
+                .where(MemoryGap.chat_id == chat_id)
+                .order_by(MemoryGap.gap_end.desc())
+                .limit(20)
+            )
+        ).scalars()
+    )
+
+
+class ForgetRequest(BaseModel):
+    """Deletes matching messages and rebuilds the chat's memory. Telegram
+    never delivers deletion events, so this is the operator's only lever."""
+
+    sender_id: int | None = None
+    before: datetime | None = None
+    after: datetime | None = None
+    everything: bool = False  # also wipe notes
+
+
+@router.post("/chats/{chat_id}/forget")
+async def forget(
+    chat_id: int, body: ForgetRequest, session: AsyncSession = Depends(get_session)
+) -> dict:
+    from app.ingest.history_import import reset_chat_memory
+
+    await _chat_or_404(session, chat_id)
+    if not body.everything and body.sender_id is None and body.before is None and body.after is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Specify sender_id, a date range, or everything=true",
+        )
+    stmt = delete(Message).where(Message.chat_id == chat_id)
+    if not body.everything:
+        if body.sender_id is not None:
+            stmt = stmt.where(Message.sender_id == body.sender_id)
+        if body.before is not None:
+            stmt = stmt.where(Message.sent_at < body.before)
+        if body.after is not None:
+            stmt = stmt.where(Message.sent_at > body.after)
+    result = await session.execute(stmt)
+    await reset_chat_memory(session, chat_id)
+    if body.everything:
+        await session.execute(delete(Note).where(Note.chat_id == chat_id))
+        await session.execute(delete(MemoryGap).where(MemoryGap.chat_id == chat_id))
+    await session.commit()
+    return {"deleted_messages": result.rowcount or 0}
 
 
 @router.delete("/imports/{job_id}/messages")

@@ -8,6 +8,7 @@ only then advance the offset. Everything else happens in DB-driven consumers.
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from aiogram.exceptions import (
     TelegramNetworkError,
@@ -20,7 +21,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.crypto import decrypt
-from app.models import Bot, InboxUpdate
+from app.models import Bot, Chat, InboxUpdate, MemoryGap
 from app.telegram.client import ALLOWED_UPDATES, make_bot
 
 log = logging.getLogger("convoke.gateway")
@@ -28,6 +29,9 @@ log = logging.getLogger("convoke.gateway")
 POLL_TIMEOUT_S = 30
 RECONCILE_INTERVAL_S = 5
 ERROR_BACKOFF_S = 5
+POLL_STAMP_INTERVAL_S = 60
+# Telegram retains unconfirmed updates for 24h; longer downtime = data loss.
+GAP_THRESHOLD = timedelta(hours=24)
 
 
 class BotRunner:
@@ -37,10 +41,12 @@ class BotRunner:
         self.next_offset = next_offset
         self.sessionmaker = sessionmaker
         self.bot = make_bot(token)
+        self._last_stamp: datetime | None = None
 
     async def run(self) -> None:
         log.info("bot %s: polling started (offset=%s)", self.bot_id, self.next_offset)
         try:
+            await self._mark_gap_if_stale()
             while True:
                 await self._poll_once()
         except asyncio.CancelledError:
@@ -67,6 +73,7 @@ class BotRunner:
             log.warning("bot %s: poll error (%s); backing off", self.bot_id, e)
             await asyncio.sleep(ERROR_BACKOFF_S)
             return
+        await self._stamp_polled()
         if not updates:
             return
 
@@ -88,6 +95,45 @@ class BotRunner:
             await session.commit()
         # Persisted and committed — safe to ack on the next getUpdates call.
         self.next_offset = new_offset
+
+    async def _stamp_polled(self) -> None:
+        now = datetime.now(timezone.utc)
+        if self._last_stamp is not None and (now - self._last_stamp).total_seconds() < POLL_STAMP_INTERVAL_S:
+            return
+        self._last_stamp = now
+        async with self.sessionmaker() as session:
+            await session.execute(
+                update(Bot).where(Bot.id == self.bot_id).values(last_polled_at=now)
+            )
+            await session.commit()
+
+    async def _mark_gap_if_stale(self) -> None:
+        """Downtime past Telegram's 24h retention = messages permanently lost.
+        Record the hole so the UI shows it and agent context mentions it."""
+        now = datetime.now(timezone.utc)
+        async with self.sessionmaker() as session:
+            last = (
+                await session.execute(select(Bot.last_polled_at).where(Bot.id == self.bot_id))
+            ).scalar_one_or_none()
+            if last is None:
+                return
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            if now - last <= GAP_THRESHOLD:
+                return
+            chat_ids = (
+                await session.execute(
+                    select(Chat.id).where(Chat.bot_id == self.bot_id, Chat.status == "authorized")
+                )
+            ).scalars().all()
+            for chat_id in chat_ids:
+                session.add(MemoryGap(chat_id=chat_id, gap_start=last, gap_end=now))
+            await session.commit()
+            if chat_ids:
+                log.warning(
+                    "bot %s: offline since %s (>24h) — marked memory gaps in %d chat(s)",
+                    self.bot_id, last.isoformat(), len(chat_ids),
+                )
 
     async def _mark_error(self, message: str) -> None:
         async with self.sessionmaker() as session:

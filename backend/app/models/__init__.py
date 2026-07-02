@@ -2,7 +2,7 @@ from app.models.agents import AgentRun, ModelProvider, Note
 from app.models.base import Base
 from app.models.mcp import ChatMcpServer, McpServer
 from app.models.memory import Chunk, ChunkState, ImportJob
-from app.models.telegram import AuthNonce, Bot, Chat, InboxUpdate, Message
+from app.models.telegram import AuthNonce, Bot, Chat, InboxUpdate, MemoryGap, Message
 from app.models.workflows import (
     ChatEvalState,
     PendingFire,
@@ -25,6 +25,7 @@ __all__ = [
     "ImportJob",
     "InboxUpdate",
     "McpServer",
+    "MemoryGap",
     "Message",
     "ModelProvider",
     "Note",

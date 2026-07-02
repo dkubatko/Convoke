@@ -40,6 +40,9 @@ class Bot(Base):
     # getUpdates offset: next update_id to request. Advanced only after the
     # updates are persisted to the inbox (persist-then-ack).
     next_offset: Mapped[int] = mapped_column(BigInteger, default=0)
+    # Telegram holds updates only 24h — downtime beyond that is permanent,
+    # undetectable message loss. Tracked to mark memory gaps on restart.
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -110,6 +113,22 @@ class Message(Base):
     import_job_id: Mapped[int | None] = mapped_column(
         ForeignKey("import_jobs.id", ondelete="SET NULL"), nullable=True
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class MemoryGap(Base):
+    """A known hole in chat memory (worker down >24h — Telegram discarded the
+    updates). Surfaced to the operator and mentioned in agent context."""
+
+    __tablename__ = "memory_gaps"
+    __table_args__ = (Index("ix_memory_gaps_chat", "chat_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    gap_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    gap_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
