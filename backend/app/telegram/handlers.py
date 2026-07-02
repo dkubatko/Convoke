@@ -21,7 +21,7 @@ from aiogram.types import Message as TgMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AuthNonce, Bot, Chat, Message
+from app.models import AgentRun, AuthNonce, Bot, Chat, Message
 from app.telegram.sender import send_and_persist
 
 log = logging.getLogger("convoke.telegram")
@@ -206,6 +206,33 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
             source="live",
         )
     )
+
+    trigger = _agent_trigger(msg, bot_row, text)
+    if trigger is not None:
+        session.add(
+            AgentRun(
+                chat_id=chat.id,
+                trigger=trigger,
+                trigger_tg_message_id=msg.message_id,
+                thread_id=msg.message_thread_id,
+                request_text=text,
+            )
+        )
+
+
+def _agent_trigger(msg: TgMessage, bot_row: Bot, text: str) -> str | None:
+    """A message invokes the agent when it @mentions the bot or replies to
+    one of the bot's messages."""
+    reply_to = msg.reply_to_message
+    if (
+        reply_to is not None
+        and reply_to.from_user is not None
+        and reply_to.from_user.id == bot_row.tg_bot_id
+    ):
+        return "reply"
+    if bot_row.username and f"@{bot_row.username.lower()}" in text.lower():
+        return "mention"
+    return None
 
 
 async def handle_edited_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) -> None:

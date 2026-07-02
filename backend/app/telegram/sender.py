@@ -14,6 +14,7 @@ async def send_and_persist(
     chat: Chat,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
+    reply_to_message_id: int | None = None,
 ) -> TgMessage:
     """Send a message and store it as source='self'.
 
@@ -21,7 +22,13 @@ async def send_and_persist(
     own — so outbound messages must be persisted at send time or the memory
     would hold one-sided conversations.
     """
-    sent = await bot.send_message(chat.tg_chat_id, text, reply_markup=reply_markup)
+    sent = await bot.send_message(
+        chat.tg_chat_id,
+        text,
+        reply_markup=reply_markup,
+        reply_to_message_id=reply_to_message_id,
+        allow_sending_without_reply=True,
+    )
     session.add(
         Message(
             chat_id=chat.id,

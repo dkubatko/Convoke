@@ -13,7 +13,7 @@ from app.core.security import require_operator
 from app.ingest.history_import import delete_import, run_import
 from app.memory.runtime import get_embedder
 from app.memory.store import search_chat_history
-from app.models import Chat, ImportJob, Message
+from app.models import AgentRun, Chat, ImportJob, Message
 
 router = APIRouter(dependencies=[Depends(require_operator)])
 
@@ -127,6 +127,36 @@ async def list_imports(
         (
             await session.execute(
                 select(ImportJob).where(ImportJob.chat_id == chat_id).order_by(ImportJob.id.desc())
+            )
+        ).scalars()
+    )
+
+
+class RunOut(BaseModel):
+    id: int
+    trigger: str
+    status: str
+    request_text: str
+    response_text: str | None
+    error: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/chats/{chat_id}/runs", response_model=list[RunOut])
+async def list_runs(
+    chat_id: int, limit: int = 20, session: AsyncSession = Depends(get_session)
+) -> list[AgentRun]:
+    await _chat_or_404(session, chat_id)
+    return list(
+        (
+            await session.execute(
+                select(AgentRun)
+                .where(AgentRun.chat_id == chat_id)
+                .order_by(AgentRun.id.desc())
+                .limit(min(limit, 100))
             )
         ).scalars()
     )

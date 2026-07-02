@@ -14,10 +14,12 @@ from app.core.db import (
     get_engine,
     get_sessionmaker,
 )
+from app.agents.loop import AgentLoop
 from app.memory.loop import MemoryLoop
 from app.memory.runtime import get_embedder
 from app.telegram.consumer import InboxConsumer
 from app.telegram.gateway import Gateway
+from app.telegram.limiter import SendLimiter
 
 log = logging.getLogger("convoke.worker")
 
@@ -28,10 +30,13 @@ async def main() -> None:
     log.info("worker started (singleton lock acquired)")
     sessionmaker = get_sessionmaker()
     try:
+        embedder = get_embedder()
+        limiter = SendLimiter()
         async with asyncio.TaskGroup() as tg:
             tg.create_task(Gateway(sessionmaker).run(), name="gateway")
             tg.create_task(InboxConsumer(sessionmaker).run(), name="inbox-consumer")
-            tg.create_task(MemoryLoop(sessionmaker, get_embedder()).run(), name="memory-loop")
+            tg.create_task(MemoryLoop(sessionmaker, embedder).run(), name="memory-loop")
+            tg.create_task(AgentLoop(sessionmaker, embedder, limiter).run(), name="agent-loop")
     finally:
         await lock_conn.close()
         await get_engine().dispose()

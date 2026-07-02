@@ -39,6 +39,8 @@ async def render_chunk_from_raw(session: AsyncSession, chunk: Chunk) -> str:
 async def search_chat_history(
     session: AsyncSession, embedder: Embedder, chat_id: int, query: str, k: int = 6
 ) -> list[SearchHit]:
+    if session.bind.dialect.name != "postgresql":
+        return []  # vector search is Postgres-only; unit tests hit this path
     qvec = await embedder.embed_query(query)
     rows = (
         await session.execute(

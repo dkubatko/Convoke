@@ -24,11 +24,22 @@ interface ImportJob {
   messages_ingested: number
 }
 
+interface Run {
+  id: number
+  trigger: string
+  status: string
+  request_text: string
+  response_text: string | null
+  error: string | null
+  created_at: string
+}
+
 const ACTIVE_STATUSES = ['pending', 'validating', 'ingesting']
 
 export default function ChatPanel({ chatId, title }: { chatId: number; title: string }) {
   const [messages, setMessages] = useState<Msg[]>([])
   const [jobs, setJobs] = useState<ImportJob[]>([])
+  const [runs, setRuns] = useState<Run[]>([])
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<Hit[] | null>(null)
   const [searching, setSearching] = useState(false)
@@ -38,6 +49,7 @@ export default function ChatPanel({ chatId, title }: { chatId: number; title: st
   const refresh = useCallback(() => {
     api.get<Msg[]>(`/api/chats/${chatId}/messages?limit=20`).then(setMessages).catch(() => {})
     api.get<ImportJob[]>(`/api/chats/${chatId}/imports`).then(setJobs).catch(() => {})
+    api.get<Run[]>(`/api/chats/${chatId}/runs?limit=10`).then(setRuns).catch(() => {})
   }, [chatId])
 
   useEffect(() => {
@@ -147,6 +159,28 @@ export default function ChatPanel({ chatId, title }: { chatId: number; title: st
             ))}
           </tbody>
         </table>
+      )}
+
+      {runs.length > 0 && (
+        <>
+          <h4>Agent runs</h4>
+          <table>
+            <thead>
+              <tr><th>When</th><th>Trigger</th><th>Status</th><th>Request</th><th>Response / error</th></tr>
+            </thead>
+            <tbody>
+              {runs.map((r) => (
+                <tr key={r.id}>
+                  <td>{new Date(r.created_at).toLocaleTimeString()}</td>
+                  <td>{r.trigger}</td>
+                  <td>{r.status}</td>
+                  <td className="detail">{r.request_text.slice(0, 80)}</td>
+                  <td className="detail">{(r.error ?? r.response_text ?? '').slice(0, 120)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
 
       <h4>Recent messages</h4>

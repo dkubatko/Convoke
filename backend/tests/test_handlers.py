@@ -26,7 +26,7 @@ class FakeBot:
         self.edited: list[tuple] = []
         self._next_id = 1000
 
-    async def send_message(self, chat_id, text, reply_markup=None):
+    async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
         self._next_id += 1
         msg = TgMessage.model_validate(
             {

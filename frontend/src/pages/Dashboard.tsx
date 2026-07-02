@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '../lib/api'
 import ChatPanel from './ChatPanel'
+import ModelsSection from './ModelsSection'
 
 interface Health {
   status: string
@@ -84,6 +85,7 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
         </button>
       </header>
       <main>
+        <ModelsSection />
         <section>
           <h2>Bots</h2>
           <form className="row" onSubmit={addBot}>

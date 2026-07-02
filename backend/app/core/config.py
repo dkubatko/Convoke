@@ -30,6 +30,10 @@ class Settings(BaseSettings):
 
     imports_dir: str = "/data/imports"
 
+    # Agent context budget in characters (~4 chars per token).
+    context_char_budget: int = 24000
+    agent_concurrency: int = 4
+
 
 @lru_cache
 def get_settings() -> Settings:

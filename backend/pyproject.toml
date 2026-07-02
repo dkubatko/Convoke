@@ -17,6 +17,7 @@ dependencies = [
     "sentence-transformers>=3.0",
     "ijson>=3.3",
     "python-multipart>=0.0.9",
+    "pydantic-ai-slim[mcp,openai]>=2,<3",
 ]
 
 [dependency-groups]
