@@ -1,0 +1,67 @@
+:root {
+  font-family: system-ui, -apple-system, sans-serif;
+  color-scheme: light dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.centered {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  gap: 1rem;
+}
+
+.card {
+  padding: 2rem;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 280px;
+}
+
+.card input {
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  font-size: 1rem;
+}
+
+.card button,
+header button {
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: none;
+  background: #4f6ef7;
+  color: white;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.error {
+  color: #d33;
+  font-size: 0.9rem;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+}
+
+main {
+  padding: 1.5rem;
+}

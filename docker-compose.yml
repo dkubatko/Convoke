@@ -1,0 +1,56 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: convoke
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-convoke}
+      POSTGRES_DB: convoke
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U convoke -d convoke"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      CONVOKE_DATABASE_URL: postgresql+asyncpg://convoke:${POSTGRES_PASSWORD:-convoke}@db:5432/convoke
+      CONVOKE_OPERATOR_PASSWORD: ${CONVOKE_OPERATOR_PASSWORD:?set in .env}
+      CONVOKE_SECRET_KEY: ${CONVOKE_SECRET_KEY:?set in .env}
+      CONVOKE_FERNET_KEY: ${CONVOKE_FERNET_KEY:?set in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    environment:
+      CONVOKE_DATABASE_URL: postgresql+asyncpg://convoke:${POSTGRES_PASSWORD:-convoke}@db:5432/convoke
+      CONVOKE_OPERATOR_PASSWORD: ${CONVOKE_OPERATOR_PASSWORD:?set in .env}
+      CONVOKE_SECRET_KEY: ${CONVOKE_SECRET_KEY:?set in .env}
+      CONVOKE_FERNET_KEY: ${CONVOKE_FERNET_KEY:?set in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${CONVOKE_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pgdata:
