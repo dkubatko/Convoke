@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     context_char_budget: int = 24000
     agent_concurrency: int = 4
 
+    # Intent pipeline
+    intent_lull_seconds: int = 60
+    intent_window_max_messages: int = 30
+    intent_min_llm_interval_seconds: int = 120
+    intent_state_ttl_hours: int = 36
+    confirm_timeout_minutes: int = 60
+
 
 @lru_cache
 def get_settings() -> Settings:

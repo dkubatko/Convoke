@@ -164,6 +164,23 @@ td.detail {
   font-size: 0.8rem;
 }
 
+.wf-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 900px;
+  margin-bottom: 1rem;
+}
+
+.wf-form textarea,
+.wf-form select {
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+
 header {
   display: flex;
   align-items: center;

@@ -49,7 +49,10 @@ class AgentLoop:
     async def run(self) -> None:
         try:
             while True:
-                await self._dispatch_pending()
+                try:
+                    await self._dispatch_pending()
+                except Exception:  # noqa: BLE001 — one bad row must not kill the loop
+                    log.exception("agent dispatch failed")
                 await asyncio.sleep(POLL_S)
         finally:
             for bot in self._bots.values():
@@ -69,7 +72,15 @@ class AgentLoop:
             for run_id, chat_id, bot_id in rows:
                 if run_id in self._in_flight:
                     continue
-                bot = await self._bot_for(session, bot_id)
+                try:
+                    bot = await self._bot_for(session, bot_id)
+                except Exception as e:  # noqa: BLE001 — unusable bot: fail the run, not the loop
+                    log.exception("cannot build bot %s for run %s", bot_id, run_id)
+                    run = await session.get(AgentRun, run_id)
+                    run.status = "error"
+                    run.error = f"bot unusable: {type(e).__name__}: {e}"
+                    await session.commit()
+                    continue
                 self._in_flight.add(run_id)
                 asyncio.create_task(
                     self._run_locked(run_id, chat_id, bot), name=f"agent-run-{run_id}"

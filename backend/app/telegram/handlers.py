@@ -128,6 +128,11 @@ async def handle_callback_query(
     session: AsyncSession, bot: AiogramBot, bot_row: Bot, cb: CallbackQuery
 ) -> None:
     data = cb.data or ""
+    if data.startswith("wf:"):
+        from app.intent.executor import handle_confirm_callback
+
+        await handle_confirm_callback(session, bot, data, cb.from_user.full_name, cb.id)
+        return
     if not data.startswith(AUTH_CALLBACK_PREFIX):
         return
     nonce = data[len(AUTH_CALLBACK_PREFIX) :]

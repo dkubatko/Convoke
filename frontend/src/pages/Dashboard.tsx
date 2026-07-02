@@ -3,6 +3,7 @@ import { api, ApiError } from '../lib/api'
 import ChatPanel from './ChatPanel'
 import McpSection from './McpSection'
 import ModelsSection from './ModelsSection'
+import WorkflowsSection from './WorkflowsSection'
 
 interface Health {
   status: string
@@ -164,6 +165,8 @@ export default function Dashboard({ onLogout }: { onLogout: () => void }) {
             <ChatPanel chatId={selectedChat.id} title={selectedChat.title || String(selectedChat.tg_chat_id)} />
           )}
         </section>
+
+        <WorkflowsSection chats={chats} />
 
         <footer>
           {health

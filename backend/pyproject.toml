@@ -18,6 +18,7 @@ dependencies = [
     "ijson>=3.3",
     "python-multipart>=0.0.9",
     "pydantic-ai-slim[mcp,openai]>=2,<3",
+    "croniter>=6.2.3",
 ]
 
 [dependency-groups]

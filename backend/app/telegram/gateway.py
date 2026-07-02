@@ -108,7 +108,10 @@ class Gateway:
     async def run(self) -> None:
         try:
             while True:
-                await self._reconcile()
+                try:
+                    await self._reconcile()
+                except Exception:  # noqa: BLE001 — reconcile must survive transient failures
+                    log.exception("gateway reconcile failed")
                 await asyncio.sleep(RECONCILE_INTERVAL_S)
         finally:
             for task in self.tasks.values():
@@ -132,9 +135,12 @@ class Gateway:
 
         for bot_id, row in active.items():
             if bot_id not in self.tasks:
-                runner = BotRunner(
-                    bot_id, decrypt(row.token_encrypted), row.next_offset, self.sessionmaker
-                )
+                try:
+                    token = decrypt(row.token_encrypted)
+                except Exception:  # noqa: BLE001 — e.g. Fernet key changed
+                    log.exception("cannot decrypt token for bot %s; not polling it", bot_id)
+                    continue
+                runner = BotRunner(bot_id, token, row.next_offset, self.sessionmaker)
                 self.tasks[bot_id] = asyncio.create_task(
                     runner.run(), name=f"bot-poll-{bot_id}"
                 )

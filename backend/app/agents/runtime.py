@@ -28,8 +28,7 @@ MAX_REPLY_PARTS = 3
 
 INSTRUCTIONS_TEMPLATE = """\
 You are {bot_name} (@{bot_username}), an assistant participating in the Telegram \
-group chat "{chat_title}". You were invoked by a member's message (shown last in \
-the recent messages).
+group chat "{chat_title}". {invocation_line}
 
 - Answer directly and conversationally; this is a group chat, keep it brief.
 - Write plain text only: no markdown, no HTML tags, no code fences.
@@ -105,11 +104,22 @@ async def execute_run(
         )
         mcp_toolsets = await toolsets_for_chat(session, chat.id)
 
+    is_workflow = run.trigger == "workflow"
     instructions = INSTRUCTIONS_TEMPLATE.format(
         bot_name=bot_row.name,
         bot_username=bot_row.username,
         chat_title=chat.title or "this chat",
+        invocation_line=(
+            "You were triggered by an automated workflow; carry out the task given "
+            "at the end of the prompt, using tools as needed, then post a short "
+            "summary of what you did."
+            if is_workflow
+            else "You were invoked by a member's message (shown last in the recent messages)."
+        ),
     )
+    user_prompt = prompt_context
+    if is_workflow:
+        user_prompt = f"{prompt_context}\n\n## Task\n{run.request_text}"
     agent = build_agent(build_model(provider), instructions, mcp_toolsets + list(extra_toolsets or []))
     deps = AgentDeps(sessionmaker=sessionmaker, embedder=embedder, chat_id=chat.id, run_id=run_id)
 
@@ -122,7 +132,7 @@ async def execute_run(
         # MCP connections open for exactly the duration of the run.
         async with AsyncExitStack() as stack:
             await stack.enter_async_context(agent)
-            result = await agent.run(prompt_context, deps=deps)
+            result = await agent.run(user_prompt, deps=deps)
         reply_text = (result.output or "").strip() or "(no reply)"
     except Exception as e:  # noqa: BLE001 — any model/tool failure ends the run
         log.exception("agent run %s failed", run_id)

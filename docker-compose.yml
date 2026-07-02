@@ -1,6 +1,7 @@
 services:
   db:
     image: pgvector/pgvector:pg17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: convoke
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-convoke}
@@ -15,6 +16,7 @@ services:
 
   backend:
     build: ./backend
+    restart: unless-stopped
     environment:
       CONVOKE_DATABASE_URL: postgresql+asyncpg://convoke:${POSTGRES_PASSWORD:-convoke}@db:5432/convoke
       CONVOKE_OPERATOR_PASSWORD: ${CONVOKE_OPERATOR_PASSWORD:?set in .env}
@@ -35,6 +37,7 @@ services:
 
   worker:
     build: ./backend
+    restart: unless-stopped
     command: ["python", "-m", "app.worker"]
     environment:
       CONVOKE_DATABASE_URL: postgresql+asyncpg://convoke:${POSTGRES_PASSWORD:-convoke}@db:5432/convoke
@@ -51,6 +54,7 @@ services:
 
   frontend:
     build: ./frontend
+    restart: unless-stopped
     ports:
       - "${CONVOKE_PORT:-8080}:80"
     depends_on:

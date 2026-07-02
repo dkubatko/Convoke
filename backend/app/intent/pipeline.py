@@ -1,0 +1,270 @@
+"""Intent sweeper: stages 0–3 of the trigger pipeline.
+
+Stage 0 — free gates: only authorized chats with assigned, enabled intent
+workflows; windows close on a lull or at N messages; per-state cooldowns and
+an LLM-call circuit breaker.
+Stage 1 — embedding prefilter against generated example utterances (loose).
+Stage 2 — cheap-LLM structured classification with slot updates/retractions.
+Stage 3 — persisted convergence state; on convergence, write a PendingFire.
+"""
+
+import logging
+from datetime import datetime, timedelta, timezone
+
+from pydantic_ai import Agent
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.agents.models import ProviderNotConfigured, build_model, get_provider
+from app.core.config import get_settings
+from app.intent.examples import dot, load_positive_vectors
+from app.intent.schemas import IntentVerdict
+from app.intent.state import apply_verdict, decay_state, is_converged, render_slots
+from app.memory.chunker import render_message
+from app.memory.embeddings import Embedder
+from app.models import (
+    Chat,
+    ChatEvalState,
+    Message,
+    PendingFire,
+    TriggerState,
+    Workflow,
+    WorkflowAssignment,
+)
+
+log = logging.getLogger("convoke.intent")
+
+CLASSIFY_PROMPT = """\
+You watch a group chat for this intent:
+"{trigger_prompt}"
+
+Slots to extract as the conversation converges:
+{slots_desc}
+
+Currently accumulated slot state from earlier messages:
+{current_slots}
+
+New conversation window:
+{window}
+
+Decide whether this window advances the intent, and extract slot updates.
+Emit a retraction (value=null) when the group walks back a previous value
+("actually let's do Wednesday instead"). Only extract values members actually
+converged on, not proposals still under discussion.
+"""
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+class IntentSweeper:
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], embedder: Embedder) -> None:
+        self.sessionmaker = sessionmaker
+        self.embedder = embedder
+        self.settings = get_settings()
+
+    async def sweep(self, now: datetime | None = None) -> int:
+        """One pass over all eligible chats; returns number of windows evaluated."""
+        now = now or datetime.now(timezone.utc)
+        evaluated = 0
+        async with self.sessionmaker() as session:
+            chat_ids = (
+                (
+                    await session.execute(
+                        select(Chat.id)
+                        .join(WorkflowAssignment, WorkflowAssignment.chat_id == Chat.id)
+                        .join(Workflow, Workflow.id == WorkflowAssignment.workflow_id)
+                        .where(
+                            Chat.status == "authorized",
+                            Workflow.type == "intent",
+                            Workflow.enabled.is_(True),
+                        )
+                        .distinct()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for chat_id in chat_ids:
+            evaluated += await self._sweep_chat(chat_id, now)
+        return evaluated
+
+    async def _sweep_chat(self, chat_id: int, now: datetime) -> int:
+        async with self.sessionmaker() as session:
+            state = await session.get(ChatEvalState, chat_id)
+            if state is None:
+                state = ChatEvalState(chat_id=chat_id, last_tg_message_id=0)
+                session.add(state)
+                await session.commit()
+
+            messages = (
+                (
+                    await session.execute(
+                        select(Message)
+                        .where(
+                            Message.chat_id == chat_id,
+                            Message.tg_message_id > state.last_tg_message_id,
+                            Message.source != "self",  # never trigger on our own replies
+                        )
+                        .order_by(Message.tg_message_id)
+                        .limit(200)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not messages:
+                return 0
+
+            last_at = _as_utc(messages[-1].sent_at)
+            window_ready = (
+                len(messages) >= self.settings.intent_window_max_messages
+                or (now - last_at).total_seconds() >= self.settings.intent_lull_seconds
+            )
+            if not window_ready:
+                return 0
+
+            # Partition by thread (forum topics interleave unrelated talk).
+            by_thread: dict[int, list[Message]] = {}
+            for m in messages:
+                by_thread.setdefault(m.thread_id or 0, []).append(m)
+
+            workflows = (
+                (
+                    await session.execute(
+                        select(Workflow)
+                        .join(WorkflowAssignment, WorkflowAssignment.workflow_id == Workflow.id)
+                        .where(
+                            WorkflowAssignment.chat_id == chat_id,
+                            Workflow.type == "intent",
+                            Workflow.enabled.is_(True),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+            evaluated = 0
+            for thread_key, window in by_thread.items():
+                window = window[-self.settings.intent_window_max_messages :]
+                rendered = "\n".join(render_message(m) for m in window)
+                window_vec = (await self.embedder.embed_passages([rendered]))[0]
+                for wf in workflows:
+                    evaluated += await self._evaluate(
+                        session, wf, chat_id, thread_key, window, rendered, window_vec, now
+                    )
+
+            state.last_tg_message_id = messages[-1].tg_message_id
+            await session.commit()
+            return evaluated
+
+    async def _evaluate(
+        self,
+        session: AsyncSession,
+        wf: Workflow,
+        chat_id: int,
+        thread_key: int,
+        window: list[Message],
+        rendered: str,
+        window_vec: list[float],
+        now: datetime,
+    ) -> int:
+        tstate = (
+            await session.execute(
+                select(TriggerState).where(
+                    TriggerState.workflow_id == wf.id,
+                    TriggerState.chat_id == chat_id,
+                    TriggerState.thread_key == thread_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if tstate is None:
+            tstate = TriggerState(workflow_id=wf.id, chat_id=chat_id, thread_key=thread_key)
+            session.add(tstate)
+
+        cooldown_until = _as_utc(tstate.cooldown_until)
+        if cooldown_until is not None and cooldown_until > now:
+            return 0
+
+        # Stage 1: prefilter (skipped when the state is mid-accumulation —
+        # follow-ups like "ok wednesday then" may not resemble the examples).
+        if not tstate.slots:
+            positives = await load_positive_vectors(session, wf.id)
+            if positives:
+                best = max(dot(window_vec, p) for p in positives)
+                if best < (wf.threshold or 0.8):
+                    return 0
+
+        # LLM circuit breaker
+        last_llm = _as_utc(tstate.last_llm_at)
+        if last_llm is not None and (now - last_llm).total_seconds() < self.settings.intent_min_llm_interval_seconds:
+            return 0
+
+        verdict = await self._classify(session, wf, tstate, rendered)
+        tstate.last_llm_at = now
+        if verdict is None:
+            return 1
+
+        slots = decay_state(
+            dict(tstate.slots or {}),
+            _as_utc(tstate.last_match_at),
+            now,
+            timedelta(hours=self.settings.intent_state_ttl_hours),
+        )
+        slots = apply_verdict(slots, verdict, now, window[-1].tg_message_id)
+        tstate.slots = slots
+        if verdict.match:
+            tstate.last_match_at = now
+
+        if (
+            verdict.match
+            and verdict.confidence >= 0.7
+            and is_converged(wf.required_slots or [], slots)
+        ):
+            session.add(
+                PendingFire(
+                    workflow_id=wf.id,
+                    chat_id=chat_id,
+                    thread_key=thread_key,
+                    slots=slots,
+                    status="pending",
+                )
+            )
+            tstate.slots = {}
+            tstate.cooldown_until = now + timedelta(seconds=wf.cooldown_seconds)
+            log.info("workflow %s converged in chat %s: %s", wf.id, chat_id, render_slots(slots))
+        return 1
+
+    async def _classify(
+        self, session: AsyncSession, wf: Workflow, tstate: TriggerState, rendered: str
+    ) -> IntentVerdict | None:
+        try:
+            provider = await get_provider(session, "intent")
+        except ProviderNotConfigured:
+            try:
+                provider = await get_provider(session, "agent")
+            except ProviderNotConfigured:
+                log.warning("no intent/agent model configured; skipping classification")
+                return None
+        slots_desc = (
+            "\n".join(f"- {s['name']}: {s.get('description', '')}" for s in wf.required_slots or [])
+            or "(none)"
+        )
+        agent = Agent(build_model(provider), output_type=IntentVerdict)
+        try:
+            result = await agent.run(
+                CLASSIFY_PROMPT.format(
+                    trigger_prompt=wf.trigger_prompt,
+                    slots_desc=slots_desc,
+                    current_slots=render_slots(tstate.slots or {}),
+                    window=rendered,
+                )
+            )
+        except Exception:  # noqa: BLE001 — classifier failures must not stop the sweep
+            log.exception("intent classification failed for workflow %s", wf.id)
+            return None
+        return result.output

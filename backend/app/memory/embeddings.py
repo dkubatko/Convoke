@@ -57,15 +57,17 @@ class LocalEmbedder:
 
 
 class FakeEmbedder:
-    """Deterministic toy embedder for tests: bag-of-character-buckets."""
+    """Deterministic toy embedder for tests: position-independent character
+    bigram histogram, so texts sharing words score high regardless of offset."""
 
     def __init__(self, dim: int = 384) -> None:
         self.dim = dim
 
     def _one(self, text: str) -> list[float]:
         v = [0.0] * self.dim
-        for i, ch in enumerate(text.lower()):
-            v[(ord(ch) * 31 + i) % self.dim] += 1.0
+        t = text.lower()
+        for a, b in zip(t, t[1:]):
+            v[(ord(a) * 31 + ord(b)) % self.dim] += 1.0
         norm = sum(x * x for x in v) ** 0.5 or 1.0
         return [x / norm for x in v]
 

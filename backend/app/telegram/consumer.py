@@ -41,7 +41,11 @@ class InboxConsumer:
     async def run(self) -> None:
         try:
             while True:
-                processed = await self._drain_batch()
+                try:
+                    processed = await self._drain_batch()
+                except Exception:  # noqa: BLE001 — consumer must survive transient failures
+                    log.exception("inbox drain failed")
+                    processed = 0
                 if processed == 0:
                     await asyncio.sleep(IDLE_SLEEP_S)
         finally:

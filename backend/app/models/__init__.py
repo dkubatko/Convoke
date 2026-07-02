@@ -3,6 +3,14 @@ from app.models.base import Base
 from app.models.mcp import ChatMcpServer, McpServer
 from app.models.memory import Chunk, ChunkState, ImportJob
 from app.models.telegram import AuthNonce, Bot, Chat, InboxUpdate, Message
+from app.models.workflows import (
+    ChatEvalState,
+    PendingFire,
+    TriggerState,
+    Workflow,
+    WorkflowAssignment,
+    WorkflowExample,
+)
 
 __all__ = [
     "Base",
@@ -10,6 +18,7 @@ __all__ = [
     "AuthNonce",
     "Bot",
     "Chat",
+    "ChatEvalState",
     "ChatMcpServer",
     "Chunk",
     "ChunkState",
@@ -19,4 +28,9 @@ __all__ = [
     "Message",
     "ModelProvider",
     "Note",
+    "PendingFire",
+    "TriggerState",
+    "Workflow",
+    "WorkflowAssignment",
+    "WorkflowExample",
 ]
