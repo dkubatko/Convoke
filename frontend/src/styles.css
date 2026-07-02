@@ -54,6 +54,64 @@ header button {
   font-size: 0.9rem;
 }
 
+.ok {
+  color: #2a9d4a;
+}
+
+.warn {
+  color: #d68000;
+}
+
+.row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.row input {
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  font-size: 1rem;
+}
+
+.row button,
+table button {
+  padding: 0.4rem 0.7rem;
+  border-radius: 8px;
+  border: none;
+  background: #4f6ef7;
+  color: white;
+  cursor: pointer;
+}
+
+table button.danger {
+  background: #c74444;
+}
+
+section {
+  margin-bottom: 2rem;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 900px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+}
+
+footer {
+  opacity: 0.65;
+  font-size: 0.85rem;
+}
+
 header {
   display: flex;
   align-items: center;

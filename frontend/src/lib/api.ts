@@ -22,8 +22,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return resp.json() as Promise<T>
 }
 
+async function requestVoid(path: string, init?: RequestInit): Promise<void> {
+  const resp = await fetch(path, { credentials: 'same-origin', ...init })
+  if (!resp.ok) throw new ApiError(resp.status, resp.statusText)
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) }),
+  delete: (path: string) => requestVoid(path, { method: 'DELETE' }),
 }

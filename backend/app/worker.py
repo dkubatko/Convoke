@@ -1,14 +1,21 @@
-"""Convoke worker: singleton process for DB-driven consumers.
+"""Convoke worker: singleton process for Telegram polling and DB-driven consumers.
 
-Will host (from M2 onward): inbox consumers, embedding pipeline, intent
-trigger evaluation, agent runs, and the scheduled-workflow tick loop.
-For now it holds the singleton lock and heartbeats.
+Hosts the per-bot getUpdates gateway and the inbox consumer. Later milestones
+add: embedding pipeline, intent trigger evaluation, agent runs, and the
+scheduled-workflow tick loop.
 """
 
 import asyncio
 import logging
 
-from app.core.db import SINGLETON_LOCK_WORKER, acquire_singleton_lock, get_engine
+from app.core.db import (
+    SINGLETON_LOCK_WORKER,
+    acquire_singleton_lock,
+    get_engine,
+    get_sessionmaker,
+)
+from app.telegram.consumer import InboxConsumer
+from app.telegram.gateway import Gateway
 
 log = logging.getLogger("convoke.worker")
 
@@ -17,10 +24,11 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     lock_conn = await acquire_singleton_lock(SINGLETON_LOCK_WORKER)
     log.info("worker started (singleton lock acquired)")
+    sessionmaker = get_sessionmaker()
     try:
-        while True:
-            await asyncio.sleep(30)
-            log.info("heartbeat")
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(Gateway(sessionmaker).run(), name="gateway")
+            tg.create_task(InboxConsumer(sessionmaker).run(), name="inbox-consumer")
     finally:
         await lock_conn.close()
         await get_engine().dispose()
