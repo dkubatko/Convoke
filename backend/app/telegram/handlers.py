@@ -5,7 +5,9 @@ sends, and the Bot row. Handlers must be idempotent: an update may be
 re-processed after a crash between handling and the processed_at mark.
 """
 
+import html
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -43,6 +45,9 @@ def _as_utc(dt: datetime) -> datetime:
 
 
 async def handle_update(session: AsyncSession, bot: AiogramBot, bot_row: Bot, update: Update) -> None:
+    if update.message is not None and update.message.migrate_to_chat_id is not None:
+        await _handle_migration(session, bot_row, update.message)
+        return
     if update.my_chat_member is not None:
         await handle_my_chat_member(session, bot, bot_row, update.my_chat_member)
     elif update.callback_query is not None:
@@ -51,6 +56,27 @@ async def handle_update(session: AsyncSession, bot: AiogramBot, bot_row: Bot, up
         await handle_edited_message(session, bot_row, update.edited_message)
     elif update.message is not None:
         await handle_message(session, bot_row, update.message)
+
+
+async def _handle_migration(session: AsyncSession, bot_row: Bot, msg: TgMessage) -> None:
+    """A basic group upgraded to a supergroup: Telegram issues a service
+    message with migrate_to_chat_id and all future updates use the new id.
+    Rewrite the existing chat's id so its stored messages, memory, and
+    workflow assignments follow, instead of stranding on the dead id."""
+    old_id = msg.chat.id
+    new_id = msg.migrate_to_chat_id
+    chat = await _get_chat(session, bot_row, old_id)
+    if chat is None:
+        return
+    # If a chat row for the new id already exists (rare: we saw new-id updates
+    # first), keep it and drop the old one to avoid a unique-constraint clash.
+    existing_new = await _get_chat(session, bot_row, new_id)
+    if existing_new is not None:
+        await session.delete(chat)
+        return
+    chat.tg_chat_id = new_id
+    chat.type = "supergroup"
+    log.info("chat %s migrated %s -> %s", chat.id, old_id, new_id)
 
 
 async def _get_chat(session: AsyncSession, bot_row: Bot, tg_chat_id: int) -> Chat | None:
@@ -170,7 +196,7 @@ async def handle_callback_query(
             await bot.edit_message_text(
                 chat_id=chat.tg_chat_id,
                 message_id=nonce_row.tg_message_id,
-                text=f"✅ Convoke authorized by {cb.from_user.full_name}. "
+                text=f"✅ Convoke authorized by {html.escape(cb.from_user.full_name)}. "
                 "This chat's messages are now part of the assistant's memory.",
             )
         except Exception:  # noqa: BLE001 — cosmetic edit; authorization already stands
@@ -235,8 +261,14 @@ def _agent_trigger(msg: TgMessage, bot_row: Bot, text: str) -> str | None:
         and reply_to.from_user.id == bot_row.tg_bot_id
     ):
         return "reply"
-    if bot_row.username and f"@{bot_row.username.lower()}" in text.lower():
-        return "mention"
+    # Word-boundary match so "@mybot" doesn't fire on "@mybotnews". Telegram
+    # usernames are [A-Za-z0-9_], so a trailing such char means a longer name.
+    if bot_row.username:
+        handle = f"@{bot_row.username.lower()}"
+        for m in re.finditer(re.escape(handle), text.lower()):
+            after = text[m.end() : m.end() + 1]
+            if not (after.isalnum() or after == "_"):
+                return "mention"
     return None
 
 

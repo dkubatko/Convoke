@@ -122,10 +122,14 @@ function MemoryTab({ chatId }: { chatId: number }) {
       danger: true,
     })
     if (!ok) return
-    const result = await api.post<{ deleted_messages: number }>(`/api/chats/${chatId}/forget`, body)
-    toast('ok', `Forgot ${result.deleted_messages} message${result.deleted_messages === 1 ? '' : 's'}`)
-    setForgetSender('')
-    void messages.refetch()
+    try {
+      const result = await api.post<{ deleted_messages: number }>(`/api/chats/${chatId}/forget`, body)
+      toast('ok', `Forgot ${result.deleted_messages} message${result.deleted_messages === 1 ? '' : 's'}`)
+      setForgetSender('')
+      void messages.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t forget those messages')
+    }
   }
 
   return (
@@ -217,13 +221,14 @@ function MemoryTab({ chatId }: { chatId: number }) {
         <div className="row">
           <input
             style={{ width: 160 }}
+            type="number"
             placeholder="Sender id"
             value={forgetSender}
             onChange={(e) => setForgetSender(e.target.value)}
           />
           <button
             className="btn btn--quiet"
-            disabled={!forgetSender}
+            disabled={!forgetSender || !Number.isFinite(Number(forgetSender))}
             onClick={() => void forget({ sender_id: Number(forgetSender) }, `everything from sender ${forgetSender}`)}
           >
             Forget sender
@@ -260,15 +265,20 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
   }, [workflows.data])
 
   async function toggle(wf: ChatWorkflow, on: boolean) {
-    const previous = assignedIds
-    const next = on ? [...previous, wf.id] : previous.filter((id) => id !== wf.id)
-    setAssignedIds(next)
+    // Compute the full next set from the latest state inside the updater so
+    // concurrent toggles compose (the PUT replaces the whole list); rollback
+    // touches only this id rather than restoring a stale snapshot.
+    let next: number[] = []
+    setAssignedIds((ids) => {
+      next = on ? [...ids, wf.id] : ids.filter((id) => id !== wf.id)
+      return next
+    })
     try {
       await api.put(`/api/chats/${chatId}/workflows`, next)
       toast('ok', on ? `${wf.name} now watches this chat` : `${wf.name} no longer watches this chat`)
       void workflows.refetch()
     } catch (err) {
-      setAssignedIds(previous)
+      setAssignedIds((ids) => (on ? ids.filter((id) => id !== wf.id) : [...ids, wf.id]))
       toast('err', err instanceof ApiError ? err.message : 'Couldn\u2019t update the assignment')
     }
   }
@@ -551,9 +561,13 @@ function ImportTab({ chatId }: { chatId: number }) {
       danger: true,
     })
     if (!ok) return
-    const result = await api.delete<{ deleted_messages: number }>(`/api/imports/${job.id}/messages`)
-    toast('ok', `Deleted ${result.deleted_messages} imported messages`)
-    void jobs.refetch()
+    try {
+      const result = await api.delete<{ deleted_messages: number }>(`/api/imports/${job.id}/messages`)
+      toast('ok', `Deleted ${result.deleted_messages} imported messages`)
+      void jobs.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t delete the import')
+    }
   }
 
   return (
@@ -623,19 +637,37 @@ function ToolsTab({ chatId }: { chatId: number }) {
   const toast = useToast()
   const servers = useQuery<McpServer[]>(() => api.get('/api/mcp-servers'), [])
   const enabled = useQuery<number[]>(() => api.get(`/api/chats/${chatId}/mcp`), [chatId])
+  // Local source of truth for the assignment set, reconciled from the server.
+  // The PUT replaces the whole list, so we must never build it from a stale or
+  // failed GET — that would wipe every other assignment.
+  const [assigned, setAssigned] = useState<number[]>([])
+  useEffect(() => {
+    if (enabled.data) setAssigned(enabled.data)
+  }, [enabled.data])
 
   async function toggle(serverId: number, on: boolean) {
-    const current = enabled.data ?? []
-    const next = on ? [...current, serverId] : current.filter((i) => i !== serverId)
+    const previous = assigned
+    const next = on ? [...previous, serverId] : previous.filter((i) => i !== serverId)
+    setAssigned(next)
     try {
       await api.put(`/api/chats/${chatId}/mcp`, next)
-      void enabled.refetch()
     } catch (err) {
+      setAssigned(previous)
       toast('err', err instanceof ApiError ? err.message : 'Couldn’t update tools')
     }
   }
 
   if (servers.loading || enabled.loading) return <CardSkeleton lines={3} />
+  if (servers.error || enabled.error)
+    return (
+      <ErrorNote
+        message={servers.error ?? enabled.error!}
+        onRetry={() => {
+          void servers.refetch()
+          void enabled.refetch()
+        }}
+      />
+    )
 
   return (
     <Card title="Tools available to this chat's agent">
@@ -652,7 +684,7 @@ function ToolsTab({ chatId }: { chatId: number }) {
               <input
                 type="checkbox"
                 style={{ width: 'auto' }}
-                checked={(enabled.data ?? []).includes(s.id)}
+                checked={assigned.includes(s.id)}
                 onChange={(e) => void toggle(s.id, e.target.checked)}
                 disabled={!s.enabled}
               />

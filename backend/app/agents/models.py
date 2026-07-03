@@ -29,13 +29,28 @@ async def get_provider(session: AsyncSession, role: str) -> ModelProvider:
     return provider
 
 
+# Each OpenAIProvider owns an AsyncOpenAI/httpx client. The intent sweeper
+# builds one per (workflow × window) evaluation, so without caching the
+# long-running worker leaks connection pools forever. Key on the config that
+# defines the client; invalidate implicitly when any field changes.
+_model_cache: dict[tuple[str, str, str], OpenAIChatModel] = {}
+
+
 def build_model(provider: ModelProvider) -> OpenAIChatModel:
     """Any OpenAI-compatible endpoint: Ollama, LM Studio, OpenRouter, OpenAI…"""
     api_key = decrypt(provider.api_key_encrypted) if provider.api_key_encrypted else "unused"
-    return OpenAIChatModel(
-        provider.model_name,
-        provider=OpenAIProvider(base_url=provider.base_url, api_key=api_key),
-    )
+    key = (provider.base_url, provider.model_name, api_key)
+    cached = _model_cache.get(key)
+    if cached is None:
+        cached = OpenAIChatModel(
+            provider.model_name,
+            provider=OpenAIProvider(base_url=provider.base_url, api_key=api_key),
+        )
+        # Bound the cache: a handful of role/config combos in practice.
+        if len(_model_cache) > 16:
+            _model_cache.clear()
+        _model_cache[key] = cached
+    return cached
 
 
 async def probe_endpoint(base_url: str, model_name: str, api_key: str | None) -> tuple[bool, str]:

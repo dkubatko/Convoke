@@ -153,7 +153,17 @@ class BotRunner:
                 )
             ).scalars().all()
             for chat_id in chat_ids:
-                session.add(MemoryGap(chat_id=chat_id, gap_start=last, gap_end=now))
+                # A crash-restart loop while offline must not write the same
+                # gap once per restart: skip if this gap_start is recorded.
+                existing = (
+                    await session.execute(
+                        select(MemoryGap.id).where(
+                            MemoryGap.chat_id == chat_id, MemoryGap.gap_start == last
+                        )
+                    )
+                ).first()
+                if existing is None:
+                    session.add(MemoryGap(chat_id=chat_id, gap_start=last, gap_end=now))
             await session.commit()
             if chat_ids:
                 log.warning(

@@ -103,82 +103,95 @@ async def execute_run(
             )
             return
 
-        prompt_context = await assemble_context(
-            session, embedder, chat, run.request_text, thread_id=run.thread_id
-        )
-        mcp_toolsets = await toolsets_for_chat(session, chat.id)
-
     is_workflow = run.trigger == "workflow"
-    instructions = INSTRUCTIONS_TEMPLATE.format(
-        bot_name=bot_row.name,
-        bot_username=bot_row.username,
-        chat_title=chat.title or "this chat",
-        invocation_line=(
-            "You were triggered by an automated workflow; carry out the task given "
-            "at the end of the prompt, using tools as needed, then post a short "
-            "summary of what you did."
-            if is_workflow
-            else "You were invoked by a member's message (shown last in the recent messages)."
-        ),
-    )
-    user_prompt = prompt_context
-    if is_workflow:
-        user_prompt = f"{prompt_context}\n\n## Task\n{run.request_text}"
-    agent = build_agent(build_model(provider), instructions, mcp_toolsets + list(extra_toolsets or []))
-    deps = AgentDeps(sessionmaker=sessionmaker, embedder=embedder, chat_id=chat.id, run_id=run_id)
+    thread_id = run.thread_id
+    trigger_message_id = run.trigger_tg_message_id
+    request_text = run.request_text
 
+    # Everything past the 'running' commit is guarded: a failure in context
+    # assembly, MCP setup, the model call, OR the reply send must mark the run
+    # error and (best-effort) notify — otherwise it shows 'running' forever.
     try:
-        await bot.send_chat_action(chat.tg_chat_id, "typing")
-    except Exception:  # noqa: BLE001 — cosmetic
-        pass
+        async with sessionmaker() as session:
+            # chat/bot_row from the first block are detached but readable;
+            # re-attach chat for the queries these helpers run.
+            chat = await session.get(Chat, chat.id)
+            prompt_context = await assemble_context(
+                session, embedder, chat, request_text, thread_id=thread_id
+            )
+            mcp_toolsets = await toolsets_for_chat(session, chat.id)
 
-    try:
+        instructions = INSTRUCTIONS_TEMPLATE.format(
+            bot_name=bot_row.name,
+            bot_username=bot_row.username,
+            chat_title=chat.title or "this chat",
+            invocation_line=(
+                "You were triggered by an automated workflow; carry out the task given "
+                "at the end of the prompt, using tools as needed, then post a short "
+                "summary of what you did."
+                if is_workflow
+                else "You were invoked by a member's message (shown last in the recent messages)."
+            ),
+        )
+        user_prompt = prompt_context
+        if is_workflow:
+            user_prompt = f"{prompt_context}\n\n## Task\n{request_text}"
+        agent = build_agent(
+            build_model(provider), instructions, mcp_toolsets + list(extra_toolsets or [])
+        )
+        deps = AgentDeps(
+            sessionmaker=sessionmaker, embedder=embedder, chat_id=chat.id, run_id=run_id
+        )
+
+        try:
+            await bot.send_chat_action(chat.tg_chat_id, "typing", message_thread_id=thread_id)
+        except Exception:  # noqa: BLE001 — cosmetic
+            pass
+
         # MCP connections open for exactly the duration of the run.
         async with AsyncExitStack() as stack:
             await stack.enter_async_context(agent)
             result = await agent.run(user_prompt, deps=deps)
         reply_text = (result.output or "").strip() or "(no reply)"
-    except Exception as e:  # noqa: BLE001 — any model/tool failure ends the run
+
+        async with sessionmaker() as session:
+            run = await session.get(AgentRun, run_id)
+            chat = await session.get(Chat, run.chat_id)
+            for part in split_reply(reply_text):
+                await limiter.acquire(chat.bot_id, chat.tg_chat_id)
+                await _send(
+                    session, bot, chat, part,
+                    reply_to=trigger_message_id, thread_id=thread_id,
+                )
+            run.status = "done"
+            run.response_text = reply_text
+            run.finished_at = datetime.now(timezone.utc)
+            await session.commit()
+    except Exception as e:  # noqa: BLE001 — any failure ends the run cleanly
         log.exception("agent run %s failed", run_id)
         async with sessionmaker() as session:
             run = await session.get(AgentRun, run_id)
-            await _fail(
-                session,
-                run,
-                f"{type(e).__name__}: {e}",
-                bot,
-                limiter,
-                bot_row,
-                chat,
-                # Silence reads as a crash — always leave a trace in the chat.
-                notify="Something went wrong and I couldn't finish that. "
-                "The details are in Convoke's run log.",
-            )
-        return
-
-    async with sessionmaker() as session:
-        run = await session.get(AgentRun, run_id)
-        chat = await session.get(Chat, run.chat_id)
-        for part in split_reply(reply_text):
-            await limiter.acquire(chat.bot_id, chat.tg_chat_id)
-            await _send(session, bot, chat, part, reply_to=run.trigger_tg_message_id)
-        run.status = "done"
-        run.response_text = reply_text
-        run.finished_at = datetime.now(timezone.utc)
-        await session.commit()
+            if run is not None and run.status == "running":
+                chat = await session.get(Chat, run.chat_id)
+                await _fail(
+                    session, run, f"{type(e).__name__}: {e}", bot, limiter, bot_row, chat,
+                    # Silence reads as a crash — always leave a trace in the chat.
+                    notify="Something went wrong and I couldn't finish that. "
+                    "The details are in Convoke's run log.",
+                )
 
 
-async def _send(session, bot, chat, text: str, reply_to: int | None = None):
+async def _send(session, bot, chat, text: str, reply_to: int | None = None, thread_id: int | None = None):
     # Agent output is untrusted for HTML parse mode — escape it (renders as
     # the original characters, but can never break parsing).
     try:
         return await send_and_persist(
-            session, bot, chat, html.escape(text), reply_to_message_id=reply_to
+            session, bot, chat, html.escape(text), reply_to_message_id=reply_to, thread_id=thread_id
         )
     except TelegramRetryAfter as e:
         await asyncio.sleep(e.retry_after)
         return await send_and_persist(
-            session, bot, chat, html.escape(text), reply_to_message_id=reply_to
+            session, bot, chat, html.escape(text), reply_to_message_id=reply_to, thread_id=thread_id
         )
 
 
@@ -189,7 +202,10 @@ async def _fail(session, run, error: str, bot, limiter, bot_row, chat, notify: s
     if notify:
         try:
             await limiter.acquire(chat.bot_id, chat.tg_chat_id)
-            await _send(session, bot, chat, notify, reply_to=run.trigger_tg_message_id)
+            await _send(
+                session, bot, chat, notify,
+                reply_to=run.trigger_tg_message_id, thread_id=run.thread_id,
+            )
         except Exception:  # noqa: BLE001 — recording the failure matters more
             log.warning("could not send failure notice to chat %s", chat.tg_chat_id)
     await session.commit()

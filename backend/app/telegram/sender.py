@@ -15,18 +15,24 @@ async def send_and_persist(
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
     reply_to_message_id: int | None = None,
+    thread_id: int | None = None,
 ) -> TgMessage:
     """Send a message and store it as source='self'.
 
     Bots never receive other bots' messages via getUpdates — including their
     own — so outbound messages must be persisted at send time or the memory
     would hold one-sided conversations.
+
+    thread_id routes the message to the right forum topic; without it,
+    workflow confirmations and workflow-run replies (which have no reply_to)
+    land in the supergroup's General topic instead of where the intent arose.
     """
     sent = await bot.send_message(
         chat.tg_chat_id,
         text,
         reply_markup=reply_markup,
         reply_to_message_id=reply_to_message_id,
+        message_thread_id=thread_id,
         allow_sending_without_reply=True,
     )
     session.add(

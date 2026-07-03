@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import { useToast } from './components/Toast'
@@ -15,6 +15,8 @@ import Workflows from './pages/Workflows'
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
+  const authedRef = useRef<boolean | null>(null)
+  authedRef.current = authed
   const toast = useToast()
 
   useEffect(() => {
@@ -26,10 +28,10 @@ export default function App() {
 
   useEffect(() => {
     const onUnauthorized = () => {
-      setAuthed((was) => {
-        if (was) toast('info', 'Your session expired — sign in again.')
-        return false
-      })
+      // Read state via ref and toast OUTSIDE the setState updater — updaters
+      // must be pure (StrictMode double-invokes them, duplicating the toast).
+      if (authedRef.current) toast('info', 'Your session expired — sign in again.')
+      setAuthed(false)
     }
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized)

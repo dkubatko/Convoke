@@ -306,6 +306,24 @@ async def _run_import(
     # Imported history predates the chunk cursor — rebuild memory for the chat.
     async with sessionmaker() as session:
         await reset_chat_memory(session, chat.id)
+        # The intent sweeper must never treat imported history as fresh
+        # conversation: in a chat with no live traffic yet its cursor is 0,
+        # and without this bump every historical window would be evaluated —
+        # potentially firing workflows on conversations from months ago.
+        from sqlalchemy import func as sa_func
+
+        from app.models import ChatEvalState
+
+        max_tg_id = (
+            await session.execute(
+                select(sa_func.max(Message.tg_message_id)).where(Message.chat_id == chat.id)
+            )
+        ).scalar() or 0
+        eval_state = await session.get(ChatEvalState, chat.id)
+        if eval_state is None:
+            session.add(ChatEvalState(chat_id=chat.id, last_tg_message_id=max_tg_id))
+        else:
+            eval_state.last_tg_message_id = max(eval_state.last_tg_message_id, max_tg_id)
         job_row = await session.get(ImportJob, job_id)
         job_row.status = "done"
         job_row.messages_total = total

@@ -54,7 +54,13 @@ export default function Layout({ onSignOut }: { onSignOut: () => void }) {
           <button
             className="btn btn--quiet btn--sm"
             onClick={async () => {
-              await api.post('/api/auth/logout')
+              // Clear the local session regardless — the cookie is httpOnly and
+              // a failed logout POST shouldn't strand the user "signed in".
+              try {
+                await api.post('/api/auth/logout')
+              } catch {
+                // ignore; sign the user out locally anyway
+              }
               onSignOut()
             }}
           >

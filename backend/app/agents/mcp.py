@@ -23,40 +23,65 @@ log = logging.getLogger("convoke.mcp")
 
 TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
 
+# Per-server refresh lock. Rotating refresh tokens (OAuth 2.1 public clients)
+# are single-use — concurrent agent runs each refreshing the same token would
+# get invalid_grant and providers often revoke the whole grant. Serialize so
+# only the first refreshes and the rest read the freshly-persisted token.
+import asyncio  # noqa: E402
+
+_refresh_locks: dict[int, asyncio.Lock] = {}
+
+
+def _refresh_lock(server_id: int) -> asyncio.Lock:
+    lock = _refresh_locks.get(server_id)
+    if lock is None:
+        lock = _refresh_locks[server_id] = asyncio.Lock()
+    return lock
+
 
 async def ensure_oauth_token(session: AsyncSession, server: McpServer) -> str:
     """Returns a live access token, refreshing (and persisting) if needed."""
     if server.oauth_status != "connected" or not server.oauth_access_token_encrypted:
         raise OAuthFlowError(f"{server.name} needs an OAuth sign-in (Tools page → Connect)")
-    expires_at = server.oauth_expires_at
-    if expires_at is not None and expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at is None or expires_at > datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN:
+
+    def still_valid(srv: McpServer) -> bool:
+        exp = srv.oauth_expires_at
+        if exp is not None and exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return exp is None or exp > datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN
+
+    if still_valid(server):
         return decrypt(server.oauth_access_token_encrypted)
-    if not server.oauth_refresh_token_encrypted:
-        server.oauth_status = "error"
-        server.oauth_error = "Access token expired and no refresh token was issued — sign in again."
-        await session.commit()
-        raise OAuthFlowError(server.oauth_error)
-    async with httpx.AsyncClient() as http:
-        tokens = await refresh_tokens(
-            server.oauth_token_endpoint,
-            server.oauth_client_id,
-            decrypt(server.oauth_client_secret_encrypted)
-            if server.oauth_client_secret_encrypted
-            else None,
-            decrypt(server.oauth_refresh_token_encrypted),
-            server.oauth_resource,
-            http,
+
+    async with _refresh_lock(server.id):
+        # Re-read under the lock: another task may have just refreshed.
+        await session.refresh(server)
+        if still_valid(server):
+            return decrypt(server.oauth_access_token_encrypted)
+        if not server.oauth_refresh_token_encrypted:
+            server.oauth_status = "error"
+            server.oauth_error = "Access token expired and no refresh token was issued — sign in again."
+            await session.commit()
+            raise OAuthFlowError(server.oauth_error)
+        async with httpx.AsyncClient() as http:
+            tokens = await refresh_tokens(
+                server.oauth_token_endpoint,
+                server.oauth_client_id,
+                decrypt(server.oauth_client_secret_encrypted)
+                if server.oauth_client_secret_encrypted
+                else None,
+                decrypt(server.oauth_refresh_token_encrypted),
+                server.oauth_resource,
+                http,
+            )
+        server.oauth_access_token_encrypted = encrypt(tokens["access_token"])
+        if tokens.get("refresh_token"):
+            server.oauth_refresh_token_encrypted = encrypt(tokens["refresh_token"])
+        server.oauth_expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=int(tokens.get("expires_in", 3600))
         )
-    server.oauth_access_token_encrypted = encrypt(tokens["access_token"])
-    if tokens.get("refresh_token"):
-        server.oauth_refresh_token_encrypted = encrypt(tokens["refresh_token"])
-    server.oauth_expires_at = datetime.now(timezone.utc) + timedelta(
-        seconds=int(tokens.get("expires_in", 3600))
-    )
-    await session.commit()
-    return tokens["access_token"]
+        await session.commit()
+        return tokens["access_token"]
 
 
 def build_toolset(server: McpServer, extra_headers: dict | None = None) -> MCPToolset:

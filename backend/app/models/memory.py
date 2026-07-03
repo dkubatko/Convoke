@@ -50,6 +50,10 @@ class Chunk(Base):
     text: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list | None] = mapped_column(EmbeddingVariant, nullable=True)
     stale: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Bumped on every edit that touches this chunk. The embed loop clears
+    # stale only if the version is unchanged since it read the content, so an
+    # edit landing mid-embed isn't overwritten with a pre-edit vector.
+    content_version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

@@ -32,15 +32,37 @@ async def main() -> None:
     lock_conn = await acquire_singleton_lock(SINGLETON_LOCK_WORKER)
     log.info("worker started (singleton lock acquired)")
     sessionmaker = get_sessionmaker()
+
+    # We are the only worker: any run still 'running' was orphaned by a crash
+    # or restart mid-execution. Without this it would show as running forever.
+    from sqlalchemy import update
+
+    from app.models import AgentRun
+
+    async with sessionmaker() as session:
+        result = await session.execute(
+            update(AgentRun)
+            .where(AgentRun.status == "running")
+            .values(status="error", error="interrupted by a worker restart")
+        )
+        await session.commit()
+        if result.rowcount:
+            log.warning("marked %d orphaned agent run(s) as interrupted", result.rowcount)
     try:
         embedder = get_embedder()
         limiter = SendLimiter()
 
         async def sweep_forever() -> None:
+            from app.intent.examples import regenerate_stale_pending
+
             sweeper = IntentSweeper(sessionmaker, embedder)
+            ticks = 0
             while True:
                 try:
                     await sweeper.sweep()
+                    ticks += 1
+                    if ticks % 24 == 0:  # ~every 2 minutes
+                        await regenerate_stale_pending(sessionmaker, embedder)
                 except Exception:  # noqa: BLE001 — the loop must survive
                     log.exception("intent sweep failed")
                 await asyncio.sleep(5)

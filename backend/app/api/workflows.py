@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime
 
 from croniter import croniter
@@ -9,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session, get_sessionmaker
 from app.core.security import require_operator
+from app.core.tasks import spawn
 from app.intent.examples import generate_examples
 from app.memory.runtime import get_embedder
 from sqlalchemy import func
@@ -139,7 +139,7 @@ async def create_workflow(
     await _set_assignments(session, wf, body.chat_ids)
     await session.commit()
     if needs_examples:
-        asyncio.create_task(generate_examples(get_sessionmaker(), get_embedder(), wf.id))
+        spawn(generate_examples(get_sessionmaker(), get_embedder(), wf.id), name=f"examples-{wf.id}")
     return await _out(session, wf)
 
 
@@ -163,7 +163,7 @@ async def update_workflow(
     await _set_assignments(session, wf, body.chat_ids)
     await session.commit()
     if needs_examples:
-        asyncio.create_task(generate_examples(get_sessionmaker(), get_embedder(), wf.id))
+        spawn(generate_examples(get_sessionmaker(), get_embedder(), wf.id), name=f"examples-{wf.id}")
     return await _out(session, wf)
 
 

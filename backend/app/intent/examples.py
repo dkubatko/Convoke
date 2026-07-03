@@ -137,6 +137,35 @@ async def _generate(session: AsyncSession, wf: Workflow) -> GeneratedExamples:
     return result.output
 
 
+async def regenerate_stale_pending(
+    sessionmaker: async_sessionmaker[AsyncSession], embedder: Embedder, older_than_s: int = 180
+) -> int:
+    """Recover intent workflows stuck in examples_status='pending' — the
+    generation task runs in the backend process and dies with it on restart,
+    which would otherwise leave the detector uncalibrated forever."""
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=older_than_s)
+    async with sessionmaker() as session:
+        stale_ids = (
+            (
+                await session.execute(
+                    select(Workflow.id).where(
+                        Workflow.type == "intent",
+                        Workflow.examples_status == "pending",
+                        Workflow.updated_at < cutoff,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for wf_id in stale_ids:
+        log.warning("workflow %s stuck in examples_status=pending; regenerating", wf_id)
+        await generate_examples(sessionmaker, embedder, wf_id)
+    return len(stale_ids)
+
+
 async def load_positive_vectors(session: AsyncSession, workflow_id: int) -> list[list[float]]:
     rows = (
         (

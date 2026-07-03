@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 
@@ -18,6 +20,9 @@ async def login(
     settings: Settings = Depends(get_settings),
 ) -> dict:
     if not verify_password(body.password, settings):
+        # Flat delay caps brute force at ~80 attempts/min without the
+        # complexity of per-IP tracking behind a proxy.
+        await asyncio.sleep(0.75)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong password")
     issue_session(response, settings)
     return {"ok": True}

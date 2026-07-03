@@ -149,6 +149,7 @@ class IntentSweeper:
             )
 
             evaluated = 0
+            stages: list[str] = []
             for thread_key, window in by_thread.items():
                 window = window[-self.settings.intent_window_max_messages :]
                 # Prefilter embeds each message's raw text — the SAME space the
@@ -162,11 +163,21 @@ class IntentSweeper:
                 context = await self._prior_context(session, chat_id, thread_key, window[0])
                 rendered = "\n".join(render_message(m) for m in [*context, *window])
                 for wf in workflows:
-                    evaluated += await self._evaluate(
+                    stage = await self._evaluate(
                         session, wf, chat_id, thread_key, window, rendered, message_vecs, now
                     )
+                    stages.append(stage)
+                    if stage not in ("cooldown", "prefilter_skip", "throttled"):
+                        evaluated += 1
 
-            state.last_tg_message_id = messages[-1].tg_message_id
+            # If the classifier failed for EVERY workflow (model endpoint
+            # down), keep the cursor so this window retries after the LLM
+            # spacing interval instead of being silently consumed.
+            all_errored = bool(stages) and all(
+                s in ("classifier_error", "throttled") for s in stages
+            ) and "classifier_error" in stages
+            if not all_errored:
+                state.last_tg_message_id = messages[-1].tg_message_id
             await session.commit()
             return evaluated
 
@@ -201,7 +212,7 @@ class IntentSweeper:
         rendered: str,
         message_vecs: list[list[float]],
         now: datetime,
-    ) -> int:
+    ) -> str:
         tstate = (
             await session.execute(
                 select(TriggerState).where(
@@ -224,7 +235,7 @@ class IntentSweeper:
         cooldown_until = _as_utc(tstate.cooldown_until)
         if cooldown_until is not None and cooldown_until > now:
             mark("cooldown")
-            return 0
+            return "cooldown"
 
         # Stage 1: prefilter (skipped when the state is mid-accumulation —
         # follow-ups like "ok wednesday then" may not resemble the examples).
@@ -236,19 +247,19 @@ class IntentSweeper:
                 score = max(dot(v, p) for v in message_vecs for p in positives)
                 if score < (wf.threshold or 0.8):
                     mark("prefilter_skip", score=score)
-                    return 0
+                    return "prefilter_skip"
 
         # LLM circuit breaker
         last_llm = _as_utc(tstate.last_llm_at)
         if last_llm is not None and (now - last_llm).total_seconds() < self.settings.intent_min_llm_interval_seconds:
             mark("throttled", score=score)
-            return 0
+            return "throttled"
 
         verdict = await self._classify(session, wf, tstate, rendered)
         tstate.last_llm_at = now
         if verdict is None:
             mark("classifier_error", score=score)
-            return 1
+            return "classifier_error"
 
         slots = decay_state(
             dict(tstate.slots or {}),
@@ -279,11 +290,14 @@ class IntentSweeper:
             tstate.cooldown_until = now + timedelta(seconds=wf.cooldown_seconds)
             mark("fired", score=score, confidence=verdict.confidence)
             log.info("workflow %s converged in chat %s: %s", wf.id, chat_id, render_slots(slots))
+            await session.commit()
+            return "fired"
         elif verdict.match:
             mark("accumulating", score=score, confidence=verdict.confidence)
+            return "accumulating"
         else:
             mark("no_match", score=score, confidence=verdict.confidence)
-        return 1
+            return "no_match"
 
     async def _classify(
         self, session: AsyncSession, wf: Workflow, tstate: TriggerState, rendered: str

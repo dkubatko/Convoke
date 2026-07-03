@@ -266,6 +266,42 @@ async def test_intent_pipeline_converges_and_fires_once(db_sessionmaker, monkeyp
         assert state.last_stage == "cooldown"
 
 
+async def test_classifier_error_keeps_cursor_for_retry(db_sessionmaker, monkeypatch):
+    """When the classifier fails (model endpoint down), the window must NOT be
+    consumed — it should retry once the model is back, not be lost forever."""
+    from app.models import ChatEvalState
+
+    _, chat, _ = await _intent_setup(db_sessionmaker)
+    sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
+    sweeper.settings = sweeper.settings.model_copy(update={"intent_min_llm_interval_seconds": 0})
+
+    async def failing_classify(session, wf, tstate, rendered):
+        return None  # simulates ProviderNotConfigured / endpoint error
+
+    monkeypatch.setattr(sweeper, "_classify", failing_classify)
+
+    async with db_sessionmaker() as s:
+        s.add(_msg(chat.id, 1, "let's schedule dinner", minutes_ago=5))
+        await s.commit()
+    await sweeper.sweep()
+
+    async with db_sessionmaker() as s:
+        cursor = (await s.execute(select(ChatEvalState))).scalar_one()
+        assert cursor.last_tg_message_id == 0, "window was consumed despite classifier failure"
+
+    # model recovers → same window now classifies and converges
+    verdicts = iter([verdict(updates=[])])
+
+    async def working_classify(session, wf, tstate, rendered):
+        return next(verdicts)
+
+    monkeypatch.setattr(sweeper, "_classify", working_classify)
+    await sweeper.sweep()
+    async with db_sessionmaker() as s:
+        cursor = (await s.execute(select(ChatEvalState))).scalar_one()
+        assert cursor.last_tg_message_id == 1  # advanced after success
+
+
 async def test_sweeper_ignores_self_messages_and_hot_windows(db_sessionmaker, monkeypatch):
     _, chat, _ = await _intent_setup(db_sessionmaker)
     sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
@@ -296,7 +332,7 @@ async def test_fire_without_confirm_creates_agent_run(db_sessionmaker):
         await s.commit()
 
     executor = FireExecutor(db_sessionmaker, SendLimiter())
-    executor._bots[bot.id] = AgentFakeBot()
+    executor._bots.put(bot.id, AgentFakeBot())
     await executor._tick()
 
     async with db_sessionmaker() as s:
@@ -309,6 +345,39 @@ async def test_fire_without_confirm_creates_agent_run(db_sessionmaker):
         assert fire.agent_run_id == run.id
 
 
+async def test_poison_fire_is_isolated_not_queue_wedging(db_sessionmaker):
+    """A confirmation send that always fails must mark ONLY that fire error and
+    let a healthy fire in the same tick complete — not roll everything back."""
+
+    class ExplodingBot(AgentFakeBot):
+        async def send_message(self, *a, **k):
+            raise RuntimeError("bot was kicked from the chat")
+
+    bot, chat, wf_id = await _intent_setup(db_sessionmaker, confirm=True)
+    async with db_sessionmaker() as s:
+        # second chat + workflow whose fire fires without confirmation (healthy)
+        chat2 = Chat(bot_id=bot.id, tg_chat_id=-200, type="supergroup", status="authorized")
+        s.add(chat2)
+        wf2 = Workflow(name="ok", type="intent", action_prompt="do it",
+                       trigger_prompt="t", required_slots=[], confirm=False,
+                       cooldown_seconds=3600, threshold=0.1, examples_status="ready")
+        s.add(wf2)
+        await s.flush()
+        s.add(PendingFire(workflow_id=wf_id, chat_id=chat.id, slots={}))  # needs confirm → send fails
+        s.add(PendingFire(workflow_id=wf2.id, chat_id=chat2.id, slots={}))  # healthy
+        await s.commit()
+
+    executor = FireExecutor(db_sessionmaker, SendLimiter())
+    executor._bots.put(bot.id, ExplodingBot())
+    await executor._tick()
+
+    async with db_sessionmaker() as s:
+        fires = {f.workflow_id: f for f in (await s.execute(select(PendingFire))).scalars()}
+        assert fires[wf_id].status == "error"  # poison fire isolated
+        assert fires[wf2.id].status == "done"  # healthy fire still completed
+        assert (await s.execute(select(AgentRun))).scalar_one().chat_id == chat2.id
+
+
 async def test_confirm_flow(db_sessionmaker):
     bot, chat, wf_id = await _intent_setup(db_sessionmaker, confirm=True)
     async with db_sessionmaker() as s:
@@ -317,7 +386,7 @@ async def test_confirm_flow(db_sessionmaker):
 
     fake = AgentFakeBot()
     executor = FireExecutor(db_sessionmaker, SendLimiter())
-    executor._bots[bot.id] = fake
+    executor._bots.put(bot.id, fake)
     await executor._tick()
 
     async with db_sessionmaker() as s:
@@ -346,7 +415,7 @@ async def test_cancel_flow(db_sessionmaker):
 
     fake = AgentFakeBot()
     executor = FireExecutor(db_sessionmaker, SendLimiter())
-    executor._bots[bot.id] = fake
+    executor._bots.put(bot.id, fake)
     await executor._tick()
 
     async with db_sessionmaker() as s:

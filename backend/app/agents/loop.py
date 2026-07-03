@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.core.crypto import decrypt
 from app.memory.embeddings import Embedder
 from app.models import AgentRun, Bot, Chat
-from app.telegram.client import make_bot
+from app.telegram.client import BotCache
 from app.telegram.limiter import SendLimiter
 
 log = logging.getLogger("convoke.agent-loop")
@@ -35,16 +35,14 @@ class AgentLoop:
         self.sessionmaker = sessionmaker
         self.embedder = embedder
         self.limiter = limiter
-        self._bots: dict[int, AiogramBot] = {}
+        self._bots = BotCache()
         self._chat_locks: dict[int, asyncio.Lock] = {}
         self._semaphore = asyncio.Semaphore(get_settings().agent_concurrency)
         self._in_flight: set[int] = set()
 
     async def _bot_for(self, session: AsyncSession, bot_id: int) -> AiogramBot:
-        if bot_id not in self._bots:
-            bot_row = await session.get(Bot, bot_id)
-            self._bots[bot_id] = make_bot(decrypt(bot_row.token_encrypted))
-        return self._bots[bot_id]
+        bot_row = await session.get(Bot, bot_id)
+        return self._bots.get(bot_id, bot_row.token_encrypted, decrypt(bot_row.token_encrypted))
 
     async def run(self) -> None:
         try:
@@ -55,8 +53,7 @@ class AgentLoop:
                     log.exception("agent dispatch failed")
                 await asyncio.sleep(POLL_S)
         finally:
-            for bot in self._bots.values():
-                await bot.session.close()
+            await self._bots.aclose()
 
     async def _dispatch_pending(self) -> None:
         async with self.sessionmaker() as session:

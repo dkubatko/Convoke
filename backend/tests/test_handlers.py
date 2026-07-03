@@ -203,6 +203,34 @@ async def test_authorized_chat_stores_messages_idempotently(db_sessionmaker, bot
         assert rows[0].sender_name == "Alice"
 
 
+async def test_group_migration_rewrites_chat_id(db_sessionmaker, bot_row):
+    fake = FakeBot(member_status="administrator")
+    await run_update(db_sessionmaker, fake, bot_row, join_update())
+    async with db_sessionmaker() as s:
+        nonce = (await s.execute(select(AuthNonce))).scalar_one()
+    await run_update(db_sessionmaker, fake, bot_row, callback_update(2, nonce.nonce))
+    await run_update(db_sessionmaker, fake, bot_row, message_update(3, 20, "before migration"))
+
+    new_id = -1009999999999
+    migration = upd(
+        4,
+        message={
+            "message_id": 21,
+            "date": 1_780_000_200,
+            "chat": GROUP,
+            "migrate_to_chat_id": new_id,
+        },
+    )
+    await run_update(db_sessionmaker, fake, bot_row, migration)
+
+    async with db_sessionmaker() as s:
+        chat = (await s.execute(select(Chat))).scalar_one()
+        assert chat.tg_chat_id == new_id  # id rewritten, row (and its messages) preserved
+        assert chat.status == "authorized"
+        msgs = (await s.execute(select(Message).where(Message.source == "live"))).scalars().all()
+        assert any(m.text == "before migration" for m in msgs)  # memory followed
+
+
 async def test_edited_message_updates_text(db_sessionmaker, bot_row):
     fake = FakeBot(member_status="administrator")
     await run_update(db_sessionmaker, fake, bot_row, join_update())

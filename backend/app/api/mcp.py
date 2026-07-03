@@ -1,3 +1,4 @@
+import html as html_lib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -231,6 +232,13 @@ async def connect_server(server_id: int, session: AsyncSession = Depends(get_ses
     return _out(server, authorize_url)
 
 
+def _callback_page(title: str, detail: str) -> str:
+    """All interpolations escaped: `detail` can carry a provider's
+    error_description — attacker-controllable via a crafted callback link,
+    and this page renders on the app origin."""
+    return CALLBACK_PAGE.format(title=html_lib.escape(title), detail=html_lib.escape(detail))
+
+
 CALLBACK_PAGE = """<!doctype html>
 <html><head><title>Convoke</title><style>
 body {{ font-family: system-ui, sans-serif; display: grid; place-items: center;
@@ -252,9 +260,9 @@ async def oauth_callback(
     ).scalar_one_or_none() if state else None
     if server is None:
         return HTMLResponse(
-            CALLBACK_PAGE.format(
-                title="Sign-in link expired",
-                detail="This authorization attempt is no longer active. Press Connect in Convoke to retry.",
+            _callback_page(
+                "Sign-in link expired",
+                "This authorization attempt is no longer active. Press Connect in Convoke to retry.",
             ),
             status_code=400,
         )
@@ -267,7 +275,7 @@ async def oauth_callback(
         server.oauth_error = error_description or error or "Provider returned no code"
         await session.commit()
         return HTMLResponse(
-            CALLBACK_PAGE.format(title="Sign-in failed", detail=server.oauth_error),
+            _callback_page("Sign-in failed", server.oauth_error),
             status_code=400,
         )
     try:
@@ -289,7 +297,7 @@ async def oauth_callback(
         server.oauth_error = str(e)
         await session.commit()
         return HTMLResponse(
-            CALLBACK_PAGE.format(title="Sign-in failed", detail=str(e)), status_code=400
+            _callback_page("Sign-in failed", str(e)), status_code=400
         )
 
     server.oauth_access_token_encrypted = encrypt(tokens["access_token"])
@@ -302,9 +310,9 @@ async def oauth_callback(
     server.oauth_error = None
     await session.commit()
     return HTMLResponse(
-        CALLBACK_PAGE.format(
-            title=f"{server.name} connected ✓",
-            detail="You can close this tab — Convoke has what it needs.",
+        _callback_page(
+            f"{server.name} connected ✓",
+            "You can close this tab — Convoke has what it needs.",
         )
     )
 

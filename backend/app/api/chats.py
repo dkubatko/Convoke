@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime
 from pathlib import Path
 
@@ -9,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.db import get_session, get_sessionmaker
+from app.core.tasks import spawn
 from app.core.security import require_operator
 from app.ingest.history_import import delete_import, run_import
 from app.memory.runtime import get_embedder
@@ -67,7 +67,7 @@ async def recent_messages(
                 select(Message)
                 .where(Message.chat_id == chat_id)
                 .order_by(Message.tg_message_id.desc())
-                .limit(min(limit, 200))
+                .limit(max(1, min(limit, 200)))
             )
         )
         .scalars()
@@ -81,7 +81,7 @@ async def search(
     chat_id: int, q: str, k: int = 5, session: AsyncSession = Depends(get_session)
 ) -> list[SearchHitOut]:
     await _chat_or_404(session, chat_id)
-    hits = await search_chat_history(session, get_embedder(), chat_id, q, k=min(k, 20))
+    hits = await search_chat_history(session, get_embedder(), chat_id, q, k=max(1, min(k, 20)))
     return [SearchHitOut(chunk_id=h.chunk_id, distance=h.distance, rendered=h.rendered) for h in hits]
 
 
@@ -114,7 +114,7 @@ async def start_import(
         while chunk := await file.read(1 << 20):
             out.write(chunk)
 
-    asyncio.create_task(run_import(get_sessionmaker(), job.id, dest))
+    spawn(run_import(get_sessionmaker(), job.id, dest), name=f"import-{job.id}")
     return job
 
 
@@ -160,7 +160,7 @@ async def recent_runs(
             select(AgentRun, Chat.title)
             .join(Chat, Chat.id == AgentRun.chat_id)
             .order_by(AgentRun.id.desc())
-            .limit(min(limit, 100))
+            .limit(max(1, min(limit, 100)))
         )
     ).all()
     return [
@@ -191,7 +191,7 @@ async def list_runs(
                 select(AgentRun)
                 .where(AgentRun.chat_id == chat_id)
                 .order_by(AgentRun.id.desc())
-                .limit(min(limit, 100))
+                .limit(max(1, min(limit, 100)))
             )
         ).scalars()
     )

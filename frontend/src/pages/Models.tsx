@@ -4,7 +4,7 @@ import { timeAgo } from '../lib/format'
 import { Provider } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
-import { Card, CardSkeleton, Field, PageHead } from '../components/ui'
+import { Card, CardSkeleton, ErrorNote, Field, PageHead } from '../components/ui'
 
 const ROLES: { role: string; title: string; blurb: string; placeholder: string }[] = [
   {
@@ -37,6 +37,8 @@ export default function Models() {
           <CardSkeleton lines={3} />
           <CardSkeleton lines={3} />
         </div>
+      ) : providers.error ? (
+        <ErrorNote message={providers.error} onRetry={() => void providers.refetch()} />
       ) : (
         <div className="stack">
           <Card>
@@ -93,6 +95,7 @@ function ProviderCard({ role, title, blurb, placeholder, current, onSaved }: {
   const [baseUrl, setBaseUrl] = useState('')
   const [modelName, setModelName] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [clearKey, setClearKey] = useState(false)
   const [test, setTest] = useState<TestState>({ phase: 'idle' })
   const [saving, setSaving] = useState(false)
   const [justSaved, setJustSaved] = useState(false)
@@ -101,6 +104,7 @@ function ProviderCard({ role, title, blurb, placeholder, current, onSaved }: {
     setBaseUrl(current?.base_url ?? '')
     setModelName(current?.model_name ?? '')
     setApiKey('')
+    setClearKey(false)
   }, [current])
 
   // Any edit invalidates a previous test result.
@@ -137,7 +141,9 @@ function ProviderCard({ role, title, blurb, placeholder, current, onSaved }: {
     setSaving(true)
     try {
       const body: Record<string, unknown> = { base_url: baseUrl, model_name: modelName }
-      if (apiKey) body.api_key = apiKey
+      // "" clears the stored key server-side; omitted keeps it; a value sets it.
+      if (clearKey) body.api_key = ''
+      else if (apiKey) body.api_key = apiKey
       await api.put(`/api/providers/${role}`, body)
       toast('ok', `Saved the ${role} model`)
       setJustSaved(true)
@@ -189,14 +195,33 @@ function ProviderCard({ role, title, blurb, placeholder, current, onSaved }: {
         <div style={{ flex: '1 1 150px' }}>
           <Field
             label="API key"
-            hint={current?.has_api_key ? 'A key is saved; leave blank to keep it.' : 'Optional for local endpoints.'}
+            hint={
+              clearKey
+                ? 'Will clear the saved key on save.'
+                : current?.has_api_key
+                  ? 'A key is saved; leave blank to keep it.'
+                  : 'Optional for local endpoints.'
+            }
           >
             <input
               type="password"
               value={apiKey}
+              placeholder={clearKey ? '(cleared)' : ''}
+              disabled={clearKey}
               onChange={(e) => edit(setApiKey)(e.target.value)}
               autoComplete="off"
             />
+            {current?.has_api_key && (
+              <label className="row" style={{ gap: 6, fontSize: 12, marginTop: 4 }}>
+                <input
+                  type="checkbox"
+                  style={{ width: 'auto' }}
+                  checked={clearKey}
+                  onChange={(e) => { setClearKey(e.target.checked); setApiKey('') }}
+                />
+                Clear saved key
+              </label>
+            )}
           </Field>
         </div>
         <div className="field">

@@ -54,9 +54,13 @@ export default function Workflows() {
       danger: true,
     })
     if (!ok) return
-    await api.delete(`/api/workflows/${wf.id}`)
-    toast('ok', `Deleted ${wf.name}`)
-    void workflows.refetch()
+    try {
+      await api.delete(`/api/workflows/${wf.id}`)
+      toast('ok', `Deleted ${wf.name}`)
+      void workflows.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t delete the workflow')
+    }
   }
 
   return (
@@ -199,6 +203,8 @@ function WorkflowCard({ wf, chats, onToggle, onDelete }: {
         <div style={{ marginTop: 14 }}>
           {fires.loading ? (
             <TableSkeleton rows={2} />
+          ) : fires.error ? (
+            <ErrorNote message={fires.error} onRetry={() => void fires.refetch()} />
           ) : (fires.data ?? []).length === 0 ? (
             <p className="muted">Hasn't fired yet — per-chat detection state lives in each chat's Workflows tab.</p>
           ) : (

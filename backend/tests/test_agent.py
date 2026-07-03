@@ -25,7 +25,7 @@ class AgentFakeBot(FakeBot):
         super().__init__(member_status)
         self.actions: list[str] = []
 
-    async def send_chat_action(self, chat_id, action):
+    async def send_chat_action(self, chat_id, action, **kwargs):
         self.actions.append(action)
 
 

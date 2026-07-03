@@ -23,16 +23,33 @@ export function useQuery<T>(
   const [loading, setLoading] = useState(enabled)
   const fnRef = useRef(fn)
   fnRef.current = fn
+  // Guards against setState after unmount and against an older response
+  // (previous deps, or a poll issued before a mutation) overwriting a newer
+  // one. Every call takes a ticket; only the latest ticket may commit.
+  const aliveRef = useRef(true)
+  const ticketRef = useRef(0)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
 
   const refetch = useCallback(async () => {
+    const ticket = ++ticketRef.current
+    const isCurrent = () => aliveRef.current && ticket === ticketRef.current
     try {
       const result = await fnRef.current()
-      setData(result)
-      setError(null)
+      if (isCurrent()) {
+        setData(result)
+        setError(null)
+      }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Something went wrong loading this data')
+      if (isCurrent()) {
+        setError(err instanceof ApiError ? err.message : 'Something went wrong loading this data')
+      }
     } finally {
-      setLoading(false)
+      if (isCurrent()) setLoading(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps)

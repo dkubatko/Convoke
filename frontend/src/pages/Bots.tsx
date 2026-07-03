@@ -67,14 +67,18 @@ export default function Bots() {
   }
 
   async function recheck(bot: Bot) {
-    const updated = await api.post<Bot>(`/api/bots/${bot.id}/recheck`)
-    toast(
-      updated.can_read_all_group_messages ? 'ok' : 'err',
-      updated.can_read_all_group_messages
-        ? `@${updated.username} can hear all group messages`
-        : `@${updated.username} still has privacy mode on — remember to remove and re-add it to each group after changing it`,
-    )
-    void bots.refetch()
+    try {
+      const updated = await api.post<Bot>(`/api/bots/${bot.id}/recheck`)
+      toast(
+        updated.can_read_all_group_messages ? 'ok' : 'err',
+        updated.can_read_all_group_messages
+          ? `@${updated.username} can hear all group messages`
+          : `@${updated.username} still has privacy mode on — remember to remove and re-add it to each group after changing it`,
+      )
+      void bots.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t re-check the bot')
+    }
   }
 
   async function remove(bot: Bot) {
@@ -85,9 +89,13 @@ export default function Bots() {
       danger: true,
     })
     if (!ok) return
-    await api.delete(`/api/bots/${bot.id}`)
-    toast('ok', `Removed @${bot.username}`)
-    void bots.refetch()
+    try {
+      await api.delete(`/api/bots/${bot.id}`)
+      toast('ok', `Removed @${bot.username}`)
+      void bots.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t remove the bot')
+    }
   }
 
   return (

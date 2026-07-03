@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.crypto import decrypt
 from app.models import Bot, InboxUpdate
-from app.telegram.client import make_bot
+from app.telegram.client import BotCache
 from app.telegram.handlers import handle_update
 
 log = logging.getLogger("convoke.consumer")
@@ -28,15 +28,14 @@ IDLE_SLEEP_S = 1.0
 class InboxConsumer:
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self.sessionmaker = sessionmaker
-        self._bots: dict[int, AiogramBot] = {}
+        self._bots = BotCache()
 
     async def _bot_for(self, session: AsyncSession, bot_id: int) -> tuple[AiogramBot, Bot] | None:
         bot_row = await session.get(Bot, bot_id)
         if bot_row is None:
             return None
-        if bot_id not in self._bots:
-            self._bots[bot_id] = make_bot(decrypt(bot_row.token_encrypted))
-        return self._bots[bot_id], bot_row
+        bot = self._bots.get(bot_id, bot_row.token_encrypted, decrypt(bot_row.token_encrypted))
+        return bot, bot_row
 
     async def run(self) -> None:
         try:
@@ -49,8 +48,7 @@ class InboxConsumer:
                 if processed == 0:
                     await asyncio.sleep(IDLE_SLEEP_S)
         finally:
-            for bot in self._bots.values():
-                await bot.session.close()
+            await self._bots.aclose()
 
     async def _drain_batch(self) -> int:
         async with self.sessionmaker() as session:
@@ -81,8 +79,16 @@ class InboxConsumer:
                     bot, bot_row = pair
                     update = Update.model_validate(row.payload)
                     await handle_update(session, bot, bot_row, update)
+                row.processed_at = datetime.now(timezone.utc)
+                await session.commit()
             except Exception as e:  # noqa: BLE001 — poison rows must not wedge the queue
                 log.exception("update %s (bot %s) failed", row.update_id, row.bot_id)
-                row.error = f"{type(e).__name__}: {e}"
-            row.processed_at = datetime.now(timezone.utc)
-            await session.commit()
+                # Roll back the handler's partial writes (which may have left the
+                # session in a pending-rollback state) before marking the row —
+                # otherwise the mark itself raises and the queue stalls behind it.
+                await session.rollback()
+                row = await session.get(InboxUpdate, row_id)
+                if row is not None and row.processed_at is None:
+                    row.error = f"{type(e).__name__}: {e}"[:500]
+                    row.processed_at = datetime.now(timezone.utc)
+                    await session.commit()
