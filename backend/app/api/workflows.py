@@ -246,6 +246,7 @@ class ChatWorkflowOut(BaseModel):
     type: str
     enabled: bool
     confirm: bool
+    cooldown_seconds: int
     threshold: float | None
     examples_status: str
     cron: str | None
@@ -255,8 +256,7 @@ class ChatWorkflowOut(BaseModel):
     states: list[TriggerStateOut]
     recent_fires: list[FireOut]
     recent_runs: list[ChatRunOut]
-    # Messages newer than the evaluation cursor — i.e. waiting for the next
-    # window to close. Same value for every workflow of the chat.
+    # Messages THIS workflow hasn't evaluated yet (past its own cursor).
     pending_messages: int = 0
 
 
@@ -276,45 +276,19 @@ async def chat_workflows(
             )
         ).scalars()
     )
-    # Messages some assigned intent workflow still hasn't evaluated: newer than
-    # the least-advanced per-trigger cursor. A workflow with no state yet (or
-    # none assigned) counts as cursor 0 → all messages pending.
-    intent_ids = [
-        wid
-        for wid in assigned_ids
-        if (wf := await session.get(Workflow, wid)) is not None and wf.type == "intent"
-    ]
-    cursor = 0
-    if intent_ids:
-        cursors = (
+    async def pending_since(cursor: int) -> int:
+        return (
             await session.execute(
-                select(func.min(TriggerState.last_tg_message_id)).where(
-                    TriggerState.chat_id == chat_id,
-                    TriggerState.workflow_id.in_(intent_ids),
+                select(func.count())
+                .select_from(Message)
+                .where(
+                    Message.chat_id == chat_id,
+                    Message.tg_message_id > cursor,
+                    Message.source != "self",
                 )
             )
-        ).scalar()
-        # if any assigned intent workflow has no trigger state, min is 0
-        has_state_for_all = (
-            await session.execute(
-                select(func.count(func.distinct(TriggerState.workflow_id))).where(
-                    TriggerState.chat_id == chat_id,
-                    TriggerState.workflow_id.in_(intent_ids),
-                )
-            )
-        ).scalar()
-        cursor = cursors if (cursors is not None and has_state_for_all == len(intent_ids)) else 0
-    pending_messages = (
-        await session.execute(
-            select(func.count())
-            .select_from(Message)
-            .where(
-                Message.chat_id == chat_id,
-                Message.tg_message_id > cursor,
-                Message.source != "self",
-            )
-        )
-    ).scalar() or 0
+        ).scalar() or 0
+
     workflows = (await session.execute(select(Workflow).order_by(Workflow.id))).scalars().all()
 
     out: list[ChatWorkflowOut] = []
@@ -330,6 +304,13 @@ async def chat_workflows(
             .scalars()
             .all()
         )
+        # Messages THIS workflow hasn't evaluated yet: newer than its own
+        # least-advanced cursor (0 if it has no state → everything is pending).
+        # Only meaningful for an assigned intent workflow.
+        pending_messages = 0
+        if wf.type == "intent" and wf.id in assigned_ids:
+            wf_cursor = min((s.last_tg_message_id for s in states), default=0)
+            pending_messages = await pending_since(wf_cursor)
         fires = (
             (
                 await session.execute(
@@ -361,6 +342,7 @@ async def chat_workflows(
                 type=wf.type,
                 enabled=wf.enabled,
                 confirm=wf.confirm,
+                cooldown_seconds=wf.cooldown_seconds,
                 threshold=wf.threshold,
                 examples_status=wf.examples_status,
                 cron=wf.cron,
@@ -381,6 +363,119 @@ async def chat_workflows(
             )
         )
     return out
+
+
+class WorkflowChatOut(BaseModel):
+    """One chat's live state for a workflow — the workflow-centric mirror of
+    ChatWorkflowOut, powering the workflow detail page."""
+
+    chat_id: int
+    chat_title: str
+    chat_status: str
+    states: list[TriggerStateOut]
+    pending_messages: int
+    recent_fires: list[FireOut]
+    recent_runs: list[ChatRunOut]
+
+
+class WorkflowDetailOut(WorkflowOut):
+    chats: list[WorkflowChatOut]
+
+
+@router.get("/workflows/{workflow_id}/detail", response_model=WorkflowDetailOut)
+async def workflow_detail(
+    workflow_id: int, session: AsyncSession = Depends(get_session)
+) -> WorkflowDetailOut:
+    """A workflow with every chat it's assigned to and that chat's live state
+    and recent activity — the workflow-centric observability panel."""
+    wf = await session.get(Workflow, workflow_id)
+    if wf is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow not found")
+    base = await _out(session, wf)
+
+    chats = (
+        (
+            await session.execute(
+                select(Chat)
+                .join(WorkflowAssignment, WorkflowAssignment.chat_id == Chat.id)
+                .where(WorkflowAssignment.workflow_id == workflow_id)
+                .order_by(Chat.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    chat_out: list[WorkflowChatOut] = []
+    for chat in chats:
+        states = (
+            (
+                await session.execute(
+                    select(TriggerState)
+                    .where(TriggerState.workflow_id == workflow_id, TriggerState.chat_id == chat.id)
+                    .order_by(TriggerState.thread_key)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        pending = 0
+        if wf.type == "intent":
+            wf_cursor = min((s.last_tg_message_id for s in states), default=0)
+            pending = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(Message)
+                    .where(
+                        Message.chat_id == chat.id,
+                        Message.tg_message_id > wf_cursor,
+                        Message.source != "self",
+                    )
+                )
+            ).scalar() or 0
+        fires = (
+            (
+                await session.execute(
+                    select(PendingFire)
+                    .where(PendingFire.workflow_id == workflow_id, PendingFire.chat_id == chat.id)
+                    .order_by(PendingFire.id.desc())
+                    .limit(5)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        runs = (
+            (
+                await session.execute(
+                    select(AgentRun)
+                    .where(AgentRun.workflow_id == workflow_id, AgentRun.chat_id == chat.id)
+                    .order_by(AgentRun.id.desc())
+                    .limit(5)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        chat_out.append(
+            WorkflowChatOut(
+                chat_id=chat.id,
+                chat_title=chat.title or str(chat.tg_chat_id),
+                chat_status=chat.status,
+                states=[TriggerStateOut.model_validate(s) for s in states],
+                pending_messages=pending,
+                recent_fires=[
+                    FireOut(
+                        id=f.id, workflow_id=f.workflow_id, chat_id=f.chat_id,
+                        chat_title=chat.title or "", slots=f.slots or {}, status=f.status,
+                        error=f.error, agent_run_id=f.agent_run_id, created_at=f.created_at,
+                    )
+                    for f in fires
+                ],
+                recent_runs=[ChatRunOut.model_validate(r) for r in runs],
+            )
+        )
+    return WorkflowDetailOut(**base.model_dump(), chats=chat_out)
 
 
 @router.put("/chats/{chat_id}/workflows", response_model=list[int])

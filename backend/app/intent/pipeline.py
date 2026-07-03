@@ -237,34 +237,44 @@ class IntentSweeper:
             # Consume the window: this workflow won't re-see these messages.
             tstate.last_tg_message_id = window[-1].tg_message_id
 
-        # Cheap gates first — no embedding, and cursor is NOT advanced, so a
-        # workflow in cooldown re-evaluates these messages once it lifts.
-        cooldown_until = _as_utc(tstate.cooldown_until)
-        if cooldown_until is not None and cooldown_until > now:
-            mark("cooldown")
-            return "cooldown"
-        last_llm = _as_utc(tstate.last_llm_at)
-        if (
-            last_llm is not None
-            and (now - last_llm).total_seconds() < self.settings.intent_min_llm_interval_seconds
-        ):
-            mark("throttled")
-            return "throttled"
-
-        # Stage 1: prefilter (skipped mid-accumulation — follow-ups like "ok
-        # wednesday then" may not resemble the examples). Embed each message's
-        # raw text (the space the examples were calibrated in) and score the
-        # best (message, example) pair: one on-intent message is enough.
+        # Stage 1 first, so the match score is always recorded — even when a
+        # gate below suppresses the fire. Otherwise a cooling workflow shows a
+        # blank score and no reason. Embed each message's raw text (the space
+        # the examples were calibrated in) and score the best (message,
+        # example) pair: one on-intent message is enough. Skipped only
+        # mid-accumulation (slots set), where follow-ups needn't resemble the
+        # examples and no cooldown is active anyway.
         score: float | None = None
+        matched = True
         if not tstate.slots:
             positives = await load_positive_vectors(session, wf.id)
             if positives:
                 message_vecs = await self.embedder.embed_passages([m.text for m in window])
                 score = max(dot(v, p) for v in message_vecs for p in positives)
-                if score < (wf.threshold or 0.8):
-                    mark("prefilter_skip", score=score)
-                    advance()
-                    return "prefilter_skip"
+                matched = score >= (wf.threshold or 0.8)
+
+        # Cooldown gate — cursor is NOT advanced, so a matching window fires
+        # once the cooldown lifts. The score rides along so the card can read
+        # "match 0.95 · cooling down until X" instead of an unexplained blank.
+        cooldown_until = _as_utc(tstate.cooldown_until)
+        if cooldown_until is not None and cooldown_until > now:
+            mark("cooldown", score=score)
+            return "cooldown"
+
+        # Below the prefilter threshold → nothing to classify; consume it.
+        if not matched:
+            mark("prefilter_skip", score=score)
+            advance()
+            return "prefilter_skip"
+
+        # LLM circuit breaker — also surfaces the score; cursor not advanced.
+        last_llm = _as_utc(tstate.last_llm_at)
+        if (
+            last_llm is not None
+            and (now - last_llm).total_seconds() < self.settings.intent_min_llm_interval_seconds
+        ):
+            mark("throttled", score=score)
+            return "throttled"
 
         # Stage 2: classifier. The trailing context lets messages that trickle
         # in after a burst ("what do you think?") be judged in situ.
