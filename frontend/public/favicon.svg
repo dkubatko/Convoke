@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Convoke">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f86d8"/>
+      <stop offset="1" stop-color="#134f8c"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#tile)"/>
+  <!-- morse transmission lines converging on the node (signals convened) -->
+  <g fill="none" stroke="#ffffff" stroke-width="4.4" stroke-linecap="round">
+    <path d="M13 20 L33 26.5" stroke-dasharray="0.01 8.5 12 40" opacity="0.9"/>
+    <path d="M11 32 L33 32"   stroke-dasharray="0.01 8.5 12 40"/>
+    <path d="M13 44 L33 37.5" stroke-dasharray="0.01 8.5 12 40" opacity="0.9"/>
+  </g>
+  <!-- live node: the convocation point -->
+  <circle cx="45" cy="32" r="8.5" fill="#ffffff"/>
+  <circle cx="45" cy="32" r="3.6" fill="url(#tile)"/>
+</svg>

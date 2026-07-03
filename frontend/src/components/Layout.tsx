@@ -34,7 +34,10 @@ export default function Layout({ onSignOut }: { onSignOut: () => void }) {
     <div className="shell">
       <aside className="sidebar">
         <div className="wordmark">
-          <h1>Convoke</h1>
+          <div className="lockup">
+            <img className="mark" src="/favicon.svg" alt="" width={26} height={26} />
+            <h1>Convoke</h1>
+          </div>
           <div className={`wire${healthy ? ' wire--live' : ''}`} aria-hidden />
           <div className="tagline">chat agent dispatch</div>
         </div>

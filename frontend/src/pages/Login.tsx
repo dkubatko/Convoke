@@ -29,7 +29,17 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
     <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 20 }}>
       <div style={{ width: 'min(360px, 100%)' }}>
         <div className="wordmark" style={{ padding: 0, marginBottom: 22 }}>
-          <h1 style={{ fontSize: 28 }}>Convoke</h1>
+          <div className="lockup">
+            <img
+              className="mark"
+              src="/favicon.svg"
+              alt=""
+              width={38}
+              height={38}
+              style={{ width: 38, height: 38, borderRadius: 9 }}
+            />
+            <h1 style={{ fontSize: 28 }}>Convoke</h1>
+          </div>
           <div className="wire" style={{ width: 130 }} aria-hidden />
           <div className="tagline">chat agent dispatch</div>
         </div>
