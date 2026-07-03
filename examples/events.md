@@ -75,10 +75,15 @@ Any calendar MCP server works. Two options:
 another service, complete its Google OAuth setup, and note its URL
 (e.g. `http://host.docker.internal:3000/mcp`).
 
-**B. Google's official remote Calendar MCP** — see
-[Google's guide](https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server).
-Note: Convoke authenticates to HTTP MCP servers with a bearer header; servers requiring
-an interactive OAuth handshake need a local proxy in front.
+**B. OAuth servers, including Google's official remote Calendar MCP** — Convoke
+supports the MCP OAuth flow natively: register the server with **Authentication:
+OAuth sign-in**, and a browser tab opens for a one-time sign-in; Convoke stores and
+refreshes the tokens from then on. For Google specifically
+([guide](https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server)):
+Google doesn't support automatic client registration, so first create an OAuth client
+in Google Cloud Console (Web application, redirect URI
+`http://localhost:8080/api/mcp-oauth/callback`), then paste its client id/secret into
+the register form along with the calendar scopes.
 
 Then in Convoke:
 

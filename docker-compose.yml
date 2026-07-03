@@ -22,6 +22,7 @@ services:
       CONVOKE_OPERATOR_PASSWORD: ${CONVOKE_OPERATOR_PASSWORD:?set in .env}
       CONVOKE_SECRET_KEY: ${CONVOKE_SECRET_KEY:?set in .env}
       CONVOKE_FERNET_KEY: ${CONVOKE_FERNET_KEY:?set in .env}
+      CONVOKE_PUBLIC_URL: ${CONVOKE_PUBLIC_URL:-http://localhost:${CONVOKE_PORT:-8080}}
     volumes:
       - imports:/data/imports
       - hf-cache:/root/.cache/huggingface

@@ -23,7 +23,9 @@ calendar event via MCP").
   ✅/❌ confirmation before acting.
 - **Scheduled workflows** — cron-triggered agent actions per chat.
 - **MCP connections** — register streamable-HTTP or stdio MCP servers, enable them
-  per chat; the agent gets their tools per run.
+  per chat; the agent gets their tools per run. OAuth-protected servers are supported
+  with a one-time browser sign-in (discovery, dynamic client registration, PKCE,
+  automatic token refresh).
 - **BYO models** — any OpenAI-compatible endpoints (Ollama, LM Studio, OpenRouter,
   OpenAI…), split by role: cheap `intent` classifier, strong `agent` model.
 

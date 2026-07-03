@@ -87,6 +87,9 @@ export interface McpServer {
   args: string[]
   has_headers: boolean
   enabled: boolean
+  auth_type: string
+  oauth_status: string | null
+  oauth_error: string | null
 }
 
 export interface SlotSpec {

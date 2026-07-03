@@ -23,30 +23,91 @@ export default function Tools() {
   const [url, setUrl] = useState('')
   const [command, setCommand] = useState('')
   const [args, setArgs] = useState('')
+  const [auth, setAuth] = useState<'none' | 'bearer' | 'oauth'>('none')
   const [bearer, setBearer] = useState('')
+  const [oauthClientId, setOauthClientId] = useState('')
+  const [oauthClientSecret, setOauthClientSecret] = useState('')
+  const [oauthScopes, setOauthScopes] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+
+  /** Opens the provider sign-in and waits for the callback to land (2 min cap). */
+  async function awaitSignIn(serverId: number, authorizeUrl: string, serverName: string) {
+    const popup = window.open(authorizeUrl, '_blank')
+    if (!popup) {
+      toast('err', 'The sign-in window was blocked — allow pop-ups and press Connect.')
+      return
+    }
+    toast('info', `Complete the ${serverName} sign-in in the new tab…`)
+    const deadline = Date.now() + 120_000
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000))
+      try {
+        const list = await api.get<McpServer[]>('/api/mcp-servers')
+        const s = list.find((x) => x.id === serverId)
+        if (!s) return
+        if (s.oauth_status === 'connected') {
+          toast('ok', `${serverName} connected — enable it and pick chats that may use it`)
+          void servers.refetch()
+          return
+        }
+        if (s.oauth_status === 'error') {
+          toast('err', s.oauth_error ?? `${serverName} sign-in failed`)
+          void servers.refetch()
+          return
+        }
+      } catch {
+        // transient — keep polling
+      }
+    }
+    toast('err', `Sign-in not completed — ${serverName} stays unconnected. Press Connect to retry.`)
+    void servers.refetch()
+  }
 
   async function add(e: FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError(null)
     try {
-      await api.post('/api/mcp-servers', {
+      const created = await api.post<McpServer & { authorize_url: string | null }>('/api/mcp-servers', {
         name,
         transport,
         url: transport === 'http' ? url : null,
         command: transport === 'stdio' ? command : null,
         args: transport === 'stdio' && args ? args.split(/\s+/) : [],
-        headers: bearer ? { Authorization: `Bearer ${bearer}` } : null,
+        headers: auth === 'bearer' && bearer ? { Authorization: `Bearer ${bearer}` } : null,
+        auth_type: transport === 'http' && auth === 'oauth' ? 'oauth' : 'none',
+        oauth_client_id: oauthClientId || null,
+        oauth_client_secret: oauthClientSecret || null,
+        oauth_scopes: oauthScopes || null,
       })
-      toast('ok', `Registered ${name} — enable it per chat from the chat's Tools tab`)
       setName(''); setUrl(''); setCommand(''); setArgs(''); setBearer('')
+      setOauthClientId(''); setOauthClientSecret(''); setOauthScopes('')
       void servers.refetch()
+      if (created.auth_type === 'oauth') {
+        if (created.authorize_url) {
+          await awaitSignIn(created.id, created.authorize_url, created.name)
+        } else {
+          toast('err', created.oauth_error ?? 'OAuth setup failed — see the server row for details')
+        }
+      } else {
+        toast('ok', `Registered ${name} — enable it per chat from the chat's Tools tab`)
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Couldn’t register the server')
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function connect(server: McpServer) {
+    try {
+      const res = await api.post<McpServer & { authorize_url: string | null }>(
+        `/api/mcp-servers/${server.id}/connect`,
+      )
+      if (res.authorize_url) await awaitSignIn(server.id, res.authorize_url, server.name)
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t start the sign-in')
     }
   }
 
@@ -109,19 +170,57 @@ export default function Tools() {
               </Field>
             </div>
             {transport === 'http' ? (
-              <div className="grid-2">
-                <Field label="URL">
-                  <input
-                    className="mono"
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
-                    placeholder="http://calendar:8000/mcp"
-                  />
-                </Field>
-                <Field label="Bearer token" hint="Optional. Stored encrypted.">
-                  <input type="password" value={bearer} onChange={(e) => setBearer(e.target.value)} />
-                </Field>
-              </div>
+              <>
+                <div className="grid-2">
+                  <Field label="URL">
+                    <input
+                      className="mono"
+                      value={url}
+                      onChange={(e) => setUrl(e.target.value)}
+                      placeholder="http://calendar:8000/mcp"
+                    />
+                  </Field>
+                  <Field
+                    label="Authentication"
+                    hint={
+                      auth === 'oauth'
+                        ? 'You sign in once in the browser; Convoke keeps refreshed tokens (encrypted).'
+                        : auth === 'bearer'
+                          ? 'A static token sent with every request. Stored encrypted.'
+                          : 'For open servers that need no credentials.'
+                    }
+                  >
+                    <select value={auth} onChange={(e) => setAuth(e.target.value as typeof auth)}>
+                      <option value="none">None</option>
+                      <option value="bearer">Bearer token</option>
+                      <option value="oauth">OAuth sign-in</option>
+                    </select>
+                  </Field>
+                </div>
+                {auth === 'bearer' && (
+                  <Field label="Bearer token">
+                    <input type="password" value={bearer} onChange={(e) => setBearer(e.target.value)} />
+                  </Field>
+                )}
+                {auth === 'oauth' && (
+                  <>
+                    <div className="grid-2">
+                      <Field
+                        label="Client id"
+                        hint="Leave blank first — most servers register Convoke automatically. Only needed for providers like Google."
+                      >
+                        <input className="mono" value={oauthClientId} onChange={(e) => setOauthClientId(e.target.value)} />
+                      </Field>
+                      <Field label="Client secret" hint="Paired with the client id, if the provider issued one.">
+                        <input type="password" value={oauthClientSecret} onChange={(e) => setOauthClientSecret(e.target.value)} />
+                      </Field>
+                    </div>
+                    <Field label="Scopes" hint="Optional, space-separated. Defaults to what the provider advertises.">
+                      <input className="mono" value={oauthScopes} onChange={(e) => setOauthScopes(e.target.value)} placeholder="https://www.googleapis.com/auth/calendar.events" />
+                    </Field>
+                  </>
+                )}
+              </>
             ) : (
               <div className="grid-2">
                 <Field label="Command">
@@ -180,9 +279,42 @@ export default function Tools() {
                     </td>
                     <td className="mono">{s.transport}</td>
                     <td className="mono muted">{s.url ?? `${s.command} ${s.args.join(' ')}`}</td>
-                    <td className="muted">{s.has_headers ? 'bearer token' : 'none'}</td>
+                    <td>
+                      {s.auth_type === 'oauth' ? (
+                        <div>
+                          <span
+                            className={`pill ${
+                              s.oauth_status === 'connected'
+                                ? 'pill--ok'
+                                : s.oauth_status === 'error'
+                                  ? 'pill--err'
+                                  : 'pill--warn'
+                            }`}
+                          >
+                            <span className="lamp" aria-hidden />
+                            {s.oauth_status === 'connected'
+                              ? 'oauth · connected'
+                              : s.oauth_status === 'error'
+                                ? 'oauth · error'
+                                : 'sign-in required'}
+                          </span>
+                          {s.oauth_error && (
+                            <div className="field-error" style={{ maxWidth: 280, marginTop: 4 }}>
+                              {s.oauth_error}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="muted">{s.has_headers ? 'bearer token' : 'none'}</span>
+                      )}
+                    </td>
                     <td style={{ textAlign: 'right' }}>
                       <span className="row" style={{ justifyContent: 'flex-end' }}>
+                        {s.auth_type === 'oauth' && (
+                          <button className="btn btn--quiet btn--sm" onClick={() => void connect(s)}>
+                            {s.oauth_status === 'connected' ? 'Reconnect' : 'Connect'}
+                          </button>
+                        )}
                         <button className="btn btn--quiet btn--sm" onClick={() => void toggleEnabled(s)}>
                           {s.enabled ? 'Disable' : 'Enable'}
                         </button>

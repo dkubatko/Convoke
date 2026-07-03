@@ -17,6 +17,9 @@ class Settings(BaseSettings):
 
     session_max_age_seconds: int = 7 * 24 * 3600
     cookie_secure: bool = False  # set true behind HTTPS
+    # Where the operator's browser reaches Convoke — OAuth redirect URIs are
+    # built from this. Override when hosting beyond localhost.
+    public_url: str = "http://localhost:8080"
 
     # Memory / embeddings. Changing the model implies changing the dim, which
     # means a migration + full re-embed — treat as a deployment-time choice.
