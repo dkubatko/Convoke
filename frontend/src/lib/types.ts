@@ -122,6 +122,7 @@ export interface Fire {
   slots: Record<string, { value: string }>
   status: string
   error: string | null
+  agent_run_id: number | null
   created_at: string
 }
 

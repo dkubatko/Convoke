@@ -11,6 +11,7 @@ import {
   Message,
   Run,
   SearchHit,
+  TriggerStateInfo,
 } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
@@ -251,6 +252,7 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
   // Optimistic assignment state so the checkbox responds instantly;
   // reconciled from the server on every (re)fetch.
   const [assignedIds, setAssignedIds] = useState<number[]>([])
+  const [expandedIds, setExpandedIds] = useState<number[]>([])
   useEffect(() => {
     if (workflows.data) {
       setAssignedIds(workflows.data.filter((w) => w.assigned).map((w) => w.id))
@@ -267,7 +269,7 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
       void workflows.refetch()
     } catch (err) {
       setAssignedIds(previous)
-      toast('err', err instanceof ApiError ? err.message : 'Couldn’t update the assignment')
+      toast('err', err instanceof ApiError ? err.message : 'Couldn\u2019t update the assignment')
     }
   }
 
@@ -302,51 +304,199 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
       )}
       {workflows.data!.map((wf) => {
         const assigned = assignedIds.includes(wf.id)
+        const expanded = expandedIds.includes(wf.id)
         return (
-        <Card key={wf.id}>
-          <div className="page-head-row" style={{ marginBottom: assigned ? 12 : 0 }}>
-            <label className="row" style={{ gap: 10 }}>
-              <input
-                type="checkbox"
-                style={{ width: 'auto' }}
-                checked={assigned}
-                onChange={(e) => void toggle(wf, e.target.checked)}
-              />
-              <h3 style={{ fontSize: 15 }}>{wf.name}</h3>
-              <span className="pill pill--accent">
-                <span className="lamp" aria-hidden />
-                {wf.type}
+          <Card key={wf.id}>
+            <div className="page-head-row">
+              <label className="row" style={{ gap: 10 }}>
+                <input
+                  type="checkbox"
+                  style={{ width: 'auto' }}
+                  checked={assigned}
+                  onChange={(e) => void toggle(wf, e.target.checked)}
+                />
+                <h3 style={{ fontSize: 15 }}>{wf.name}</h3>
+                <span className="pill pill--accent">
+                  <span className="lamp" aria-hidden />
+                  {wf.type}
+                </span>
+                {!wf.enabled && <StatusPill status="disabled" />}
+              </label>
+              <span className="row" style={{ gap: 10 }}>
+                {assigned && wf.type === 'intent' && <StagePill wf={wf} />}
+                {assigned && (
+                  <button
+                    className="btn btn--quiet btn--sm"
+                    aria-expanded={expanded}
+                    onClick={() =>
+                      setExpandedIds((ids) =>
+                        expanded ? ids.filter((i) => i !== wf.id) : [...ids, wf.id],
+                      )
+                    }
+                  >
+                    {expanded ? 'Hide details \u25be' : 'Details \u25b8'}
+                  </button>
+                )}
               </span>
-              {!wf.enabled && <StatusPill status="disabled" />}
-            </label>
-            {assigned && wf.type === 'intent' && <StagePill wf={wf} />}
-            {assigned && wf.type === 'scheduled' && (
-              <span className="muted mono" style={{ fontSize: 12 }}>
-                next {wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '—'}
-              </span>
-            )}
-          </div>
-          {assigned && wf.type === 'intent' && <IntentStatePanel wf={wf} />}
-          {assigned && wf.recent_runs.length > 0 && (
-            <div style={{ marginTop: 10 }}>
-              <div className="card-title">Recent runs in this chat</div>
-              <ul className="messages">
-                {wf.recent_runs.map((r) => (
-                  <li key={r.id}>
-                    <StatusPill status={r.status} />{' '}
-                    <span className="ts">{timeAgo(r.created_at)}</span>
-                    <br />
-                    <span className={r.error ? 'field-error' : 'muted'}>
-                      {truncate(r.error ?? r.response_text ?? '', 110)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
             </div>
-          )}
-        </Card>
+            {assigned && !expanded && (
+              <p className="muted mono" style={{ fontSize: 12, marginTop: 8 }}>
+                {compactSummary(wf)}
+              </p>
+            )}
+            {assigned && expanded && <ExpandedWorkflow wf={wf} />}
+          </Card>
         )
       })}
+    </div>
+  )
+}
+
+function cooldownActive(s: TriggerStateInfo | undefined): boolean {
+  return !!s?.cooldown_until && new Date(s.cooldown_until) > new Date()
+}
+
+/** One quiet line for the collapsed card — the essentials, no sections. */
+function compactSummary(wf: ChatWorkflow): string {
+  if (wf.type === 'scheduled') {
+    return `${wf.cron ?? ''} \u00b7 next ${wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '\u2014'}`
+  }
+  const s = wf.states[0]
+  if (!s || !s.last_evaluated_at) {
+    return wf.examples_status === 'pending'
+      ? 'calibrating detector\u2026'
+      : 'watching \u2014 nothing evaluated yet'
+  }
+  const parts = [`last check ${timeAgo(s.last_evaluated_at)}`]
+  const gathered = Object.entries(s.slots)
+    .map(([k, v]) => `${k}: ${v.value}`)
+    .join(', ')
+  if (gathered) parts.push(`gathered ${gathered}`)
+  if (cooldownActive(s)) parts.push(`cooldown until ${shortDateTime(s.cooldown_until!)}`)
+  const fires = wf.recent_fires.length
+  if (fires) parts.push(`${fires} fire${fires === 1 ? '' : 's'}`)
+  return parts.join(' \u00b7 ')
+}
+
+interface ActivityEntry {
+  key: string
+  when: string
+  status: string
+  error: boolean
+  detail: string[]
+}
+
+/** A fire and the agent run it queued are ONE event — merge them. */
+function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
+  const runsById = new Map(wf.recent_runs.map((r) => [r.id, r]))
+  const used = new Set<number>()
+  const entries: ActivityEntry[] = wf.recent_fires.map((f) => {
+    const run = f.agent_run_id != null ? runsById.get(f.agent_run_id) : undefined
+    if (run) used.add(run.id)
+    const detail: string[] = []
+    const slots = Object.entries(f.slots)
+      .map(([k, v]) => `${k}: ${v.value}`)
+      .join(' \u00b7 ')
+    if (slots) detail.push(slots)
+    const outcome = run ? (run.error ?? run.response_text) : f.error
+    if (outcome) detail.push(truncate(outcome, 120))
+    return {
+      key: `f${f.id}`,
+      when: f.created_at,
+      status: run && f.status === 'done' ? run.status : f.status,
+      error: !!(run?.error ?? f.error),
+      detail,
+    }
+  })
+  for (const r of wf.recent_runs) {
+    if (used.has(r.id)) continue
+    entries.push({
+      key: `r${r.id}`,
+      when: r.created_at,
+      status: r.status,
+      error: !!r.error,
+      detail: [truncate(r.error ?? r.response_text ?? '', 120)].filter(Boolean),
+    })
+  }
+  return entries.sort((a, b) => b.when.localeCompare(a.when))
+}
+
+function ExpandedWorkflow({ wf }: { wf: ChatWorkflow }) {
+  const activity = mergeActivity(wf)
+  const forum = wf.states.length > 1
+  return (
+    <div className="stack" style={{ gap: 12, marginTop: 12 }}>
+      {wf.type === 'intent' && wf.states.length === 0 && (
+        <p className="muted" style={{ fontSize: 12.5 }}>
+          Watching — no conversation window has been evaluated yet.
+        </p>
+      )}
+      {wf.type === 'intent' &&
+        wf.states.map((s) => (
+          <dl className="kv" key={s.thread_key}>
+            {forum && (
+              <>
+                <dt>thread</dt>
+                <dd>{s.thread_key || 'main'}</dd>
+              </>
+            )}
+            <dt>last check</dt>
+            <dd>
+              {s.last_evaluated_at ? timeAgo(s.last_evaluated_at) : 'never'}
+              {s.last_score != null &&
+                ` \u00b7 match ${s.last_score.toFixed(2)}${wf.threshold ? ` / needs ${wf.threshold.toFixed(2)}` : ''}`}
+              {s.last_confidence != null && ` \u00b7 classifier confidence ${s.last_confidence.toFixed(2)}`}
+            </dd>
+            <dt>gathered</dt>
+            <dd>
+              {Object.keys(s.slots).length === 0
+                ? `nothing yet (waiting for: ${wf.required_slots.map((r) => r.name).join(', ') || 'any match'})`
+                : Object.entries(s.slots)
+                    .map(([k, v]) => `${k}: ${v.value}`)
+                    .join(' \u00b7 ')}
+            </dd>
+            {cooldownActive(s) && (
+              <>
+                <dt>cooldown</dt>
+                <dd>until {shortDateTime(s.cooldown_until!)}</dd>
+              </>
+            )}
+          </dl>
+        ))}
+      {wf.type === 'scheduled' && (
+        <dl className="kv">
+          <dt>schedule</dt>
+          <dd>
+            {wf.cron} · next {wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '\u2014'}
+          </dd>
+        </dl>
+      )}
+      {activity.length > 0 && (
+        <div>
+          <div className="card-title">Activity in this chat</div>
+          <table className="data">
+            <tbody>
+              {activity.map((a) => (
+                <tr key={a.key}>
+                  <td style={{ width: 100 }} className="mono muted">{timeAgo(a.when)}</td>
+                  <td style={{ width: 170 }}>
+                    <StatusPill status={a.status} />
+                  </td>
+                  <td className={a.error ? 'field-error' : 'muted'} style={{ fontSize: 12.5 }}>
+                    {a.detail.join('\u2002\u00b7\u2002') || '\u2014'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {wf.type === 'intent' && (
+        <p className="muted" style={{ fontSize: 12 }}>
+          Windows are evaluated ~1 minute after new messages stop (or every 30 messages);
+          “last check” moves only when there was something new to evaluate.
+        </p>
+      )}
     </div>
   )
 }
@@ -362,77 +512,6 @@ function StagePill({ wf }: { wf: ChatWorkflow }) {
     )
   }
   return <StatusPill status={state.last_stage} live={state.last_stage === 'accumulating'} />
-}
-
-function IntentStatePanel({ wf }: { wf: ChatWorkflow }) {
-  const forum = wf.states.length > 1
-  return (
-    <div className="stack" style={{ gap: 10 }}>
-      {wf.states.length === 0 && (
-        <p className="muted" style={{ fontSize: 12.5 }}>
-          Watching — no conversation window has been evaluated yet.
-        </p>
-      )}
-      <p className="muted" style={{ fontSize: 12 }}>
-        Windows are evaluated about a minute after new messages stop (or every 30
-        messages) — a stale “last check” just means nothing new arrived since.
-      </p>
-      {wf.states.map((s) => (
-        <div key={s.thread_key}>
-          <dl className="kv">
-            {forum && (
-              <>
-                <dt>thread</dt>
-                <dd>{s.thread_key || 'main'}</dd>
-              </>
-            )}
-            <dt>last check</dt>
-            <dd>
-              {s.last_evaluated_at ? timeAgo(s.last_evaluated_at) : 'never'}
-              {s.last_score != null &&
-                ` · match ${s.last_score.toFixed(2)}${wf.threshold ? ` / needs ${wf.threshold.toFixed(2)}` : ''}`}
-              {s.last_confidence != null && ` · classifier confidence ${s.last_confidence.toFixed(2)}`}
-            </dd>
-            <dt>gathered</dt>
-            <dd>
-              {Object.keys(s.slots).length === 0
-                ? `nothing yet (waiting for: ${wf.required_slots.map((r) => r.name).join(', ') || 'any match'})`
-                : Object.entries(s.slots)
-                    .map(([k, v]) => `${k}: ${v.value}`)
-                    .join(' · ')}
-            </dd>
-            {s.cooldown_until && new Date(s.cooldown_until) > new Date() && (
-              <>
-                <dt>cooldown</dt>
-                <dd>until {shortDateTime(s.cooldown_until)}</dd>
-              </>
-            )}
-          </dl>
-        </div>
-      ))}
-      {wf.recent_fires.length > 0 && (
-        <div>
-          <div className="card-title">Fires in this chat</div>
-          <table className="data">
-            <tbody>
-              {wf.recent_fires.map((f) => (
-                <tr key={f.id}>
-                  <td style={{ width: 110 }} className="mono muted">{timeAgo(f.created_at)}</td>
-                  <td style={{ width: 170 }}>
-                    <StatusPill status={f.status} />
-                  </td>
-                  <td className="mono" style={{ fontSize: 12 }}>
-                    {Object.entries(f.slots).map(([k, v]) => `${k}: ${v.value}`).join(' · ') || '—'}
-                    {f.error && <div className="field-error">{f.error}</div>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  )
 }
 
 /* ---------------- Import ---------------- */

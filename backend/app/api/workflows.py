@@ -184,6 +184,9 @@ class FireOut(BaseModel):
     slots: dict
     status: str
     error: str | None
+    # Links a done fire to the agent run it queued, so UIs can merge the two
+    # into one activity entry instead of showing the same event twice.
+    agent_run_id: int | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -205,7 +208,8 @@ async def list_fires(
     return [
         FireOut(
             id=f.id, workflow_id=f.workflow_id, chat_id=f.chat_id, chat_title=title or "",
-            slots=f.slots or {}, status=f.status, error=f.error, created_at=f.created_at,
+            slots=f.slots or {}, status=f.status, error=f.error,
+            agent_run_id=f.agent_run_id, created_at=f.created_at,
         )
         for f, title in rows
     ]
@@ -343,7 +347,7 @@ async def chat_workflows(
                     FireOut(
                         id=f.id, workflow_id=f.workflow_id, chat_id=f.chat_id,
                         chat_title=chat.title or "", slots=f.slots or {}, status=f.status,
-                        error=f.error, created_at=f.created_at,
+                        error=f.error, agent_run_id=f.agent_run_id, created_at=f.created_at,
                     )
                     for f in fires
                 ],
