@@ -508,7 +508,15 @@ td.mono {
   gap: 2px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 20px;
+  /* Scrollable on narrow screens, but the scrollbar itself is hidden — with
+     "always show scrollbars" (macOS) an auto scrollbar renders a permanent
+     track/gutter here even when the tabs fit. */
   overflow-x: auto;
+  scrollbar-width: none; /* Firefox */
+}
+
+.tabs::-webkit-scrollbar {
+  display: none; /* WebKit/Blink */
 }
 
 .tabs button {

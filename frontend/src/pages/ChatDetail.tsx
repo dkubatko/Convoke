@@ -255,30 +255,40 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
     { pollMs: 5000 },
   )
   // Optimistic assignment state so the checkbox responds instantly;
-  // reconciled from the server on every (re)fetch.
+  // reconciled from the server on every (re)fetch. A ref mirrors it so the
+  // PUT body is computed synchronously \u2014 a setState updater's side-effect is
+  // NOT available before the next line (React batches), which previously sent
+  // an empty list and un-assigned everything.
   const [assignedIds, setAssignedIds] = useState<number[]>([])
+  const assignedRef = useRef<number[]>([])
+  const setAssigned = (next: number[]) => {
+    assignedRef.current = next
+    setAssignedIds(next)
+  }
   const [expandedIds, setExpandedIds] = useState<number[]>([])
   useEffect(() => {
     if (workflows.data) {
-      setAssignedIds(workflows.data.filter((w) => w.assigned).map((w) => w.id))
+      setAssigned(workflows.data.filter((w) => w.assigned).map((w) => w.id))
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflows.data])
 
   async function toggle(wf: ChatWorkflow, on: boolean) {
-    // Compute the full next set from the latest state inside the updater so
-    // concurrent toggles compose (the PUT replaces the whole list); rollback
-    // touches only this id rather than restoring a stale snapshot.
-    let next: number[] = []
-    setAssignedIds((ids) => {
-      next = on ? [...ids, wf.id] : ids.filter((id) => id !== wf.id)
-      return next
-    })
+    // Compute the full next set from the ref (latest committed state) so
+    // concurrent toggles compose (the PUT replaces the whole list) and the
+    // request body is correct without waiting on a state flush.
+    const next = on
+      ? [...assignedRef.current, wf.id]
+      : assignedRef.current.filter((id) => id !== wf.id)
+    setAssigned(next)
     try {
       await api.put(`/api/chats/${chatId}/workflows`, next)
       toast('ok', on ? `${wf.name} now watches this chat` : `${wf.name} no longer watches this chat`)
       void workflows.refetch()
     } catch (err) {
-      setAssignedIds((ids) => (on ? ids.filter((id) => id !== wf.id) : [...ids, wf.id]))
+      setAssigned(
+        on ? assignedRef.current.filter((id) => id !== wf.id) : [...assignedRef.current, wf.id],
+      )
       toast('err', err instanceof ApiError ? err.message : 'Couldn\u2019t update the assignment')
     }
   }
@@ -318,9 +328,13 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
         return (
           <Card key={wf.id}>
             <div className="page-head-row">
-              <label className="row" style={{ gap: 10 }}>
+              {/* Checkbox standalone — never wrapped in a <label> with other
+                  content, or a click bubbles to the label and re-fires on the
+                  input, toggling twice (spurious PUT, box won't stay checked). */}
+              <div className="row" style={{ gap: 10 }}>
                 <input
                   type="checkbox"
+                  aria-label={`Enable ${wf.name} for this chat`}
                   style={{ width: 'auto' }}
                   checked={assigned}
                   onChange={(e) => void toggle(wf, e.target.checked)}
@@ -331,7 +345,7 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
                   {wf.type}
                 </span>
                 {!wf.enabled && <StatusPill status="disabled" />}
-              </label>
+              </div>
               <span className="row" style={{ gap: 10 }}>
                 {assigned && wf.type === 'intent' && <StagePill wf={wf} />}
                 {assigned && (
@@ -680,9 +694,10 @@ function ToolsTab({ chatId }: { chatId: number }) {
       ) : (
         <div className="stack" style={{ gap: 10 }}>
           {servers.data!.map((s) => (
-            <label key={s.id} className="row" style={{ gap: 10 }}>
+            <div key={s.id} className="row" style={{ gap: 10 }}>
               <input
                 type="checkbox"
+                aria-label={`Enable ${s.name} for this chat`}
                 style={{ width: 'auto' }}
                 checked={assigned.includes(s.id)}
                 onChange={(e) => void toggle(s.id, e.target.checked)}
@@ -695,7 +710,7 @@ function ToolsTab({ chatId }: { chatId: number }) {
                 </span>
                 {!s.enabled && <span className="muted"> (disabled globally)</span>}
               </span>
-            </label>
+            </div>
           ))}
         </div>
       )}
