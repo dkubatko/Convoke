@@ -16,7 +16,8 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 COLUMNS = [
-    ("auth_type", sa.Text(), "'none'"),
+    # plain string server_default is quoted by SQLAlchemy — do not pre-quote
+    ("auth_type", sa.Text(), "none"),
     ("oauth_status", sa.Text(), None),
     ("oauth_error", sa.Text(), None),
     ("oauth_client_id", sa.Text(), None),

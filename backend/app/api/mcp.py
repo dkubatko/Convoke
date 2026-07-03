@@ -94,6 +94,63 @@ def _validate(body: McpServerIn) -> None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "stdio transport requires command")
 
 
+class McpTestIn(BaseModel):
+    transport: str
+    url: str | None = None
+    command: str | None = None
+    args: list[str] = []
+    bearer: str | None = None
+
+
+class McpTestOut(BaseModel):
+    ok: bool
+    detail: str
+
+
+@router.post("/mcp-servers/test", response_model=McpTestOut)
+async def test_server_config(body: McpTestIn) -> McpTestOut:
+    """Pre-registration probe: MCP handshake + tools/list against the form's
+    values, so a typo'd URL or dead command is caught before saving."""
+    from app.agents.mcp import build_probe_target, probe_target
+
+    try:
+        target = build_probe_target(
+            body.transport,
+            body.url,
+            body.command,
+            body.args,
+            {"Authorization": f"Bearer {body.bearer}"} if body.bearer else None,
+        )
+    except ValueError as e:
+        return McpTestOut(ok=False, detail=str(e))
+    ok, detail = await probe_target(target)
+    return McpTestOut(ok=ok, detail=detail)
+
+
+@router.post("/mcp-servers/{server_id}/test", response_model=McpTestOut)
+async def test_registered_server(
+    server_id: int, session: AsyncSession = Depends(get_session)
+) -> McpTestOut:
+    """Probe a saved server with its stored credentials (incl. OAuth tokens)."""
+    from app.agents.mcp import build_probe_target, ensure_oauth_token, probe_target
+
+    server = await session.get(McpServer, server_id)
+    if server is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "MCP server not found")
+    headers = json.loads(decrypt(server.headers_encrypted)) if server.headers_encrypted else {}
+    if server.auth_type == "oauth":
+        try:
+            token = await ensure_oauth_token(session, server)
+        except Exception as e:  # noqa: BLE001 — surface as a test failure
+            return McpTestOut(ok=False, detail=str(e))
+        headers["Authorization"] = f"Bearer {token}"
+    target = build_probe_target(
+        server.transport, server.url, server.command, server.args or [], headers or None
+    )
+    ok, detail = await probe_target(target)
+    return McpTestOut(ok=ok, detail=detail)
+
+
 async def _start_oauth_flow(session: AsyncSession, server: McpServer) -> str:
     """Discovery → client (DCR or operator-provided) → authorize URL.
     Persists everything the callback will need; returns the URL to open."""

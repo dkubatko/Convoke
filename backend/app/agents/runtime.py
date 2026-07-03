@@ -138,7 +138,18 @@ async def execute_run(
         log.exception("agent run %s failed", run_id)
         async with sessionmaker() as session:
             run = await session.get(AgentRun, run_id)
-            await _fail(session, run, f"{type(e).__name__}: {e}", bot, limiter, bot_row, chat)
+            await _fail(
+                session,
+                run,
+                f"{type(e).__name__}: {e}",
+                bot,
+                limiter,
+                bot_row,
+                chat,
+                # Silence reads as a crash — always leave a trace in the chat.
+                notify="Something went wrong and I couldn't finish that. "
+                "The details are in Convoke's run log.",
+            )
         return
 
     async with sessionmaker() as session:
