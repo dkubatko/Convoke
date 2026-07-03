@@ -11,9 +11,13 @@ from app.core.db import get_session, get_sessionmaker
 from app.core.security import require_operator
 from app.intent.examples import generate_examples
 from app.memory.runtime import get_embedder
+from sqlalchemy import func
+
 from app.models import (
     AgentRun,
     Chat,
+    ChatEvalState,
+    Message,
     PendingFire,
     TriggerState,
     Workflow,
@@ -248,6 +252,9 @@ class ChatWorkflowOut(BaseModel):
     states: list[TriggerStateOut]
     recent_fires: list[FireOut]
     recent_runs: list[ChatRunOut]
+    # Messages newer than the evaluation cursor — i.e. waiting for the next
+    # window to close. Same value for every workflow of the chat.
+    pending_messages: int = 0
 
 
 @router.get("/chats/{chat_id}/workflows", response_model=list[ChatWorkflowOut])
@@ -266,6 +273,19 @@ async def chat_workflows(
             )
         ).scalars()
     )
+    eval_state = await session.get(ChatEvalState, chat_id)
+    cursor = eval_state.last_tg_message_id if eval_state else 0
+    pending_messages = (
+        await session.execute(
+            select(func.count())
+            .select_from(Message)
+            .where(
+                Message.chat_id == chat_id,
+                Message.tg_message_id > cursor,
+                Message.source != "self",
+            )
+        )
+    ).scalar() or 0
     workflows = (await session.execute(select(Workflow).order_by(Workflow.id))).scalars().all()
 
     out: list[ChatWorkflowOut] = []
@@ -328,6 +348,7 @@ async def chat_workflows(
                     for f in fires
                 ],
                 recent_runs=[ChatRunOut.model_validate(r) for r in runs],
+                pending_messages=pending_messages,
             )
         )
     return out

@@ -30,6 +30,33 @@ export default function Tools() {
   const [oauthScopes, setOauthScopes] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [test, setTest] = useState<
+    { phase: 'idle' } | { phase: 'testing' } | { phase: 'ok'; detail: string } | { phase: 'failed'; detail: string }
+  >({ phase: 'idle' })
+
+  // Any edit invalidates the previous probe result.
+  function edit<T>(setter: (v: T) => void) {
+    return (value: T) => {
+      setter(value)
+      setTest({ phase: 'idle' })
+    }
+  }
+
+  async function runTest() {
+    setTest({ phase: 'testing' })
+    try {
+      const result = await api.post<{ ok: boolean; detail: string }>('/api/mcp-servers/test', {
+        transport,
+        url: transport === 'http' ? url : null,
+        command: transport === 'stdio' ? command : null,
+        args: transport === 'stdio' && args ? args.split(/\s+/) : [],
+        bearer: auth === 'bearer' && bearer ? bearer : null,
+      })
+      setTest(result.ok ? { phase: 'ok', detail: result.detail } : { phase: 'failed', detail: result.detail })
+    } catch (err) {
+      setTest({ phase: 'failed', detail: err instanceof ApiError ? err.message : 'The backend didn’t respond.' })
+    }
+  }
 
   /** Opens the provider sign-in and waits for the callback to land (2 min cap). */
   async function awaitSignIn(serverId: number, authorizeUrl: string, serverName: string) {
@@ -83,6 +110,7 @@ export default function Tools() {
       })
       setName(''); setUrl(''); setCommand(''); setArgs(''); setBearer('')
       setOauthClientId(''); setOauthClientSecret(''); setOauthScopes('')
+      setTest({ phase: 'idle' })
       void servers.refetch()
       if (created.auth_type === 'oauth') {
         if (created.authorize_url) {
@@ -108,6 +136,18 @@ export default function Tools() {
       if (res.authorize_url) await awaitSignIn(server.id, res.authorize_url, server.name)
     } catch (err) {
       toast('err', err instanceof ApiError ? err.message : 'Couldn’t start the sign-in')
+    }
+  }
+
+  async function testRegistered(server: McpServer) {
+    toast('info', `Testing ${server.name}…`)
+    try {
+      const result = await api.post<{ ok: boolean; detail: string }>(
+        `/api/mcp-servers/${server.id}/test`,
+      )
+      toast(result.ok ? 'ok' : 'err', `${server.name}: ${result.detail}`)
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : `Couldn’t test ${server.name}`)
     }
   }
 
@@ -163,7 +203,7 @@ export default function Tools() {
                     : 'The command must exist inside the backend container.'
                 }
               >
-                <select value={transport} onChange={(e) => setTransport(e.target.value as 'http' | 'stdio')}>
+                <select value={transport} onChange={(e) => edit(setTransport)(e.target.value as 'http' | 'stdio')}>
                   <option value="http">Streamable HTTP</option>
                   <option value="stdio">stdio (local command)</option>
                 </select>
@@ -176,7 +216,7 @@ export default function Tools() {
                     <input
                       className="mono"
                       value={url}
-                      onChange={(e) => setUrl(e.target.value)}
+                      onChange={(e) => edit(setUrl)(e.target.value)}
                       placeholder="http://calendar:8000/mcp"
                     />
                   </Field>
@@ -190,7 +230,7 @@ export default function Tools() {
                           : 'For open servers that need no credentials.'
                     }
                   >
-                    <select value={auth} onChange={(e) => setAuth(e.target.value as typeof auth)}>
+                    <select value={auth} onChange={(e) => edit(setAuth)(e.target.value as typeof auth)}>
                       <option value="none">None</option>
                       <option value="bearer">Bearer token</option>
                       <option value="oauth">OAuth sign-in</option>
@@ -199,7 +239,7 @@ export default function Tools() {
                 </div>
                 {auth === 'bearer' && (
                   <Field label="Bearer token">
-                    <input type="password" value={bearer} onChange={(e) => setBearer(e.target.value)} />
+                    <input type="password" value={bearer} onChange={(e) => edit(setBearer)(e.target.value)} />
                   </Field>
                 )}
                 {auth === 'oauth' && (
@@ -224,22 +264,54 @@ export default function Tools() {
             ) : (
               <div className="grid-2">
                 <Field label="Command">
-                  <input className="mono" value={command} onChange={(e) => setCommand(e.target.value)} placeholder="mcp-filesystem" />
+                  <input className="mono" value={command} onChange={(e) => edit(setCommand)(e.target.value)} placeholder="mcp-filesystem" />
                 </Field>
                 <Field label="Arguments">
-                  <input className="mono" value={args} onChange={(e) => setArgs(e.target.value)} placeholder="--root /data" />
+                  <input className="mono" value={args} onChange={(e) => edit(setArgs)(e.target.value)} placeholder="--root /data" />
                 </Field>
               </div>
             )}
             {error && <p className="field-error">{error}</p>}
             <div className="row">
+              {auth !== 'oauth' && (
+                <button
+                  type="button"
+                  className="btn btn--quiet"
+                  disabled={test.phase === 'testing' || (transport === 'http' ? !url : !command)}
+                  onClick={() => void runTest()}
+                >
+                  {test.phase === 'testing' ? 'Testing…' : 'Test connection'}
+                </button>
+              )}
               <button
                 className="btn btn--primary"
-                disabled={busy || !name || (transport === 'http' ? !url : !command)}
+                disabled={
+                  busy ||
+                  !name ||
+                  (transport === 'http' ? !url : !command) ||
+                  (auth !== 'oauth' && test.phase !== 'ok')
+                }
+                title={auth !== 'oauth' && test.phase !== 'ok' ? 'Test the connection first' : undefined}
               >
-                {busy ? 'Registering…' : 'Register server'}
+                {busy ? 'Registering…' : auth === 'oauth' ? 'Register & sign in' : 'Register server'}
               </button>
             </div>
+            {test.phase === 'ok' && (
+              <p>
+                <span className="pill pill--ok">
+                  <span className="lamp" aria-hidden />
+                  connection ok
+                </span>{' '}
+                <span className="muted">{test.detail}</span>
+              </p>
+            )}
+            {test.phase === 'failed' && <p className="field-error">{test.detail}</p>}
+            {test.phase === 'idle' && auth !== 'oauth' && (
+              <p className="muted" style={{ fontSize: 12.5 }}>
+                Test the connection to enable registering. OAuth servers verify through the
+                sign-in instead.
+              </p>
+            )}
           </form>
         </Card>
 
@@ -315,6 +387,9 @@ export default function Tools() {
                             {s.oauth_status === 'connected' ? 'Reconnect' : 'Connect'}
                           </button>
                         )}
+                        <button className="btn btn--quiet btn--sm" onClick={() => void testRegistered(s)}>
+                          Test
+                        </button>
                         <button className="btn btn--quiet btn--sm" onClick={() => void toggleEnabled(s)}>
                           {s.enabled ? 'Disable' : 'Enable'}
                         </button>

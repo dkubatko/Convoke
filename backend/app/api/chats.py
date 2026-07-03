@@ -73,7 +73,7 @@ async def recent_messages(
         .scalars()
         .all()
     )
-    return list(reversed(rows))
+    return list(rows)  # newest first
 
 
 @router.get("/chats/{chat_id}/search", response_model=list[SearchHitOut])

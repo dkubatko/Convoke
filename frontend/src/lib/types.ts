@@ -159,4 +159,5 @@ export interface ChatWorkflow {
   states: TriggerStateInfo[]
   recent_fires: Fire[]
   recent_runs: ChatWorkflowRun[]
+  pending_messages: number
 }

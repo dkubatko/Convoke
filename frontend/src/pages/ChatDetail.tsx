@@ -286,8 +286,20 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
     )
   }
 
+  const pending = workflows.data![0]?.pending_messages ?? 0
   return (
     <div className="stack">
+      {pending > 0 && (
+        <p className="row" style={{ gap: 8 }}>
+          <span className="pill pill--accent pill--live">
+            <span className="lamp" aria-hidden />
+            {pending} message{pending === 1 ? '' : 's'} waiting
+          </span>
+          <span className="muted" style={{ fontSize: 12.5 }}>
+            evaluated ~1 minute after the chat goes quiet
+          </span>
+        </p>
+      )}
       {workflows.data!.map((wf) => {
         const assigned = assignedIds.includes(wf.id)
         return (
