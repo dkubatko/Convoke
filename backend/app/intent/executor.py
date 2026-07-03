@@ -100,6 +100,7 @@ class FireExecutor:
         run = AgentRun(
             chat_id=fire.chat_id,
             trigger="workflow",
+            workflow_id=wf.id,
             thread_id=fire.thread_key or None,
             request_text=build_action_request(wf, fire.slots or {}),
         )

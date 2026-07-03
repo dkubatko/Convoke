@@ -186,27 +186,38 @@ class IntentSweeper:
             tstate = TriggerState(workflow_id=wf.id, chat_id=chat_id, thread_key=thread_key)
             session.add(tstate)
 
+        def mark(stage: str, score: float | None = None, confidence: float | None = None) -> None:
+            tstate.last_evaluated_at = now
+            tstate.last_stage = stage
+            tstate.last_score = score
+            tstate.last_confidence = confidence
+
         cooldown_until = _as_utc(tstate.cooldown_until)
         if cooldown_until is not None and cooldown_until > now:
+            mark("cooldown")
             return 0
 
         # Stage 1: prefilter (skipped when the state is mid-accumulation —
         # follow-ups like "ok wednesday then" may not resemble the examples).
+        score: float | None = None
         if not tstate.slots:
             positives = await load_positive_vectors(session, wf.id)
             if positives:
-                best = max(dot(window_vec, p) for p in positives)
-                if best < (wf.threshold or 0.8):
+                score = max(dot(window_vec, p) for p in positives)
+                if score < (wf.threshold or 0.8):
+                    mark("prefilter_skip", score=score)
                     return 0
 
         # LLM circuit breaker
         last_llm = _as_utc(tstate.last_llm_at)
         if last_llm is not None and (now - last_llm).total_seconds() < self.settings.intent_min_llm_interval_seconds:
+            mark("throttled", score=score)
             return 0
 
         verdict = await self._classify(session, wf, tstate, rendered)
         tstate.last_llm_at = now
         if verdict is None:
+            mark("classifier_error", score=score)
             return 1
 
         slots = decay_state(
@@ -236,7 +247,12 @@ class IntentSweeper:
             )
             tstate.slots = {}
             tstate.cooldown_until = now + timedelta(seconds=wf.cooldown_seconds)
+            mark("fired", score=score, confidence=verdict.confidence)
             log.info("workflow %s converged in chat %s: %s", wf.id, chat_id, render_slots(slots))
+        elif verdict.match:
+            mark("accumulating", score=score, confidence=verdict.confidence)
+        else:
+            mark("no_match", score=score, confidence=verdict.confidence)
         return 1
 
     async def _classify(

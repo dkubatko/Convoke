@@ -9,9 +9,9 @@ import {
   EmptyState,
   ErrorNote,
   Field,
-  LoadingWire,
   PageHead,
   StatusPill,
+  TableSkeleton,
 } from '../components/ui'
 
 export default function Bots() {
@@ -103,7 +103,7 @@ export default function Bots() {
 
         <Card pad={false}>
           {bots.loading ? (
-            <LoadingWire />
+            <TableSkeleton rows={2} />
           ) : bots.error ? (
             <ErrorNote message={bots.error} onRetry={() => void bots.refetch()} />
           ) : (bots.data ?? []).length === 0 ? (

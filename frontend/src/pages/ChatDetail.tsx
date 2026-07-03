@@ -1,21 +1,31 @@
-import { FormEvent, useRef, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api, ApiError } from '../lib/api'
 import { shortDateTime, timeAgo, truncate } from '../lib/format'
-import { Chat, Gap, ImportJob, McpServer, Message, Run, SearchHit } from '../lib/types'
+import {
+  Chat,
+  ChatWorkflow,
+  Gap,
+  ImportJob,
+  McpServer,
+  Message,
+  Run,
+  SearchHit,
+} from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
 import {
   Card,
+  CardSkeleton,
   EmptyState,
   ErrorNote,
-  LoadingWire,
   PageHead,
   StatusPill,
+  TableSkeleton,
 } from '../components/ui'
 
-const TABS = ['Memory', 'Import history', 'Tools', 'Agent runs'] as const
+const TABS = ['Memory', 'Workflows', 'Import history', 'Tools', 'Agent runs'] as const
 type Tab = (typeof TABS)[number]
 
 export default function ChatDetail() {
@@ -28,7 +38,7 @@ export default function ChatDetail() {
     [id],
   )
 
-  if (chat.loading) return <LoadingWire />
+  if (chat.loading) return <CardSkeleton lines={5} />
   if (chat.error) return <ErrorNote message={chat.error} onRetry={() => void chat.refetch()} />
   if (!chat.data) {
     return (
@@ -66,6 +76,7 @@ export default function ChatDetail() {
         ))}
       </div>
       {tab === 'Memory' && <MemoryTab chatId={id} />}
+      {tab === 'Workflows' && <WorkflowsTab chatId={id} />}
       {tab === 'Import history' && <ImportTab chatId={id} />}
       {tab === 'Tools' && <ToolsTab chatId={id} />}
       {tab === 'Agent runs' && <RunsTab chatId={id} />}
@@ -171,7 +182,7 @@ function MemoryTab({ chatId }: { chatId: number }) {
 
       <Card title="Latest messages" pad={false}>
         {messages.loading ? (
-          <LoadingWire />
+          <TableSkeleton rows={5} />
         ) : (messages.data ?? []).length === 0 ? (
           <EmptyState
             title="Nothing stored yet"
@@ -224,6 +235,186 @@ function MemoryTab({ chatId }: { chatId: number }) {
           </button>
         </div>
       </Card>
+    </div>
+  )
+}
+
+/* ---------------- Workflows ---------------- */
+
+function WorkflowsTab({ chatId }: { chatId: number }) {
+  const toast = useToast()
+  const workflows = useQuery<ChatWorkflow[]>(
+    () => api.get(`/api/chats/${chatId}/workflows`),
+    [chatId],
+    { pollMs: 5000 },
+  )
+  // Optimistic assignment state so the checkbox responds instantly;
+  // reconciled from the server on every (re)fetch.
+  const [assignedIds, setAssignedIds] = useState<number[]>([])
+  useEffect(() => {
+    if (workflows.data) {
+      setAssignedIds(workflows.data.filter((w) => w.assigned).map((w) => w.id))
+    }
+  }, [workflows.data])
+
+  async function toggle(wf: ChatWorkflow, on: boolean) {
+    const previous = assignedIds
+    const next = on ? [...previous, wf.id] : previous.filter((id) => id !== wf.id)
+    setAssignedIds(next)
+    try {
+      await api.put(`/api/chats/${chatId}/workflows`, next)
+      toast('ok', on ? `${wf.name} now watches this chat` : `${wf.name} no longer watches this chat`)
+      void workflows.refetch()
+    } catch (err) {
+      setAssignedIds(previous)
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t update the assignment')
+    }
+  }
+
+  if (workflows.loading) return <CardSkeleton lines={4} />
+  if (workflows.error)
+    return <ErrorNote message={workflows.error} onRetry={() => void workflows.refetch()} />
+  if ((workflows.data ?? []).length === 0) {
+    return (
+      <Card pad={false}>
+        <EmptyState
+          title="No workflows exist yet"
+          hint="Create one on the Workflows page, then enable it for this chat here."
+          action={<Link className="btn btn--quiet" to="/workflows">Open Workflows</Link>}
+        />
+      </Card>
+    )
+  }
+
+  return (
+    <div className="stack">
+      {workflows.data!.map((wf) => {
+        const assigned = assignedIds.includes(wf.id)
+        return (
+        <Card key={wf.id}>
+          <div className="page-head-row" style={{ marginBottom: assigned ? 12 : 0 }}>
+            <label className="row" style={{ gap: 10 }}>
+              <input
+                type="checkbox"
+                style={{ width: 'auto' }}
+                checked={assigned}
+                onChange={(e) => void toggle(wf, e.target.checked)}
+              />
+              <h3 style={{ fontSize: 15 }}>{wf.name}</h3>
+              <span className="pill pill--accent">
+                <span className="lamp" aria-hidden />
+                {wf.type}
+              </span>
+              {!wf.enabled && <StatusPill status="disabled" />}
+            </label>
+            {assigned && wf.type === 'intent' && <StagePill wf={wf} />}
+            {assigned && wf.type === 'scheduled' && (
+              <span className="muted mono" style={{ fontSize: 12 }}>
+                next {wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '—'}
+              </span>
+            )}
+          </div>
+          {assigned && wf.type === 'intent' && <IntentStatePanel wf={wf} />}
+          {assigned && wf.recent_runs.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div className="card-title">Recent runs in this chat</div>
+              <ul className="messages">
+                {wf.recent_runs.map((r) => (
+                  <li key={r.id}>
+                    <StatusPill status={r.status} />{' '}
+                    <span className="ts">{timeAgo(r.created_at)}</span>
+                    <br />
+                    <span className={r.error ? 'field-error' : 'muted'}>
+                      {truncate(r.error ?? r.response_text ?? '', 110)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </Card>
+        )
+      })}
+    </div>
+  )
+}
+
+function StagePill({ wf }: { wf: ChatWorkflow }) {
+  const state = wf.states[0]
+  if (!state || !state.last_stage) {
+    return (
+      <span className="pill pill--idle">
+        <span className="lamp" aria-hidden />
+        {wf.examples_status === 'pending' ? 'calibrating detector' : 'no activity yet'}
+      </span>
+    )
+  }
+  return <StatusPill status={state.last_stage} live={state.last_stage === 'accumulating'} />
+}
+
+function IntentStatePanel({ wf }: { wf: ChatWorkflow }) {
+  const forum = wf.states.length > 1
+  return (
+    <div className="stack" style={{ gap: 10 }}>
+      {wf.states.length === 0 && (
+        <p className="muted" style={{ fontSize: 12.5 }}>
+          Watching — no conversation window has been evaluated yet.
+        </p>
+      )}
+      {wf.states.map((s) => (
+        <div key={s.thread_key}>
+          <dl className="kv">
+            {forum && (
+              <>
+                <dt>thread</dt>
+                <dd>{s.thread_key || 'main'}</dd>
+              </>
+            )}
+            <dt>last check</dt>
+            <dd>
+              {s.last_evaluated_at ? timeAgo(s.last_evaluated_at) : 'never'}
+              {s.last_score != null &&
+                ` · match ${s.last_score.toFixed(2)}${wf.threshold ? ` / needs ${wf.threshold.toFixed(2)}` : ''}`}
+              {s.last_confidence != null && ` · classifier confidence ${s.last_confidence.toFixed(2)}`}
+            </dd>
+            <dt>gathered</dt>
+            <dd>
+              {Object.keys(s.slots).length === 0
+                ? `nothing yet (waiting for: ${wf.required_slots.map((r) => r.name).join(', ') || 'any match'})`
+                : Object.entries(s.slots)
+                    .map(([k, v]) => `${k}: ${v.value}`)
+                    .join(' · ')}
+            </dd>
+            {s.cooldown_until && new Date(s.cooldown_until) > new Date() && (
+              <>
+                <dt>cooldown</dt>
+                <dd>until {shortDateTime(s.cooldown_until)}</dd>
+              </>
+            )}
+          </dl>
+        </div>
+      ))}
+      {wf.recent_fires.length > 0 && (
+        <div>
+          <div className="card-title">Fires in this chat</div>
+          <table className="data">
+            <tbody>
+              {wf.recent_fires.map((f) => (
+                <tr key={f.id}>
+                  <td style={{ width: 110 }} className="mono muted">{timeAgo(f.created_at)}</td>
+                  <td style={{ width: 170 }}>
+                    <StatusPill status={f.status} />
+                  </td>
+                  <td className="mono" style={{ fontSize: 12 }}>
+                    {Object.entries(f.slots).map(([k, v]) => `${k}: ${v.value}`).join(' · ') || '—'}
+                    {f.error && <div className="field-error">{f.error}</div>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
@@ -289,7 +480,7 @@ function ImportTab({ chatId }: { chatId: number }) {
 
       <Card title="Imports" pad={false}>
         {jobs.loading ? (
-          <LoadingWire />
+          <TableSkeleton rows={2} />
         ) : (jobs.data ?? []).length === 0 ? (
           <EmptyState title="No imports yet" hint="Uploads and their validation results appear here." />
         ) : (
@@ -349,7 +540,7 @@ function ToolsTab({ chatId }: { chatId: number }) {
     }
   }
 
-  if (servers.loading || enabled.loading) return <LoadingWire />
+  if (servers.loading || enabled.loading) return <CardSkeleton lines={3} />
 
   return (
     <Card title="Tools available to this chat's agent">
@@ -392,7 +583,12 @@ function RunsTab({ chatId }: { chatId: number }) {
     pollMs: 5000,
   })
 
-  if (runs.loading) return <LoadingWire />
+  if (runs.loading)
+    return (
+      <Card pad={false}>
+        <TableSkeleton rows={4} />
+      </Card>
+    )
   if (runs.error) return <ErrorNote message={runs.error} onRetry={() => void runs.refetch()} />
 
   return (

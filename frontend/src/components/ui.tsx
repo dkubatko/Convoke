@@ -75,6 +75,51 @@ export function LoadingWire() {
   return <div className="wire wire--live loading-wire" role="status" aria-label="Loading" />
 }
 
+export function Skeleton({ width = '100%', height = 13, style }: {
+  width?: number | string
+  height?: number
+  style?: React.CSSProperties
+}) {
+  return <span className="skeleton" style={{ width, height, display: 'inline-block', ...style }} />
+}
+
+/** Table-shaped placeholder: keeps row height/spacing so content doesn't jump in. */
+export function TableSkeleton({ rows = 4 }: { rows?: number }) {
+  const widths = [
+    ['18%', '30%', '12%', '24%'],
+    ['22%', '24%', '14%', '18%'],
+    ['16%', '34%', '10%', '22%'],
+  ]
+  return (
+    <div role="status" aria-label="Loading">
+      {Array.from({ length: rows }, (_, i) => (
+        <div key={i} className="skeleton-row">
+          {widths[i % widths.length].map((w, j) => (
+            <Skeleton key={j} width={w} height={j === 0 ? 15 : 12} />
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** Card-shaped placeholder with a title bar and a few text lines. */
+export function CardSkeleton({ lines = 3 }: { lines?: number }) {
+  return (
+    <section className="card card-pad" role="status" aria-label="Loading">
+      <Skeleton width={140} height={11} style={{ marginBottom: 14 }} />
+      {Array.from({ length: lines }, (_, i) => (
+        <Skeleton
+          key={i}
+          width={`${88 - i * 16}%`}
+          height={12}
+          style={{ display: 'block', marginBottom: 9 }}
+        />
+      ))}
+    </section>
+  )
+}
+
 export function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
     <div className="empty">
@@ -112,11 +157,25 @@ const PILL_TONE: Record<string, string> = {
   // workflow examples
   ready: 'ok',
   fallback: 'warn',
+  // trigger-state stages
+  prefilter_skip: 'idle',
+  no_match: 'idle',
+  accumulating: 'accent',
+  fired: 'ok',
+  cooldown: 'warn',
+  throttled: 'warn',
+  classifier_error: 'err',
 }
 
 const PILL_LABEL: Record<string, string> = {
   pending_auth: 'waiting for admin',
   confirm_wait: 'awaiting confirmation',
+  prefilter_skip: 'listening',
+  no_match: 'listening · no intent',
+  accumulating: 'gathering info',
+  cooldown: 'cooling down',
+  throttled: 'rate-limited',
+  classifier_error: 'classifier error',
 }
 
 export function StatusPill({ status, live = false }: { status: string; live?: boolean }) {

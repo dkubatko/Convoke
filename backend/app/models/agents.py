@@ -61,6 +61,10 @@ class AgentRun(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
     trigger: Mapped[str] = mapped_column(Text)  # mention | reply | workflow
+    # Set when trigger == 'workflow': which workflow queued this run.
+    workflow_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
+    )
     trigger_tg_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[str] = mapped_column(Text, default="pending")

@@ -97,6 +97,13 @@ class TriggerState(Base):
     last_match_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_llm_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Observability: where the most recent evaluation of this state ended.
+    # Stages: cooldown | prefilter_skip | throttled | classifier_error |
+    #         no_match | accumulating | fired
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_stage: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # prefilter cosine
+    last_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)  # classifier
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

@@ -3,7 +3,7 @@ import { api } from '../lib/api'
 import { timeAgo, truncate } from '../lib/format'
 import { Bot, Chat, GlobalRun, Provider, Workflow } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
-import { Card, EmptyState, LoadingWire, PageHead, StatusPill } from '../components/ui'
+import { Card, CardSkeleton, EmptyState, PageHead, StatusPill, TableSkeleton } from '../components/ui'
 
 export default function Overview() {
   const bots = useQuery<Bot[]>(() => api.get('/api/bots'), [], { pollMs: 15000 })
@@ -49,7 +49,12 @@ export default function Overview() {
         lede="What your assistants are hearing, remembering, and doing right now."
       />
       {loading ? (
-        <LoadingWire />
+        <div className="stack">
+          <CardSkeleton lines={2} />
+          <section className="card card-pad">
+            <TableSkeleton rows={3} />
+          </section>
+        </div>
       ) : (
         <div className="stack">
           {!setupDone && (

@@ -3,7 +3,7 @@ import { api } from '../lib/api'
 import { timeAgo } from '../lib/format'
 import { Bot, Chat } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
-import { Card, EmptyState, ErrorNote, LoadingWire, PageHead, StatusPill } from '../components/ui'
+import { Card, EmptyState, ErrorNote, PageHead, StatusPill, TableSkeleton } from '../components/ui'
 
 export default function Chats() {
   const chats = useQuery<Chat[]>(() => api.get('/api/chats'), [], { pollMs: 10000 })
@@ -23,7 +23,7 @@ export default function Chats() {
       />
       <Card pad={false}>
         {chats.loading ? (
-          <LoadingWire />
+          <TableSkeleton rows={3} />
         ) : chats.error ? (
           <ErrorNote message={chats.error} onRetry={() => void chats.refetch()} />
         ) : (chats.data ?? []).length === 0 ? (

@@ -9,8 +9,8 @@ import {
   EmptyState,
   ErrorNote,
   Field,
-  LoadingWire,
   PageHead,
+  TableSkeleton,
 } from '../components/ui'
 
 export default function Tools() {
@@ -128,7 +128,7 @@ export default function Tools() {
 
         <Card pad={false}>
           {servers.loading ? (
-            <LoadingWire />
+            <TableSkeleton rows={2} />
           ) : servers.error ? (
             <ErrorNote message={servers.error} onRetry={() => void servers.refetch()} />
           ) : (servers.data ?? []).length === 0 ? (

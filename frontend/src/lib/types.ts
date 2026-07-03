@@ -114,8 +114,45 @@ export interface Fire {
   id: number
   workflow_id: number
   chat_id: number
+  chat_title: string
   slots: Record<string, { value: string }>
   status: string
   error: string | null
   created_at: string
+}
+
+export interface TriggerStateInfo {
+  thread_key: number
+  slots: Record<string, { value: string; confidence: number }>
+  last_evaluated_at: string | null
+  last_stage: string | null
+  last_score: number | null
+  last_confidence: number | null
+  last_match_at: string | null
+  cooldown_until: string | null
+}
+
+export interface ChatWorkflowRun {
+  id: number
+  status: string
+  error: string | null
+  response_text: string | null
+  created_at: string
+}
+
+export interface ChatWorkflow {
+  id: number
+  name: string
+  type: string
+  enabled: boolean
+  confirm: boolean
+  threshold: number | null
+  examples_status: string
+  cron: string | null
+  next_fire_at: string | null
+  required_slots: SlotSpec[]
+  assigned: boolean
+  states: TriggerStateInfo[]
+  recent_fires: Fire[]
+  recent_runs: ChatWorkflowRun[]
 }

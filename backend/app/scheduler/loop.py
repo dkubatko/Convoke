@@ -84,7 +84,12 @@ class ScheduleLoop:
         )
         for chat_id in chat_ids:
             session.add(
-                AgentRun(chat_id=chat_id, trigger="workflow", request_text=wf.action_prompt)
+                AgentRun(
+                    chat_id=chat_id,
+                    trigger="workflow",
+                    workflow_id=wf.id,
+                    request_text=wf.action_prompt,
+                )
             )
         if chat_ids:
             log.info("scheduled workflow %s fired for %d chat(s)", wf.id, len(chat_ids))

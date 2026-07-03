@@ -4,7 +4,7 @@ import { timeAgo } from '../lib/format'
 import { Provider } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
-import { Card, Field, LoadingWire, PageHead } from '../components/ui'
+import { Card, CardSkeleton, Field, PageHead } from '../components/ui'
 
 const ROLES: { role: string; title: string; blurb: string; placeholder: string }[] = [
   {
@@ -32,7 +32,11 @@ export default function Models() {
         lede="Point each role at any OpenAI-compatible endpoint — Ollama, LM Studio, OpenRouter, OpenAI. Connections are tested before they can be saved; keys are stored encrypted."
       />
       {providers.loading ? (
-        <LoadingWire />
+        <div className="stack">
+          <CardSkeleton lines={2} />
+          <CardSkeleton lines={3} />
+          <CardSkeleton lines={3} />
+        </div>
       ) : (
         <div className="stack">
           <Card>

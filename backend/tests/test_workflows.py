@@ -200,6 +200,10 @@ async def test_intent_pipeline_converges_and_fires_once(db_sessionmaker, monkeyp
         assert (await s.execute(select(PendingFire))).scalar_one_or_none() is None
         state = (await s.execute(select(TriggerState))).scalar_one()
         assert "date" in state.slots
+        assert state.last_stage == "accumulating"
+        assert state.last_score is not None  # prefilter ran and passed
+        assert state.last_confidence == 0.9
+        assert state.last_evaluated_at is not None
 
     async with db_sessionmaker() as s:
         s.add(_msg(chat.id, 2, "call it dinner, Tuesday works", minutes_ago=3))
@@ -213,6 +217,7 @@ async def test_intent_pipeline_converges_and_fires_once(db_sessionmaker, monkeyp
         state = (await s.execute(select(TriggerState))).scalar_one()
         assert state.slots == {}  # reset after firing
         assert state.cooldown_until is not None
+        assert state.last_stage == "fired"
 
     # cooldown: further messages don't re-fire
     async with db_sessionmaker() as s:
@@ -222,6 +227,8 @@ async def test_intent_pipeline_converges_and_fires_once(db_sessionmaker, monkeyp
     async with db_sessionmaker() as s:
         fires = (await s.execute(select(PendingFire))).scalars().all()
         assert len(fires) == 1
+        state = (await s.execute(select(TriggerState))).scalar_one()
+        assert state.last_stage == "cooldown"
 
 
 async def test_sweeper_ignores_self_messages_and_hot_windows(db_sessionmaker, monkeypatch):
@@ -262,6 +269,7 @@ async def test_fire_without_confirm_creates_agent_run(db_sessionmaker):
         assert fire.status == "done"
         run = (await s.execute(select(AgentRun))).scalar_one()
         assert run.trigger == "workflow"
+        assert run.workflow_id == wf_id
         assert "Tue" in run.request_text
         assert fire.agent_run_id == run.id
 

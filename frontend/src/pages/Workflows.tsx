@@ -1,4 +1,5 @@
 import { FormEvent, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api, ApiError } from '../lib/api'
 import { shortDateTime, timeAgo } from '../lib/format'
 import { Chat, Fire, Workflow } from '../lib/types'
@@ -7,12 +8,13 @@ import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
 import {
   Card,
+  CardSkeleton,
   EmptyState,
   ErrorNote,
   Field,
-  LoadingWire,
   PageHead,
   StatusPill,
+  TableSkeleton,
 } from '../components/ui'
 
 function parseSlots(text: string) {
@@ -80,7 +82,10 @@ export default function Workflows() {
         )}
 
         {workflows.loading ? (
-          <LoadingWire />
+          <>
+            <CardSkeleton lines={4} />
+            <CardSkeleton lines={4} />
+          </>
         ) : workflows.error ? (
           <ErrorNote message={workflows.error} onRetry={() => void workflows.refetch()} />
         ) : (workflows.data ?? []).length === 0 ? (
@@ -193,14 +198,15 @@ function WorkflowCard({ wf, chats, onToggle, onDelete }: {
       {showFires && (
         <div style={{ marginTop: 14 }}>
           {fires.loading ? (
-            <LoadingWire />
+            <TableSkeleton rows={2} />
           ) : (fires.data ?? []).length === 0 ? (
-            <p className="muted">Hasn't fired yet.</p>
+            <p className="muted">Hasn't fired yet — per-chat detection state lives in each chat's Workflows tab.</p>
           ) : (
             <table className="data">
               <thead>
                 <tr>
                   <th>When</th>
+                  <th>Chat</th>
                   <th>Status</th>
                   <th>Gathered</th>
                 </tr>
@@ -209,6 +215,9 @@ function WorkflowCard({ wf, chats, onToggle, onDelete }: {
                 {fires.data!.map((f) => (
                   <tr key={f.id}>
                     <td className="mono muted">{timeAgo(f.created_at)}</td>
+                    <td>
+                      <Link to={`/chats/${f.chat_id}`}>{f.chat_title || `chat ${f.chat_id}`}</Link>
+                    </td>
                     <td>
                       <StatusPill status={f.status} />
                       {f.error && <div className="field-error">{f.error}</div>}
