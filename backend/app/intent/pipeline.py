@@ -24,7 +24,6 @@ from app.memory.chunker import render_message
 from app.memory.embeddings import Embedder
 from app.models import (
     Chat,
-    ChatEvalState,
     Message,
     PendingFire,
     TriggerState,
@@ -94,44 +93,6 @@ class IntentSweeper:
 
     async def _sweep_chat(self, chat_id: int, now: datetime) -> int:
         async with self.sessionmaker() as session:
-            state = await session.get(ChatEvalState, chat_id)
-            if state is None:
-                state = ChatEvalState(chat_id=chat_id, last_tg_message_id=0)
-                session.add(state)
-                await session.commit()
-
-            messages = (
-                (
-                    await session.execute(
-                        select(Message)
-                        .where(
-                            Message.chat_id == chat_id,
-                            Message.tg_message_id > state.last_tg_message_id,
-                            Message.source != "self",  # never trigger on our own replies
-                        )
-                        .order_by(Message.tg_message_id)
-                        .limit(200)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            if not messages:
-                return 0
-
-            last_at = _as_utc(messages[-1].sent_at)
-            window_ready = (
-                len(messages) >= self.settings.intent_window_max_messages
-                or (now - last_at).total_seconds() >= self.settings.intent_lull_seconds
-            )
-            if not window_ready:
-                return 0
-
-            # Partition by thread (forum topics interleave unrelated talk).
-            by_thread: dict[int, list[Message]] = {}
-            for m in messages:
-                by_thread.setdefault(m.thread_id or 0, []).append(m)
-
             workflows = (
                 (
                     await session.execute(
@@ -147,37 +108,78 @@ class IntentSweeper:
                 .scalars()
                 .all()
             )
+            if not workflows:
+                return 0
+            wf_ids = [w.id for w in workflows]
 
-            evaluated = 0
-            stages: list[str] = []
-            for thread_key, window in by_thread.items():
-                window = window[-self.settings.intent_window_max_messages :]
-                # Prefilter embeds each message's raw text — the SAME space the
-                # example utterances were calibrated in. Embedding the rendered
-                # window (names + timestamps + concatenation) systematically
-                # deflated scores and made calibrated thresholds unreachable.
-                message_vecs = await self.embedder.embed_passages([m.text for m in window])
-                # The classifier gets trailing context: messages that trickle in
-                # after an evaluation ("what do you think?") are meaningless
-                # without the burst that preceded them.
-                context = await self._prior_context(session, chat_id, thread_key, window[0])
-                rendered = "\n".join(render_message(m) for m in [*context, *window])
-                for wf in workflows:
-                    stage = await self._evaluate(
-                        session, wf, chat_id, thread_key, window, rendered, message_vecs, now
+            # Each workflow has its OWN cursor (trigger_states.last_tg_message_id).
+            states = (
+                (
+                    await session.execute(
+                        select(TriggerState).where(
+                            TriggerState.workflow_id.in_(wf_ids),
+                            TriggerState.chat_id == chat_id,
+                        )
                     )
-                    stages.append(stage)
+                )
+                .scalars()
+                .all()
+            )
+            state_by_key: dict[tuple[int, int], TriggerState] = {
+                (s.workflow_id, s.thread_key): s for s in states
+            }
+            # Load from the least-advanced cursor across all workflows (0 if any
+            # is new), then let each evaluate only what IT hasn't seen.
+            min_cursor = 0
+            for wf in workflows:
+                cursors = [s.last_tg_message_id for s in states if s.workflow_id == wf.id]
+                min_cursor = min(min_cursor, min(cursors) if cursors else 0)
+
+            rows = (
+                (
+                    await session.execute(
+                        select(Message)
+                        .where(
+                            Message.chat_id == chat_id,
+                            Message.tg_message_id > min_cursor,
+                            Message.source != "self",  # never trigger on our own replies
+                        )
+                        .order_by(Message.tg_message_id.desc())
+                        .limit(300)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            messages = list(reversed(rows))  # oldest→newest tail
+            if not messages:
+                return 0
+
+            # Partition by thread (forum topics interleave unrelated talk).
+            by_thread: dict[int, list[Message]] = {}
+            for m in messages:
+                by_thread.setdefault(m.thread_id or 0, []).append(m)
+
+            max_win = self.settings.intent_window_max_messages
+            lull = self.settings.intent_lull_seconds
+            evaluated = 0
+            for wf in workflows:
+                for thread_key, tmsgs in by_thread.items():
+                    ts = state_by_key.get((wf.id, thread_key))
+                    cursor = ts.last_tg_message_id if ts else 0
+                    unevaluated = [m for m in tmsgs if m.tg_message_id > cursor]
+                    if not unevaluated:
+                        continue
+                    last_at = _as_utc(unevaluated[-1].sent_at)
+                    if len(unevaluated) < max_win and (now - last_at).total_seconds() < lull:
+                        continue  # window still open
+                    window = unevaluated[-max_win:]
+                    context = await self._prior_context(session, chat_id, thread_key, window[0])
+                    stage = await self._evaluate(
+                        session, wf, chat_id, thread_key, window, context, now
+                    )
                     if stage not in ("cooldown", "prefilter_skip", "throttled"):
                         evaluated += 1
-
-            # If the classifier failed for EVERY workflow (model endpoint
-            # down), keep the cursor so this window retries after the LLM
-            # spacing interval instead of being silently consumed.
-            all_errored = bool(stages) and all(
-                s in ("classifier_error", "throttled") for s in stages
-            ) and "classifier_error" in stages
-            if not all_errored:
-                state.last_tg_message_id = messages[-1].tg_message_id
             await session.commit()
             return evaluated
 
@@ -209,8 +211,7 @@ class IntentSweeper:
         chat_id: int,
         thread_key: int,
         window: list[Message],
-        rendered: str,
-        message_vecs: list[list[float]],
+        context: list[Message],
         now: datetime,
     ) -> str:
         tstate = (
@@ -232,33 +233,46 @@ class IntentSweeper:
             tstate.last_score = score
             tstate.last_confidence = confidence
 
+        def advance() -> None:
+            # Consume the window: this workflow won't re-see these messages.
+            tstate.last_tg_message_id = window[-1].tg_message_id
+
+        # Cheap gates first — no embedding, and cursor is NOT advanced, so a
+        # workflow in cooldown re-evaluates these messages once it lifts.
         cooldown_until = _as_utc(tstate.cooldown_until)
         if cooldown_until is not None and cooldown_until > now:
             mark("cooldown")
             return "cooldown"
+        last_llm = _as_utc(tstate.last_llm_at)
+        if (
+            last_llm is not None
+            and (now - last_llm).total_seconds() < self.settings.intent_min_llm_interval_seconds
+        ):
+            mark("throttled")
+            return "throttled"
 
-        # Stage 1: prefilter (skipped when the state is mid-accumulation —
-        # follow-ups like "ok wednesday then" may not resemble the examples).
-        # Score = best (message, example) pair: one on-intent message is enough.
+        # Stage 1: prefilter (skipped mid-accumulation — follow-ups like "ok
+        # wednesday then" may not resemble the examples). Embed each message's
+        # raw text (the space the examples were calibrated in) and score the
+        # best (message, example) pair: one on-intent message is enough.
         score: float | None = None
         if not tstate.slots:
             positives = await load_positive_vectors(session, wf.id)
-            if positives and message_vecs:
+            if positives:
+                message_vecs = await self.embedder.embed_passages([m.text for m in window])
                 score = max(dot(v, p) for v in message_vecs for p in positives)
                 if score < (wf.threshold or 0.8):
                     mark("prefilter_skip", score=score)
+                    advance()
                     return "prefilter_skip"
 
-        # LLM circuit breaker
-        last_llm = _as_utc(tstate.last_llm_at)
-        if last_llm is not None and (now - last_llm).total_seconds() < self.settings.intent_min_llm_interval_seconds:
-            mark("throttled", score=score)
-            return "throttled"
-
+        # Stage 2: classifier. The trailing context lets messages that trickle
+        # in after a burst ("what do you think?") be judged in situ.
+        rendered = "\n".join(render_message(m) for m in [*context, *window])
         verdict = await self._classify(session, wf, tstate, rendered)
         tstate.last_llm_at = now
         if verdict is None:
-            mark("classifier_error", score=score)
+            mark("classifier_error", score=score)  # no advance — retry when the model is back
             return "classifier_error"
 
         slots = decay_state(
@@ -271,6 +285,7 @@ class IntentSweeper:
         tstate.slots = slots
         if verdict.match:
             tstate.last_match_at = now
+        advance()
 
         if (
             verdict.match

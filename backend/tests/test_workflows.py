@@ -269,8 +269,6 @@ async def test_intent_pipeline_converges_and_fires_once(db_sessionmaker, monkeyp
 async def test_classifier_error_keeps_cursor_for_retry(db_sessionmaker, monkeypatch):
     """When the classifier fails (model endpoint down), the window must NOT be
     consumed — it should retry once the model is back, not be lost forever."""
-    from app.models import ChatEvalState
-
     _, chat, _ = await _intent_setup(db_sessionmaker)
     sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
     sweeper.settings = sweeper.settings.model_copy(update={"intent_min_llm_interval_seconds": 0})
@@ -286,8 +284,8 @@ async def test_classifier_error_keeps_cursor_for_retry(db_sessionmaker, monkeypa
     await sweeper.sweep()
 
     async with db_sessionmaker() as s:
-        cursor = (await s.execute(select(ChatEvalState))).scalar_one()
-        assert cursor.last_tg_message_id == 0, "window was consumed despite classifier failure"
+        ts = (await s.execute(select(TriggerState))).scalar_one()
+        assert ts.last_tg_message_id == 0, "window was consumed despite classifier failure"
 
     # model recovers → same window now classifies and converges
     verdicts = iter([verdict(updates=[])])
@@ -298,8 +296,49 @@ async def test_classifier_error_keeps_cursor_for_retry(db_sessionmaker, monkeypa
     monkeypatch.setattr(sweeper, "_classify", working_classify)
     await sweeper.sweep()
     async with db_sessionmaker() as s:
-        cursor = (await s.execute(select(ChatEvalState))).scalar_one()
-        assert cursor.last_tg_message_id == 1  # advanced after success
+        ts = (await s.execute(select(TriggerState))).scalar_one()
+        assert ts.last_tg_message_id == 1  # advanced after success
+
+
+async def test_cooling_workflow_keeps_messages_for_after_cooldown(db_sessionmaker, monkeypatch):
+    """A workflow in cooldown must NOT consume matching messages that arrive
+    during the cooldown — it should evaluate (and fire on) them once the
+    cooldown lifts, even if another workflow evaluated the same window."""
+    _, chat, wf_id = await _intent_setup(db_sessionmaker)  # no required slots → fires on match
+    sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
+    sweeper.settings = sweeper.settings.model_copy(update={"intent_min_llm_interval_seconds": 0})
+
+    async def always_match(session, wf, tstate, rendered):
+        return verdict(match=True, confidence=0.9, updates=[])
+
+    monkeypatch.setattr(sweeper, "_classify", always_match)
+
+    # no required slots → a confident match fires immediately
+    async with db_sessionmaker() as s:
+        wf = await s.get(Workflow, wf_id)
+        wf.required_slots = []
+        ts = TriggerState(
+            workflow_id=wf_id, chat_id=chat.id, thread_key=0, last_tg_message_id=5,
+            cooldown_until=datetime.now(timezone.utc) + timedelta(minutes=30),
+        )
+        s.add(ts)
+        s.add(_msg(chat.id, 10, "let's schedule dinner", minutes_ago=5))  # arrives during cooldown
+        await s.commit()
+
+    await sweeper.sweep()  # in cooldown → must not fire, must not advance
+    async with db_sessionmaker() as s:
+        assert (await s.execute(select(PendingFire))).scalar_one_or_none() is None
+        ts = (await s.execute(select(TriggerState))).scalar_one()
+        assert ts.last_tg_message_id == 5, "cooling workflow consumed a during-cooldown message"
+
+    # cooldown lifts → the same message is still pending → fires
+    async with db_sessionmaker() as s:
+        ts = (await s.execute(select(TriggerState))).scalar_one()
+        ts.cooldown_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await s.commit()
+    await sweeper.sweep()
+    async with db_sessionmaker() as s:
+        assert (await s.execute(select(PendingFire))).scalar_one() is not None
 
 
 async def test_sweeper_ignores_self_messages_and_hot_windows(db_sessionmaker, monkeypatch):

@@ -92,6 +92,10 @@ class TriggerState(Base):
     chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
     # thread_id or 0 for the main chat (NULL breaks the unique constraint)
     thread_key: Mapped[int] = mapped_column(BigInteger, default=0)
+    # This workflow's own evaluation cursor for this thread. A shared per-chat
+    # cursor would let one workflow (e.g. in cooldown) consume messages another
+    # never got to evaluate; each trigger advances independently.
+    last_tg_message_id: Mapped[int] = mapped_column(BigInteger, default=0)
     # {"date": {"value": "...", "confidence": 0.9, "message_id": 123, "ts": "..."}}
     slots: Mapped[dict] = mapped_column(JSON, default=dict)
     last_match_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

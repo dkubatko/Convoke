@@ -16,7 +16,6 @@ from sqlalchemy import func
 from app.models import (
     AgentRun,
     Chat,
-    ChatEvalState,
     Message,
     PendingFire,
     TriggerState,
@@ -277,8 +276,34 @@ async def chat_workflows(
             )
         ).scalars()
     )
-    eval_state = await session.get(ChatEvalState, chat_id)
-    cursor = eval_state.last_tg_message_id if eval_state else 0
+    # Messages some assigned intent workflow still hasn't evaluated: newer than
+    # the least-advanced per-trigger cursor. A workflow with no state yet (or
+    # none assigned) counts as cursor 0 → all messages pending.
+    intent_ids = [
+        wid
+        for wid in assigned_ids
+        if (wf := await session.get(Workflow, wid)) is not None and wf.type == "intent"
+    ]
+    cursor = 0
+    if intent_ids:
+        cursors = (
+            await session.execute(
+                select(func.min(TriggerState.last_tg_message_id)).where(
+                    TriggerState.chat_id == chat_id,
+                    TriggerState.workflow_id.in_(intent_ids),
+                )
+            )
+        ).scalar()
+        # if any assigned intent workflow has no trigger state, min is 0
+        has_state_for_all = (
+            await session.execute(
+                select(func.count(func.distinct(TriggerState.workflow_id))).where(
+                    TriggerState.chat_id == chat_id,
+                    TriggerState.workflow_id.in_(intent_ids),
+                )
+            )
+        ).scalar()
+        cursor = cursors if (cursors is not None and has_state_for_all == len(intent_ids)) else 0
     pending_messages = (
         await session.execute(
             select(func.count())
