@@ -325,18 +325,31 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
       {workflows.data!.map((wf) => {
         const assigned = assignedIds.includes(wf.id)
         const expanded = expandedIds.includes(wf.id)
+        const toggleExpand = () =>
+          setExpandedIds((ids) =>
+            ids.includes(wf.id) ? ids.filter((i) => i !== wf.id) : [...ids, wf.id],
+          )
         return (
           <Card key={wf.id}>
-            <div className="page-head-row">
+            {/* Clicking the header toggles details; interactive children below
+                stopPropagation so they don't also fire it. */}
+            <div
+              className="page-head-row"
+              onClick={assigned ? toggleExpand : undefined}
+              style={assigned ? { cursor: 'pointer' } : undefined}
+            >
               {/* Checkbox standalone — never wrapped in a <label> with other
                   content, or a click bubbles to the label and re-fires on the
-                  input, toggling twice (spurious PUT, box won't stay checked). */}
+                  input, toggling twice (spurious PUT, box won't stay checked).
+                  Only the checkbox stops propagation, so clicking the title
+                  still toggles the card's details. */}
               <div className="row" style={{ gap: 10 }}>
                 <input
                   type="checkbox"
                   aria-label={`Enable ${wf.name} for this chat`}
-                  style={{ width: 'auto' }}
+                  style={{ width: 'auto', cursor: 'pointer' }}
                   checked={assigned}
+                  onClick={(e) => e.stopPropagation()}
                   onChange={(e) => void toggle(wf, e.target.checked)}
                 />
                 <h3 style={{ fontSize: 15 }}>{wf.name}</h3>
@@ -352,11 +365,10 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
                   <button
                     className="btn btn--quiet btn--sm"
                     aria-expanded={expanded}
-                    onClick={() =>
-                      setExpandedIds((ids) =>
-                        expanded ? ids.filter((i) => i !== wf.id) : [...ids, wf.id],
-                      )
-                    }
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      toggleExpand()
+                    }}
                   >
                     {expanded ? 'Hide details \u25be' : 'Details \u25b8'}
                   </button>
