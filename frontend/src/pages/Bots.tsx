@@ -1,5 +1,6 @@
 import { FormEvent, useState } from 'react'
 import { api, ApiError } from '../lib/api'
+import { timeAgo } from '../lib/format'
 import { Bot } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
@@ -13,6 +14,30 @@ import {
   StatusPill,
   TableSkeleton,
 } from '../components/ui'
+
+/** Freshness of the getUpdates wire: stamped ~1/min on successful polls.
+    Stale > 3 min while active means polling is failing — check worker logs. */
+function PollingHealth({ bot }: { bot: Bot }) {
+  if (bot.status !== 'active') {
+    return <span className="muted">—</span>
+  }
+  if (!bot.last_polled_at) {
+    return (
+      <span className="pill pill--warn">
+        <span className="lamp" aria-hidden />
+        never polled
+      </span>
+    )
+  }
+  const staleMs = Date.now() - new Date(bot.last_polled_at).getTime()
+  const healthy = staleMs < 3 * 60 * 1000
+  return (
+    <span className={`pill ${healthy ? 'pill--ok pill--live' : 'pill--err'}`} title={new Date(bot.last_polled_at).toLocaleString()}>
+      <span className="lamp" aria-hidden />
+      {healthy ? 'live' : `stalled · ${timeAgo(bot.last_polled_at)}`}
+    </span>
+  )
+}
 
 export default function Bots() {
   const bots = useQuery<Bot[]>(() => api.get('/api/bots'), [], { pollMs: 15000 })
@@ -117,6 +142,7 @@ export default function Bots() {
                 <tr>
                   <th>Bot</th>
                   <th>Status</th>
+                  <th>Polling</th>
                   <th>Hearing</th>
                   <th />
                 </tr>
@@ -133,6 +159,9 @@ export default function Bots() {
                       {b.last_error && (
                         <div className="field-error" style={{ marginTop: 4 }}>{b.last_error}</div>
                       )}
+                    </td>
+                    <td>
+                      <PollingHealth bot={b} />
                     </td>
                     <td>
                       {b.can_read_all_group_messages ? (

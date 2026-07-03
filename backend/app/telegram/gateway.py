@@ -34,6 +34,23 @@ POLL_STAMP_INTERVAL_S = 60
 GAP_THRESHOLD = timedelta(hours=24)
 
 
+def serialize_update(u) -> dict:
+    """Raw update → JSON for the inbox.
+
+    exclude_unset is load-bearing: aiogram fills unset fields with Default
+    sentinels that pydantic cannot serialize (a message carrying link-preview
+    data once wedged a bot in a silent crash loop this way). Storing only the
+    fields Telegram actually sent avoids the sentinels entirely. As a last
+    resort a single unserializable update degrades to an error stub rather
+    than blocking the offset forever.
+    """
+    try:
+        return u.model_dump(mode="json", exclude_unset=True, exclude_none=True)
+    except Exception as e:  # noqa: BLE001 — one poisoned update must not stop the wire
+        log.exception("update %s could not be serialized; storing error stub", u.update_id)
+        return {"update_id": u.update_id, "convoke_serialize_error": f"{type(e).__name__}: {e}"}
+
+
 class BotRunner:
     def __init__(self, bot_id: int, token: str, next_offset: int,
                  sessionmaker: async_sessionmaker[AsyncSession]) -> None:
@@ -48,7 +65,16 @@ class BotRunner:
         try:
             await self._mark_gap_if_stale()
             while True:
-                await self._poll_once()
+                try:
+                    await self._poll_once()
+                except (asyncio.CancelledError, TelegramUnauthorizedError):
+                    raise
+                except Exception:  # noqa: BLE001 — a crash loop must be LOUD, never silent
+                    log.exception(
+                        "bot %s: poll cycle failed at offset %s; retrying in %ss",
+                        self.bot_id, self.next_offset, ERROR_BACKOFF_S,
+                    )
+                    await asyncio.sleep(ERROR_BACKOFF_S)
         except asyncio.CancelledError:
             raise
         except TelegramUnauthorizedError:
@@ -85,7 +111,7 @@ class BotRunner:
                     .values(
                         bot_id=self.bot_id,
                         update_id=u.update_id,
-                        payload=u.model_dump(mode="json", exclude_none=True),
+                        payload=serialize_update(u),
                     )
                     .on_conflict_do_nothing(index_elements=["bot_id", "update_id"])
                 )
@@ -176,7 +202,12 @@ class Gateway:
 
         for bot_id in list(self.tasks):
             if bot_id not in active or self.tasks[bot_id].done():
-                self.tasks.pop(bot_id).cancel()
+                task = self.tasks.pop(bot_id)
+                if task.done() and not task.cancelled() and task.exception() is not None:
+                    log.error(
+                        "bot %s: polling task died: %r", bot_id, task.exception()
+                    )
+                task.cancel()
                 log.info("bot %s: polling stopped", bot_id)
 
         for bot_id, row in active.items():

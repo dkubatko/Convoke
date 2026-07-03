@@ -26,6 +26,8 @@ class BotOut(BaseModel):
     can_read_all_group_messages: bool
     status: str
     last_error: str | None
+    # Stamped on every successful poll — the "is the wire alive" signal.
+    last_polled_at: datetime | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

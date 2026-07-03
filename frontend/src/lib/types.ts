@@ -6,6 +6,7 @@ export interface Bot {
   can_read_all_group_messages: boolean
   status: string
   last_error: string | null
+  last_polled_at: string | null
 }
 
 export interface Chat {
