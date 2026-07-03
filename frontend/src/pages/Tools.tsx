@@ -50,6 +50,24 @@ export default function Tools() {
     }
   }
 
+  async function toggleEnabled(server: McpServer) {
+    try {
+      await api.put(`/api/mcp-servers/${server.id}`, {
+        name: server.name,
+        transport: server.transport,
+        url: server.url,
+        command: server.command,
+        args: server.args,
+        headers: null, // keep whatever is stored
+        enabled: !server.enabled,
+      })
+      toast('ok', `${server.name} ${server.enabled ? 'disabled' : 'enabled'}`)
+      void servers.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t update the server')
+    }
+  }
+
   async function remove(server: McpServer) {
     const ok = await confirm({
       title: `Remove ${server.name}?`,
@@ -141,6 +159,7 @@ export default function Tools() {
               <thead>
                 <tr>
                   <th>Name</th>
+                  <th>Status</th>
                   <th>Transport</th>
                   <th>Target</th>
                   <th>Auth</th>
@@ -153,13 +172,24 @@ export default function Tools() {
                     <td>
                       <b>{s.name}</b>
                     </td>
+                    <td>
+                      <span className={`pill ${s.enabled ? 'pill--ok' : 'pill--idle'}`}>
+                        <span className="lamp" aria-hidden />
+                        {s.enabled ? 'enabled' : 'off'}
+                      </span>
+                    </td>
                     <td className="mono">{s.transport}</td>
                     <td className="mono muted">{s.url ?? `${s.command} ${s.args.join(' ')}`}</td>
                     <td className="muted">{s.has_headers ? 'bearer token' : 'none'}</td>
                     <td style={{ textAlign: 'right' }}>
-                      <button className="btn btn--danger btn--sm" onClick={() => void remove(s)}>
-                        Remove
-                      </button>
+                      <span className="row" style={{ justifyContent: 'flex-end' }}>
+                        <button className="btn btn--quiet btn--sm" onClick={() => void toggleEnabled(s)}>
+                          {s.enabled ? 'Disable' : 'Enable'}
+                        </button>
+                        <button className="btn btn--danger btn--sm" onClick={() => void remove(s)}>
+                          Remove
+                        </button>
+                      </span>
                     </td>
                   </tr>
                 ))}
