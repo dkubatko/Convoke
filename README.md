@@ -1,95 +1,128 @@
-# Convoke
+<p align="center">
+  <img src="assets/banner.png" alt="Convoke — chat agent dispatch" width="720" />
+</p>
 
-Self-hosted orchestration for Telegram chat assistants. Connect a bot you own to any
-group chat; the chat's history becomes the assistant's persistent semantic memory, and
-**workflows** let it act on its own — on a schedule, or when it detects an intent
-converging in the conversation ("they've agreed on dinner Tuesday 7pm → create the
-calendar event via MCP").
+<p align="center">
+  <em>Orchestrate Telegram chat agents by intent, schedule, and shared memory.</em>
+</p>
+
+<p align="center">
+  <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12+-1b6fc2?style=flat-square&logo=python&logoColor=white" />
+  <img alt="React 19 + TypeScript" src="https://img.shields.io/badge/react_19-typescript-1b6fc2?style=flat-square&logo=react&logoColor=white" />
+  <img alt="Postgres 17 + pgvector" src="https://img.shields.io/badge/postgres_17-pgvector-1b6fc2?style=flat-square&logo=postgresql&logoColor=white" />
+  <img alt="Docker Compose" src="https://img.shields.io/badge/docker-compose-1b6fc2?style=flat-square&logo=docker&logoColor=white" />
+  <img alt="Tests passing" src="https://img.shields.io/badge/tests-passing-1e8e4e?style=flat-square" />
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-5a6b7a?style=flat-square" />
+</p>
+
+---
+
+Convoke is a **self-hosted** platform where you connect Telegram bots you own to group
+chats. Each chat becomes the assistant's persistent, searchable memory, and **workflows**
+let it act on its own — on a schedule, or the moment a conversation converges on an intent
+(*"they've agreed on dinner Tuesday 7pm → create the calendar event"*). Bring your own
+models; nothing leaves your machine unless you point it there.
+
+<p align="center">
+  <img src="assets/screenshot-overview.png" alt="Convoke dashboard" width="880" />
+</p>
 
 ## Features
 
-- **Memory cortex** — every message is stored, chunked into conversation segments and
-  embedded (local `multilingual-e5-small`, pgvector). The agent searches the full chat
-  history semantically, keeps distilled notes (`remember`/`recall`), and always sees
-  recent messages verbatim.
-- **History import** — bots can't read messages from before they joined (Telegram
-  platform limitation), so Convoke ingests a Telegram Desktop JSON export, validated
-  against live history before it's trusted.
-- **Agent on mention/reply** — @mention the bot or reply to it; it answers with full
-  memory and the chat's MCP tools. Powered by [Pydantic AI](https://ai.pydantic.dev).
-- **Intent workflows** — plain-text triggers evaluated continuously and cheaply:
-  free gates → embedding prefilter (anchored in generated example utterances) →
-  cheap-LLM classifier → slot-filling convergence state machine → optional in-chat
-  ✅/❌ confirmation before acting.
-- **Scheduled workflows** — cron-triggered agent actions per chat.
-- **MCP connections** — register streamable-HTTP or stdio MCP servers, enable them
-  per chat; the agent gets their tools per run. OAuth-protected servers are supported
-  with a one-time browser sign-in (discovery, dynamic client registration, PKCE,
-  automatic token refresh).
-- **BYO models** — any OpenAI-compatible endpoints (Ollama, LM Studio, OpenRouter,
-  OpenAI…), split by role: cheap `intent` classifier, strong `agent` model.
+- 🧠 **Memory cortex** — every message is stored, chunked into conversation segments, and
+  embedded locally (`multilingual-e5-small`, pgvector). The agent searches full history
+  semantically, keeps distilled notes, and always sees recent messages verbatim.
+- 💬 **Answers on mention / reply** — @mention the bot or reply to it; it responds with
+  full memory and the chat's tools. Powered by [Pydantic AI](https://ai.pydantic.dev).
+- ⚡ **Intent workflows** — plain-text triggers evaluated continuously and *cheaply*:
+  free gates → embedding prefilter → cheap-LLM classifier → slot-filling convergence →
+  optional in-chat confirmation before acting.
+- ⏰ **Scheduled workflows** — cron-triggered agent actions, per chat.
+- 🔌 **MCP tools** — register streamable-HTTP or stdio [MCP](https://modelcontextprotocol.io)
+  servers, enable them per chat; OAuth-protected servers connect with a one-time browser
+  sign-in (discovery, PKCE, automatic token refresh).
+- 🎛️ **Bring your own models** — any OpenAI-compatible endpoint (Ollama, LM Studio,
+  OpenRouter, OpenAI…), split by role: a cheap `intent` classifier and a strong `agent` model.
+- 🕰️ **History import** — bots can't read messages sent before they joined, so Convoke
+  ingests a Telegram Desktop export, validated against live history before it's trusted.
 
 ## Quick start
 
 ```bash
-cp .env.example .env   # then fill in the three secrets (see comments inside)
+cp .env.example .env    # then fill in the three secrets (comments inside)
 docker compose up -d
 open http://localhost:8080
 ```
 
 Sign in with `CONVOKE_OPERATOR_PASSWORD`, then:
 
-1. **Models** — point the `agent` (and optionally `intent`) role at an
-   OpenAI-compatible endpoint. From Docker, a service on your host is
-   `http://host.docker.internal:11434/v1` (Ollama example).
+1. **Models** — point the `agent` role (and optionally `intent`) at an OpenAI-compatible
+   endpoint. From Docker, a service on your host is `http://host.docker.internal:11434/v1`
+   (Ollama example).
 2. **Bots** — create a bot with [@BotFather](https://t.me/BotFather), paste its token.
-   **Critical:** in BotFather run `/setprivacy` → **Disable**, or the bot only sees
-   mentions and its memory stays empty. If the bot is already in a group, remove and
-   re-add it after changing privacy mode (Telegram requirement). Convoke shows a
-   warning until this is right.
-3. Add the bot to a group. It posts an **"Authorize Convoke"** button — a chat admin
-   taps it (verified at click time). From that moment messages are ingested.
-4. *(Optional)* **Import history**: ask an admin for a Telegram Desktop export of the
-   chat (⋯ → Export chat history → Format: **JSON**) and upload the `result.json` in
-   the chat panel. Uploads are validated (chat id, title, overlap with live history)
-   and each import is surgically deletable.
-5. Create **workflows** and assign them to chats.
+   **Important:** run `/setprivacy` → **Disable**, or the bot only sees mentions and its
+   memory stays empty. Convoke warns you until this is right.
+3. Add the bot to a group. It posts an **"Authorize Convoke"** button — a chat admin taps
+   it (verified at click time). From that moment, messages are ingested.
+4. *(Optional)* Import history, and create **workflows** assigned to chats.
 
-## Architecture (short version)
+📖 **Walkthroughs:** [`examples/events.md`](examples/events.md) builds an event-scheduling
+bot end-to-end; [`examples/weather-mcp.md`](examples/weather-mcp.md) adds a weather tool.
 
-Four containers: `frontend` (nginx + React), `backend` (FastAPI, singleton),
-`worker` (polling + all loops, singleton), `db` (Postgres 17 + pgvector). Postgres is
-the only datastore — including the work queues.
+## How it works
 
-The load-bearing pattern is a **transactional inbox**: each bot's `getUpdates`
-long-poll loop does exactly one thing — persist raw updates, commit, then advance the
-Telegram offset. Everything downstream (message ingestion, embedding, intent
-evaluation, agent runs) is a DB-driven consumer, so a crash never loses data;
-Telegram's offset-ack is the only redelivery mechanism there is.
+Four containers — `frontend` (nginx + React), `backend` (FastAPI, singleton), `worker`
+(all the loops, singleton), `db` (Postgres 17 + pgvector). **Postgres is the only
+datastore**, including the work queues.
 
-Things Telegram will not tell you (and how Convoke copes):
+The load-bearing pattern is a **transactional inbox**: each bot's `getUpdates` loop does
+exactly one thing — persist raw updates, commit, then advance the Telegram offset.
+Everything downstream (ingestion, embedding, intent evaluation, agent runs) is a DB-driven
+consumer, so a crash never loses data.
+
+The other half of the design is coping with what Telegram *won't* tell you:
 
 | Platform reality | Convoke's answer |
 | --- | --- |
 | Bots can't fetch history, ever | Export upload + validation scorecard |
-| Privacy mode hides group messages | `getMe` check + hard warning in UI |
+| Privacy mode hides group messages | `getMe` check + hard warning in the UI |
 | Updates kept only 24h server-side | Downtime gaps recorded, shown in UI and to the agent |
 | Bots never see other bots' messages (incl. own) | Outbound replies persisted at send time |
-| Deletions are never delivered | Operator "forget" tooling per sender/range/chat |
-| 1 msg/s per chat, 20/min per group | Central token-bucket limiter on all sends |
+| Deletions are never delivered | Operator "forget" tooling (sender / range / chat) |
+| ~1 msg/s per chat, 20/min per group | Central token-bucket limiter on all sends |
+
+The intent pipeline is a **cost funnel** — each stage is ~10–100× cheaper than the next, so
+continuous listening is nearly free and the strong model runs only on a real trigger:
+
+```mermaid
+flowchart LR
+  A[new messages] --> B{gates<br/>free}
+  B --> C{prefilter<br/>local embeddings}
+  C --> D{classifier<br/>cheap LLM}
+  D --> E{convergence<br/>slot filling}
+  E -->|confirm?| F[in-chat confirm]
+  F --> G[agent run<br/>strong LLM + tools]
+  E --> G
+```
 
 ## Development
 
 ```bash
-cd backend && uv sync && uv run pytest          # 52 tests
-cd frontend && npm install && npm run dev       # Vite dev server, proxies /api to :8000
+# backend — unit tests, sqlite-backed
+cd backend && uv sync && uv run pytest
+
+# frontend — Vite dev server, proxies /api to :8000
+cd frontend && npm install && npm run dev
+
+# the real thing — backend runs migrations on start
+docker compose up -d --build
 ```
 
-Migrations: `alembic revision` in `backend/`; the backend container runs
-`alembic upgrade head` on start.
+**Stack & why:** aiogram (typed Bot API client), Pydantic AI (agent harness, structured
+output, MCP), local sentence-transformers embeddings, Postgres + pgvector (rows, vectors,
+*and* queues in one store), a hand-rolled scheduler (`next_fire_at` + croniter), FastAPI +
+async SQLAlchemy + Alembic, React + TypeScript + Vite. Secrets are Fernet-encrypted at rest.
 
-## Not in the MVP (by design)
+## License
 
-Langfuse observability, Temporal workflows, MTProto-assisted history pull (QR login →
-pull one chat → destroy session), webhook mode, hierarchical summaries, multi-user
-accounts. The data model is keyed by bot/chat so these bolt on without rework.
+[MIT](LICENSE).
