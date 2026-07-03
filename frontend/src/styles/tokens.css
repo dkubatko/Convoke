@@ -1,0 +1,63 @@
+/* Convoke design tokens — "dispatch desk"
+   Cool porcelain surfaces, ink-blue text, one working accent (dispatch blue),
+   signal colors reserved for state: live green / standby amber / fault red. */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --surface-2: #ecf0f5;
+  --ink: #17222c;
+  --ink-2: #5a6b7a;
+  --line: #d9e0e8;
+  --line-strong: #c2ccd7;
+
+  --accent: #1b6fc2;
+  --accent-strong: #15599d;
+  --accent-ink: #ffffff;
+  --accent-soft: #e3eef9;
+
+  --ok: #1e8e4e;
+  --ok-soft: #e2f3e9;
+  --warn: #a86c0a;
+  --warn-soft: #f8eedc;
+  --err: #c03d3d;
+  --err-soft: #f9e7e7;
+
+  --radius: 10px;
+  --radius-s: 7px;
+  --shadow-1: 0 1px 2px rgb(23 34 44 / 6%), 0 2px 10px rgb(23 34 44 / 5%);
+  --shadow-2: 0 4px 12px rgb(23 34 44 / 10%), 0 12px 40px rgb(23 34 44 / 12%);
+
+  --font-display: 'Bricolage Grotesque Variable', 'IBM Plex Sans', sans-serif;
+  --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #10161c;
+    --surface: #19232c;
+    --surface-2: #141d25;
+    --ink: #e6edf3;
+    --ink-2: #8da0b0;
+    --line: #28343f;
+    --line-strong: #374553;
+
+    --accent: #4e9ee8;
+    --accent-strong: #74b5ef;
+    --accent-ink: #0c1723;
+    --accent-soft: #16293d;
+
+    --ok: #43b673;
+    --ok-soft: #12301f;
+    --warn: #d79a3d;
+    --warn-soft: #34260f;
+    --err: #e06a6a;
+    --err-soft: #3a1a1a;
+
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 30%), 0 2px 10px rgb(0 0 0 / 25%);
+    --shadow-2: 0 4px 12px rgb(0 0 0 / 35%), 0 12px 40px rgb(0 0 0 / 40%);
+  }
+}

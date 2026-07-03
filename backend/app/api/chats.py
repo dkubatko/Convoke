@@ -145,6 +145,41 @@ class RunOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class GlobalRunOut(RunOut):
+    chat_id: int
+    chat_title: str
+
+
+@router.get("/runs", response_model=list[GlobalRunOut])
+async def recent_runs(
+    limit: int = 20, session: AsyncSession = Depends(get_session)
+) -> list[GlobalRunOut]:
+    """Recent agent runs across all chats — the operator's activity feed."""
+    rows = (
+        await session.execute(
+            select(AgentRun, Chat.title)
+            .join(Chat, Chat.id == AgentRun.chat_id)
+            .order_by(AgentRun.id.desc())
+            .limit(min(limit, 100))
+        )
+    ).all()
+    return [
+        GlobalRunOut(
+            id=run.id,
+            trigger=run.trigger,
+            status=run.status,
+            request_text=run.request_text,
+            response_text=run.response_text,
+            error=run.error,
+            created_at=run.created_at,
+            finished_at=run.finished_at,
+            chat_id=run.chat_id,
+            chat_title=title or "",
+        )
+        for run, title in rows
+    ]
+
+
 @router.get("/chats/{chat_id}/runs", response_model=list[RunOut])
 async def list_runs(
     chat_id: int, limit: int = 20, session: AsyncSession = Depends(get_session)

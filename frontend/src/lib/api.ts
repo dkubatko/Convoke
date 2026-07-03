@@ -4,49 +4,44 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(path, {
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  })
-  if (!resp.ok) {
-    let detail = resp.statusText
-    try {
-      detail = (await resp.json()).detail ?? detail
-    } catch {
-      // non-JSON error body
-    }
-    throw new ApiError(resp.status, detail)
+/** Fired when any request comes back 401 so the app can return to sign-in. */
+export const UNAUTHORIZED_EVENT = 'convoke:unauthorized'
+
+async function parseError(resp: Response): Promise<ApiError> {
+  let detail = resp.statusText || `Request failed (${resp.status})`
+  try {
+    const body = await resp.json()
+    if (typeof body.detail === 'string') detail = body.detail
+  } catch {
+    // non-JSON error body
   }
+  return new ApiError(resp.status, detail)
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const resp = await fetch(path, { credentials: 'same-origin', ...init })
+  if (resp.status === 401 && !path.startsWith('/api/auth/')) {
+    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+  }
+  if (!resp.ok) throw await parseError(resp)
+  if (resp.status === 204) return undefined as T
   return resp.json() as Promise<T>
 }
 
-async function requestVoid(path: string, init?: RequestInit): Promise<void> {
-  const resp = await fetch(path, { credentials: 'same-origin', ...init })
-  if (!resp.ok) throw new ApiError(resp.status, resp.statusText)
-}
+const json = (body: unknown): RequestInit => ({
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+})
 
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>
-    request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) }),
-  put: <T>(path: string, body: unknown) =>
-    request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
-  delete: <T = void>(path: string) => requestVoid(path, { method: 'DELETE' }) as Promise<T>,
-  async upload<T>(path: string, file: File): Promise<T> {
+    request<T>(path, { method: 'POST', ...(body === undefined ? {} : json(body)) }),
+  put: <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', ...json(body) }),
+  delete: <T = void>(path: string) => request<T>(path, { method: 'DELETE' }),
+  upload<T>(path: string, file: File): Promise<T> {
     const form = new FormData()
     form.append('file', file)
-    const resp = await fetch(path, { method: 'POST', credentials: 'same-origin', body: form })
-    if (!resp.ok) {
-      let detail = resp.statusText
-      try {
-        detail = (await resp.json()).detail ?? detail
-      } catch {
-        // non-JSON error body
-      }
-      throw new ApiError(resp.status, detail)
-    }
-    return resp.json() as Promise<T>
+    return request<T>(path, { method: 'POST', body: form })
   },
 }
