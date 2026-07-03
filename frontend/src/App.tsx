@@ -12,6 +12,7 @@ import Models from './pages/Models'
 import Overview from './pages/Overview'
 import Tools from './pages/Tools'
 import Workflows from './pages/Workflows'
+import WorkflowDetail from './pages/WorkflowDetail'
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
@@ -61,6 +62,7 @@ export default function App() {
         <Route path="chats" element={<Chats />} />
         <Route path="chats/:chatId" element={<ChatDetail />} />
         <Route path="workflows" element={<Workflows />} />
+        <Route path="workflows/:workflowId" element={<WorkflowDetail />} />
         <Route path="tools" element={<Tools />} />
         <Route path="models" element={<Models />} />
         <Route path="*" element={<Navigate to="/" replace />} />

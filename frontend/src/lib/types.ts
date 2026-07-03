@@ -151,6 +151,7 @@ export interface ChatWorkflow {
   type: string
   enabled: boolean
   confirm: boolean
+  cooldown_seconds: number
   threshold: number | null
   examples_status: string
   cron: string | null
@@ -161,4 +162,18 @@ export interface ChatWorkflow {
   recent_fires: Fire[]
   recent_runs: ChatWorkflowRun[]
   pending_messages: number
+}
+
+export interface WorkflowChat {
+  chat_id: number
+  chat_title: string
+  chat_status: string
+  states: TriggerStateInfo[]
+  pending_messages: number
+  recent_fires: Fire[]
+  recent_runs: ChatWorkflowRun[]
+}
+
+export interface WorkflowDetail extends Workflow {
+  chats: WorkflowChat[]
 }

@@ -1,8 +1,8 @@
 import { FormEvent, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ApiError } from '../lib/api'
-import { shortDateTime, timeAgo } from '../lib/format'
-import { Chat, Fire, Workflow } from '../lib/types'
+import { shortDateTime } from '../lib/format'
+import { Chat, Workflow } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
@@ -14,7 +14,6 @@ import {
   Field,
   PageHead,
   StatusPill,
-  TableSkeleton,
 } from '../components/ui'
 
 function parseSlots(text: string) {
@@ -35,6 +34,18 @@ export default function Workflows() {
   const confirm = useConfirm()
 
   const [showForm, setShowForm] = useState(false)
+  const [editing, setEditing] = useState<Workflow | null>(null)
+  const formOpen = showForm || editing !== null
+
+  function openEdit(wf: Workflow) {
+    setEditing(wf)
+    setShowForm(false)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+  function closeForm() {
+    setShowForm(false)
+    setEditing(null)
+  }
 
   async function toggle(wf: Workflow) {
     try {
@@ -69,17 +80,23 @@ export default function Workflows() {
         title="Workflows"
         lede="Standing orders for your assistants: act on a schedule, or when the chat converges on an intent."
         actions={
-          <button className="btn btn--primary" onClick={() => setShowForm((v) => !v)}>
-            {showForm ? 'Close' : 'New workflow'}
+          <button
+            className="btn btn--primary"
+            onClick={() => (formOpen ? closeForm() : setShowForm(true))}
+          >
+            {formOpen ? 'Close' : 'New workflow'}
           </button>
         }
       />
       <div className="stack">
-        {showForm && (
+        {formOpen && (
           <WorkflowForm
+            key={editing?.id ?? 'new'}
             chats={chats.data ?? []}
-            onCreated={() => {
-              setShowForm(false)
+            initial={editing}
+            onCancel={closeForm}
+            onDone={() => {
+              closeForm()
               void workflows.refetch()
             }}
           />
@@ -112,6 +129,7 @@ export default function Workflows() {
               key={wf.id}
               wf={wf}
               chats={chats.data ?? []}
+              onEdit={() => openEdit(wf)}
               onToggle={() => void toggle(wf)}
               onDelete={() => void remove(wf)}
             />
@@ -122,26 +140,22 @@ export default function Workflows() {
   )
 }
 
-function WorkflowCard({ wf, chats, onToggle, onDelete }: {
+function WorkflowCard({ wf, chats, onEdit, onToggle, onDelete }: {
   wf: Workflow
   chats: Chat[]
+  onEdit: () => void
   onToggle: () => void
   onDelete: () => void
 }) {
-  const [showFires, setShowFires] = useState(false)
-  const fires = useQuery<Fire[]>(() => api.get(`/api/workflows/${wf.id}/fires`), [wf.id], {
-    enabled: showFires,
-    pollMs: showFires ? 5000 : undefined,
-  })
-  const chatNames = wf.chat_ids
-    .map((id) => chats.find((c) => c.id === id)?.title || `chat ${id}`)
-    .join(', ')
-
   return (
     <Card>
       <div className="page-head-row" style={{ marginBottom: 10 }}>
         <div className="row" style={{ gap: 10 }}>
-          <h3 style={{ fontSize: 16 }}>{wf.name}</h3>
+          <h3 style={{ fontSize: 16, margin: 0 }}>
+            <Link to={`/workflows/${wf.id}`} style={{ color: 'inherit' }} title="Open this workflow">
+              {wf.name}
+            </Link>
+          </h3>
           <span className="pill pill--accent">
             <span className="lamp" aria-hidden />
             {wf.type}
@@ -149,14 +163,12 @@ function WorkflowCard({ wf, chats, onToggle, onDelete }: {
           <StatusPill status={wf.enabled ? 'active' : 'disabled'} live={wf.enabled} />
         </div>
         <span className="row">
+          <button className="btn btn--quiet btn--sm" onClick={onEdit}>
+            Edit
+          </button>
           <button className="btn btn--quiet btn--sm" onClick={onToggle}>
             {wf.enabled ? 'Disable' : 'Enable'}
           </button>
-          {wf.type === 'intent' && (
-            <button className="btn btn--quiet btn--sm" onClick={() => setShowFires((v) => !v)}>
-              {showFires ? 'Hide activity' : 'Activity'}
-            </button>
-          )}
           <button className="btn btn--danger btn--sm" onClick={onDelete}>
             Delete
           </button>
@@ -189,6 +201,14 @@ function WorkflowCard({ wf, chats, onToggle, onDelete }: {
                 : wf.examples_status === 'pending'
                   ? 'generating example phrases…'
                   : 'fallback — configure an agent model and edit the workflow to calibrate'}
+            </dd>
+            <dt>cooldown</dt>
+            <dd>
+              {wf.cooldown_seconds === 0
+                ? 'none — fires on every match'
+                : wf.cooldown_seconds % 3600 === 0
+                  ? `${wf.cooldown_seconds / 3600} h`
+                  : `${Math.round(wf.cooldown_seconds / 60)} min`}
               {wf.confirm ? ' · asks before acting' : ' · acts without asking'}
             </dd>
           </>
@@ -196,64 +216,46 @@ function WorkflowCard({ wf, chats, onToggle, onDelete }: {
         <dt>action</dt>
         <dd style={{ fontFamily: 'var(--font-body)' }}>{wf.action_prompt}</dd>
         <dt>chats</dt>
-        <dd style={{ fontFamily: 'var(--font-body)' }}>{chatNames || 'none assigned — this workflow can’t fire'}</dd>
-      </dl>
-
-      {showFires && (
-        <div style={{ marginTop: 14 }}>
-          {fires.loading ? (
-            <TableSkeleton rows={2} />
-          ) : fires.error ? (
-            <ErrorNote message={fires.error} onRetry={() => void fires.refetch()} />
-          ) : (fires.data ?? []).length === 0 ? (
-            <p className="muted">Hasn't fired yet — per-chat detection state lives in each chat's Workflows tab.</p>
+        <dd style={{ fontFamily: 'var(--font-body)' }}>
+          {wf.chat_ids.length === 0 ? (
+            'none assigned — this workflow can’t fire'
           ) : (
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>When</th>
-                  <th>Chat</th>
-                  <th>Status</th>
-                  <th>Gathered</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fires.data!.map((f) => (
-                  <tr key={f.id}>
-                    <td className="mono muted">{timeAgo(f.created_at)}</td>
-                    <td>
-                      <Link to={`/chats/${f.chat_id}`}>{f.chat_title || `chat ${f.chat_id}`}</Link>
-                    </td>
-                    <td>
-                      <StatusPill status={f.status} />
-                      {f.error && <div className="field-error">{f.error}</div>}
-                    </td>
-                    <td className="mono" style={{ fontSize: 12 }}>
-                      {Object.entries(f.slots)
-                        .map(([k, v]) => `${k}: ${v.value}`)
-                        .join(' · ') || '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            wf.chat_ids.map((cid, i) => (
+              <span key={cid}>
+                {i > 0 && ', '}
+                <Link to={`/chats/${cid}`}>{chats.find((c) => c.id === cid)?.title || `chat ${cid}`}</Link>
+              </span>
+            ))
           )}
-        </div>
-      )}
+        </dd>
+      </dl>
     </Card>
   )
 }
 
-function WorkflowForm({ chats, onCreated }: { chats: Chat[]; onCreated: () => void }) {
+function WorkflowForm({ chats, initial, onDone, onCancel }: {
+  chats: Chat[]
+  initial?: Workflow | null
+  onDone: () => void
+  onCancel: () => void
+}) {
   const toast = useToast()
-  const [type, setType] = useState<'intent' | 'scheduled'>('intent')
-  const [name, setName] = useState('')
-  const [cron, setCron] = useState('0 9 * * *')
-  const [trigger, setTrigger] = useState('')
-  const [slots, setSlots] = useState('')
-  const [action, setAction] = useState('')
-  const [confirmFirst, setConfirmFirst] = useState(true)
-  const [chatIds, setChatIds] = useState<number[]>([])
+  const editing = !!initial
+  const [type, setType] = useState<'intent' | 'scheduled'>(
+    (initial?.type as 'intent' | 'scheduled') ?? 'intent',
+  )
+  const [name, setName] = useState(initial?.name ?? '')
+  const [cron, setCron] = useState(initial?.cron ?? '0 9 * * *')
+  const [trigger, setTrigger] = useState(initial?.trigger_prompt ?? '')
+  const [slots, setSlots] = useState(
+    initial ? initial.required_slots.map((s) => `${s.name}: ${s.description ?? ''}`.trim()).join('\n') : '',
+  )
+  const [action, setAction] = useState(initial?.action_prompt ?? '')
+  const [confirmFirst, setConfirmFirst] = useState(initial?.confirm ?? true)
+  const [cooldownMin, setCooldownMin] = useState(
+    initial ? Math.round(initial.cooldown_seconds / 60) : 60,
+  )
+  const [chatIds, setChatIds] = useState<number[]>(initial?.chat_ids ?? [])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -261,40 +263,52 @@ function WorkflowForm({ chats, onCreated }: { chats: Chat[]; onCreated: () => vo
     e.preventDefault()
     setBusy(true)
     setError(null)
+    const body = {
+      name,
+      type,
+      action_prompt: action,
+      enabled: initial?.enabled ?? true,
+      cron: type === 'scheduled' ? cron : null,
+      trigger_prompt: type === 'intent' ? trigger : null,
+      required_slots: type === 'intent' ? parseSlots(slots) : [],
+      confirm: confirmFirst,
+      cooldown_seconds: type === 'intent' ? Math.max(0, Math.round(cooldownMin * 60)) : 3600,
+      chat_ids: chatIds,
+    }
     try {
-      await api.post('/api/workflows', {
-        name,
-        type,
-        action_prompt: action,
-        cron: type === 'scheduled' ? cron : null,
-        trigger_prompt: type === 'intent' ? trigger : null,
-        required_slots: type === 'intent' ? parseSlots(slots) : [],
-        confirm: confirmFirst,
-        chat_ids: chatIds,
-      })
-      toast(
-        'ok',
-        type === 'intent'
-          ? `Created ${name} — generating its detector phrases in the background`
-          : `Created ${name}`,
-      )
-      onCreated()
+      if (editing) {
+        await api.put(`/api/workflows/${initial!.id}`, body)
+        toast('ok', `Saved changes to ${name}`)
+      } else {
+        await api.post('/api/workflows', body)
+        toast(
+          'ok',
+          type === 'intent'
+            ? `Created ${name} — generating its detector phrases in the background`
+            : `Created ${name}`,
+        )
+      }
+      onDone()
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Couldn’t create the workflow')
+      setError(err instanceof ApiError ? err.message : 'Couldn’t save the workflow')
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <Card title="New workflow">
+    <Card title={editing ? `Edit “${initial!.name}”` : 'New workflow'}>
       <form className="stack" style={{ gap: 14 }} onSubmit={submit}>
         <div className="grid-2">
           <Field label="Name">
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Event scheduler" />
           </Field>
-          <Field label="Kind">
-            <select value={type} onChange={(e) => setType(e.target.value as 'intent' | 'scheduled')}>
+          <Field label="Kind" hint={editing ? 'The kind of a workflow can’t be changed after creation.' : undefined}>
+            <select
+              value={type}
+              disabled={editing}
+              onChange={(e) => setType(e.target.value as 'intent' | 'scheduled')}
+            >
               <option value="intent">Intent — fires when the chat converges on something</option>
               <option value="scheduled">Scheduled — fires on a cron schedule</option>
             </select>
@@ -328,6 +342,20 @@ function WorkflowForm({ chats, onCreated }: { chats: Chat[]; onCreated: () => vo
                 value={slots}
                 onChange={(e) => setSlots(e.target.value)}
                 placeholder={'date: the agreed date and time\ntitle: what the event is'}
+              />
+            </Field>
+            <Field
+              label="Cooldown (minutes)"
+              hint="After it fires, the workflow won't fire again in the same chat for this long — stops one ongoing conversation from re-triggering it. 0 = fire on every match. Slot-based workflows also self-dedupe by resetting their gathered values."
+            >
+              <input
+                type="number"
+                min={0}
+                step={1}
+                className="mono"
+                style={{ maxWidth: 120 }}
+                value={cooldownMin}
+                onChange={(e) => setCooldownMin(Number(e.target.value))}
               />
             </Field>
             <label className="row" style={{ gap: 8 }}>
@@ -375,8 +403,16 @@ function WorkflowForm({ chats, onCreated }: { chats: Chat[]; onCreated: () => vo
             className="btn btn--primary"
             disabled={busy || !name || !action || (type === 'intent' && !trigger)}
           >
-            {busy ? 'Creating…' : 'Create workflow'}
+            {busy ? 'Saving…' : editing ? 'Save changes' : 'Create workflow'}
           </button>
+          <button type="button" className="btn btn--quiet" onClick={onCancel}>
+            Cancel
+          </button>
+          {editing && type === 'intent' && trigger !== initial!.trigger_prompt && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              Changing the trigger re-generates the detector phrases.
+            </span>
+          )}
         </div>
       </form>
     </Card>

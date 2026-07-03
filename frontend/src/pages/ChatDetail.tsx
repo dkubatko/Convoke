@@ -11,16 +11,18 @@ import {
   Message,
   Run,
   SearchHit,
-  TriggerStateInfo,
 } from '../lib/types'
+import { coolingDown, funnel, stageStory, statusChip } from '../lib/intent'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
 import {
   Card,
   CardSkeleton,
+  Chip,
   EmptyState,
   ErrorNote,
+  Funnel,
   PageHead,
   StatusPill,
   TableSkeleton,
@@ -352,15 +354,27 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
                   onClick={(e) => e.stopPropagation()}
                   onChange={(e) => void toggle(wf, e.target.checked)}
                 />
-                <h3 style={{ fontSize: 15 }}>{wf.name}</h3>
+                <h3 style={{ fontSize: 15, margin: 0 }}>
+                  <Link
+                    to={`/workflows/${wf.id}`}
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ color: 'inherit' }}
+                    title="Open this workflow"
+                  >
+                    {wf.name}
+                  </Link>
+                </h3>
                 <span className="pill pill--accent">
                   <span className="lamp" aria-hidden />
                   {wf.type}
                 </span>
                 {!wf.enabled && <StatusPill status="disabled" />}
               </div>
-              <span className="row" style={{ gap: 10 }}>
-                {assigned && wf.type === 'intent' && <StagePill wf={wf} />}
+              <span className="row" style={{ gap: 8 }}>
+                {assigned && wf.type === 'intent' && <IntentStatus wf={wf} />}
+                {assigned && wf.type === 'intent' && wf.pending_messages > 0 && (
+                  <Chip label={`${wf.pending_messages} new`} tone="idle" />
+                )}
                 {assigned && (
                   <button
                     className="btn btn--quiet btn--sm"
@@ -376,8 +390,16 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
               </span>
             </div>
             {assigned && !expanded && (
-              <p className="muted mono" style={{ fontSize: 12, marginTop: 8 }}>
-                {compactSummary(wf)}
+              <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+                {wf.type === 'scheduled'
+                  ? `${wf.cron ?? ''} \u00b7 next ${wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '\u2014'}`
+                  : stageStory(wf.states[0], wf.threshold, wf.examples_status)}
+                {wf.type === 'intent' && wf.pending_messages > 0 && (
+                  <span className="muted">
+                    {' '}\u00b7 {wf.pending_messages} new message{wf.pending_messages === 1 ? '' : 's'} waiting for
+                    the next check
+                  </span>
+                )}
               </p>
             )}
             {assigned && expanded && <ExpandedWorkflow wf={wf} />}
@@ -388,30 +410,10 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
   )
 }
 
-function cooldownActive(s: TriggerStateInfo | undefined): boolean {
-  return !!s?.cooldown_until && new Date(s.cooldown_until) > new Date()
-}
-
-/** One quiet line for the collapsed card — the essentials, no sections. */
-function compactSummary(wf: ChatWorkflow): string {
-  if (wf.type === 'scheduled') {
-    return `${wf.cron ?? ''} \u00b7 next ${wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '\u2014'}`
-  }
+function IntentStatus({ wf }: { wf: ChatWorkflow }) {
   const s = wf.states[0]
-  if (!s || !s.last_evaluated_at) {
-    return wf.examples_status === 'pending'
-      ? 'calibrating detector\u2026'
-      : 'watching \u2014 nothing evaluated yet'
-  }
-  const parts = [`last check ${timeAgo(s.last_evaluated_at)}`]
-  const gathered = Object.entries(s.slots)
-    .map(([k, v]) => `${k}: ${v.value}`)
-    .join(', ')
-  if (gathered) parts.push(`gathered ${gathered}`)
-  if (cooldownActive(s)) parts.push(`cooldown until ${shortDateTime(s.cooldown_until!)}`)
-  const fires = wf.recent_fires.length
-  if (fires) parts.push(`${fires} fire${fires === 1 ? '' : 's'}`)
-  return parts.join(' \u00b7 ')
+  const { label, tone } = statusChip(s, wf.examples_status)
+  return <Chip label={label} tone={tone} live={s?.last_stage === 'accumulating'} />
 }
 
 interface ActivityEntry {
@@ -457,56 +459,88 @@ function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
   return entries.sort((a, b) => b.when.localeCompare(a.when))
 }
 
+export function cooldownLabel(seconds: number): string {
+  if (!seconds) return 'none — fires on every match'
+  if (seconds % 3600 === 0) return `${seconds / 3600} h`
+  if (seconds % 60 === 0) return `${seconds / 60} min`
+  return `${seconds} s`
+}
+
+function SettingsLine({ wf }: { wf: ChatWorkflow }) {
+  return (
+    <dl className="kv">
+      {wf.type === 'intent' && (
+        <>
+          <dt>cooldown length</dt>
+          <dd>{cooldownLabel(wf.cooldown_seconds)}</dd>
+        </>
+      )}
+      <dt>on fire</dt>
+      <dd>{wf.confirm ? 'asks in the chat before acting' : 'acts without asking'}</dd>
+    </dl>
+  )
+}
+
 function ExpandedWorkflow({ wf }: { wf: ChatWorkflow }) {
   const activity = mergeActivity(wf)
   const forum = wf.states.length > 1
   return (
-    <div className="stack" style={{ gap: 12, marginTop: 12 }}>
-      {wf.type === 'intent' && wf.states.length === 0 && (
-        <p className="muted" style={{ fontSize: 12.5 }}>
-          Watching — no conversation window has been evaluated yet.
-        </p>
-      )}
+    <div className="stack" style={{ gap: 14, marginTop: 12 }}>
       {wf.type === 'intent' &&
-        wf.states.map((s) => (
-          <dl className="kv" key={s.thread_key}>
-            {forum && (
-              <>
-                <dt>thread</dt>
-                <dd>{s.thread_key || 'main'}</dd>
-              </>
-            )}
-            <dt>last check</dt>
-            <dd>
-              {s.last_evaluated_at ? timeAgo(s.last_evaluated_at) : 'never'}
-              {s.last_score != null &&
-                ` \u00b7 match ${s.last_score.toFixed(2)}${wf.threshold ? ` / needs ${wf.threshold.toFixed(2)}` : ''}`}
-              {s.last_confidence != null && ` \u00b7 classifier confidence ${s.last_confidence.toFixed(2)}`}
-            </dd>
-            <dt>gathered</dt>
-            <dd>
-              {Object.keys(s.slots).length === 0
-                ? `nothing yet (waiting for: ${wf.required_slots.map((r) => r.name).join(', ') || 'any match'})`
-                : Object.entries(s.slots)
-                    .map(([k, v]) => `${k}: ${v.value}`)
-                    .join(' \u00b7 ')}
-            </dd>
-            {cooldownActive(s) && (
-              <>
-                <dt>cooldown</dt>
-                <dd>until {shortDateTime(s.cooldown_until!)}</dd>
-              </>
-            )}
-          </dl>
+        (wf.states.length === 0 ? (
+          <p className="muted" style={{ fontSize: 12.5 }}>
+            {stageStory(undefined, wf.threshold, wf.examples_status)}
+          </p>
+        ) : (
+          wf.states.map((s) => {
+            const cooling = coolingDown(s)
+            return (
+              <div className="stack" key={s.thread_key} style={{ gap: 8 }}>
+                {forum && (
+                  <div className="muted mono" style={{ fontSize: 11.5 }}>
+                    thread {s.thread_key || 'main'}
+                  </div>
+                )}
+                <div className="muted" style={{ fontSize: 11.5 }}>
+                  last check {s.last_evaluated_at ? timeAgo(s.last_evaluated_at) : 'never'}
+                  {wf.pending_messages > 0 && ` · ${wf.pending_messages} new waiting`}
+                </div>
+                <p style={{ fontSize: 12.5, margin: 0 }}>
+                  {stageStory(s, wf.threshold, wf.examples_status)}
+                </p>
+                <Funnel steps={funnel(s, wf.threshold, wf.required_slots)} />
+                <dl className="kv">
+                  <dt>gathered</dt>
+                  <dd>
+                    {Object.keys(s.slots).length === 0
+                      ? `nothing yet (needs: ${wf.required_slots.map((r) => r.name).join(', ') || 'any match'})`
+                      : Object.entries(s.slots)
+                          .map(([k, v]) => `${k}: ${v.value}`)
+                          .join('  ·  ')}
+                  </dd>
+                  {cooling && (
+                    <>
+                      <dt>cooldown</dt>
+                      <dd>until {shortDateTime(s.cooldown_until!)}</dd>
+                    </>
+                  )}
+                </dl>
+              </div>
+            )
+          })
         ))}
+
       {wf.type === 'scheduled' && (
         <dl className="kv">
           <dt>schedule</dt>
           <dd>
-            {wf.cron} · next {wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '\u2014'}
+            {wf.cron} · next {wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '—'}
           </dd>
         </dl>
       )}
+
+      <SettingsLine wf={wf} />
+
       {activity.length > 0 && (
         <div>
           <div className="card-title">Activity in this chat</div>
@@ -519,7 +553,7 @@ function ExpandedWorkflow({ wf }: { wf: ChatWorkflow }) {
                     <StatusPill status={a.status} />
                   </td>
                   <td className={a.error ? 'field-error' : 'muted'} style={{ fontSize: 12.5 }}>
-                    {a.detail.join('\u2002\u00b7\u2002') || '\u2014'}
+                    {a.detail.join(' · ') || '—'}
                   </td>
                 </tr>
               ))}
@@ -527,27 +561,14 @@ function ExpandedWorkflow({ wf }: { wf: ChatWorkflow }) {
           </table>
         </div>
       )}
-      {wf.type === 'intent' && (
-        <p className="muted" style={{ fontSize: 12 }}>
-          Windows are evaluated ~1 minute after new messages stop (or every 30 messages);
-          “last check” moves only when there was something new to evaluate.
-        </p>
-      )}
+
+      <p className="muted" style={{ fontSize: 12 }}>
+        {wf.type === 'intent' &&
+          'Windows are evaluated ~1 minute after new messages stop (or every 30 messages). '}
+        <Link to={`/workflows/${wf.id}`}>Open this workflow across all chats →</Link>
+      </p>
     </div>
   )
-}
-
-function StagePill({ wf }: { wf: ChatWorkflow }) {
-  const state = wf.states[0]
-  if (!state || !state.last_stage) {
-    return (
-      <span className="pill pill--idle">
-        <span className="lamp" aria-hidden />
-        {wf.examples_status === 'pending' ? 'calibrating detector' : 'no activity yet'}
-      </span>
-    )
-  }
-  return <StatusPill status={state.last_stage} live={state.last_stage === 'accumulating'} />
 }
 
 /* ---------------- Import ---------------- */

@@ -4,7 +4,7 @@ import { ReactNode } from 'react'
 
 export function PageHead({ title, lede, actions }: {
   title: string
-  lede?: string
+  lede?: ReactNode
   actions?: ReactNode
 }) {
   return (
@@ -186,5 +186,39 @@ export function StatusPill({ status, live = false }: { status: string; live?: bo
       <span className="lamp" aria-hidden />
       {PILL_LABEL[status] ?? status.replaceAll('_', ' ')}
     </span>
+  )
+}
+
+/** Generic labelled tone chip (when the label isn't a known status string). */
+export function Chip({ label, tone = 'idle', live = false }: {
+  label: string
+  tone?: 'ok' | 'warn' | 'err' | 'accent' | 'idle'
+  live?: boolean
+}) {
+  return (
+    <span className={`pill pill--${tone}${live ? ' pill--live' : ''}`}>
+      <span className="lamp" aria-hidden />
+      {label}
+    </span>
+  )
+}
+
+/** The intent funnel: Prefilter → Classifier → Fire, coloured by how far the
+    last evaluation got. */
+export function Funnel({ steps }: {
+  steps: { name: string; status: 'pass' | 'fail' | 'wait' | 'skip'; detail?: string }[]
+}) {
+  return (
+    <div className="funnel" role="list">
+      {steps.map((st, i) => (
+        <div className="funnel-step" key={st.name} role="listitem">
+          <div className={`funnel-node funnel-node--${st.status}`}>
+            <span className="funnel-name">{st.name}</span>
+            {st.detail && <span className="funnel-detail">{st.detail}</span>}
+          </div>
+          {i < steps.length - 1 && <span className="funnel-arrow" aria-hidden>→</span>}
+        </div>
+      ))}
+    </div>
   )
 }
