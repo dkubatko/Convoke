@@ -24,7 +24,9 @@ log = logging.getLogger("convoke.intent.examples")
 
 DEFAULT_THRESHOLD = 0.80
 THRESHOLD_FLOOR = 0.70
-THRESHOLD_CEIL = 0.92
+# e5-small compresses all similarities into ~0.80–0.95; anything above 0.88
+# starts rejecting genuine paraphrases.
+THRESHOLD_CEIL = 0.88
 
 GENERATION_PROMPT = """\
 A Telegram group-chat bot watches conversations for this intent:
@@ -45,29 +47,36 @@ def dot(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
+def _percentile(sorted_values: list[float], q: float) -> float:
+    idx = min(len(sorted_values) - 1, max(0, round(q * (len(sorted_values) - 1))))
+    return sorted_values[idx]
+
+
 def calibrate_threshold(
     positive_vecs: list[list[float]], negative_vecs: list[list[float]]
 ) -> float:
-    """Midpoint between how positives cluster among themselves and how close
-    the best negative gets to any positive (vectors are normalized)."""
+    """Recall-first. The prefilter's only job is to stop obviously off-topic
+    windows cheaply — precision belongs to the classifier behind it, and a
+    false positive costs one cheap-model call while a false negative means
+    the workflow never fires.
+
+    Two anchors, take the looser (min):
+    - most (75%) generated hard negatives should be excluded — but not the
+      single most adversarial one, which under e5's compressed similarity
+      scale sits nearly on top of the positives;
+    - a real paraphrase scores like positives score against each other, so
+      stay clearly below the lower quartile of positive cross-similarity."""
     if not positive_vecs:
         return DEFAULT_THRESHOLD
-    pos_sims = []
-    for i, v in enumerate(positive_vecs):
-        best = max(
-            (dot(v, w) for j, w in enumerate(positive_vecs) if j != i), default=None
-        )
-        if best is not None:
-            pos_sims.append(best)
-    pos_floor = min(pos_sims) if pos_sims else DEFAULT_THRESHOLD
-    neg_ceiling = max(
-        (dot(n, p) for n in negative_vecs for p in positive_vecs), default=None
+    pos_best = sorted(
+        max((dot(v, w) for j, w in enumerate(positive_vecs) if j != i), default=1.0)
+        for i, v in enumerate(positive_vecs)
     )
-    if neg_ceiling is None:
-        threshold = pos_floor - 0.05
-    else:
-        threshold = (pos_floor + neg_ceiling) / 2
-    return max(THRESHOLD_FLOOR, min(THRESHOLD_CEIL, threshold))
+    candidates = [_percentile(pos_best, 0.25) - 0.02]
+    if negative_vecs:
+        neg_best = sorted(max(dot(n, p) for p in positive_vecs) for n in negative_vecs)
+        candidates.append(_percentile(neg_best, 0.75) + 0.01)
+    return max(THRESHOLD_FLOOR, min(THRESHOLD_CEIL, min(candidates)))
 
 
 async def generate_examples(

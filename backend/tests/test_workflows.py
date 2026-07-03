@@ -81,15 +81,50 @@ def test_convergence_requires_all_slots_confident():
 
 # ---------- threshold calibration ----------
 
-def test_calibrate_threshold_between_clusters():
+def test_calibrate_threshold_recall_first():
     pos = [[1.0, 0.0], [0.98, 0.02]]
-    neg = [[0.5, 0.5]]
+    neg = [[0.85, 0.15]]  # best sim to a positive ≈ 0.85
     t = calibrate_threshold(pos, neg)
-    assert 0.70 <= t <= 0.92
+    # negatives anchor (0.85 + 0.01) is looser than the positives anchor — wins
+    assert t == pytest.approx(0.86, abs=0.01)
+    assert 0.70 <= t <= 0.88
+
+
+def test_calibrate_threshold_capped_when_negatives_hug_positives():
+    pos = [[1.0, 0.0], [0.99, 0.01]]
+    neg = [[0.995, 0.005]]  # adversarial negative nearly on top of positives
+    assert calibrate_threshold(pos, neg) <= 0.88
 
 
 def test_calibrate_threshold_empty_defaults():
     assert calibrate_threshold([], []) == pytest.approx(0.80)
+
+
+async def test_prefilter_passes_when_one_message_matches(db_sessionmaker, monkeypatch):
+    """A burst where only one line resembles the examples must still reach the
+    classifier — scoring is per message, not per rendered window."""
+    _, chat, _ = await _intent_setup(db_sessionmaker)
+    sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
+    seen_windows: list[str] = []
+
+    async def fake_classify(session, wf, tstate, rendered):
+        seen_windows.append(rendered)
+        return verdict(match=False)
+
+    monkeypatch.setattr(sweeper, "_classify", fake_classify)
+
+    async with db_sessionmaker() as s:
+        # threshold high: whole-window dilution would fail; message-level max passes
+        from app.models import Workflow as Wf
+        wf = (await s.execute(select(Wf))).scalar_one()
+        wf.threshold = 0.95
+        s.add(_msg(chat.id, 1, "completely unrelated chatter about taxes", minutes_ago=6))
+        s.add(_msg(chat.id, 2, "more noise here", minutes_ago=5))
+        s.add(_msg(chat.id, 3, "let's schedule dinner", minutes_ago=4))  # == example text
+        await s.commit()
+
+    assert await sweeper.sweep() == 1
+    assert seen_windows, "classifier was never reached — prefilter blocked a matching message"
 
 
 # ---------- scheduler ----------

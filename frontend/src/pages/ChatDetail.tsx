@@ -361,6 +361,10 @@ function IntentStatePanel({ wf }: { wf: ChatWorkflow }) {
           Watching — no conversation window has been evaluated yet.
         </p>
       )}
+      <p className="muted" style={{ fontSize: 12 }}>
+        Windows are evaluated about a minute after new messages stop (or every 30
+        messages) — a stale “last check” just means nothing new arrived since.
+      </p>
       {wf.states.map((s) => (
         <div key={s.thread_key}>
           <dl className="kv">

@@ -151,16 +151,45 @@ class IntentSweeper:
             evaluated = 0
             for thread_key, window in by_thread.items():
                 window = window[-self.settings.intent_window_max_messages :]
-                rendered = "\n".join(render_message(m) for m in window)
-                window_vec = (await self.embedder.embed_passages([rendered]))[0]
+                # Prefilter embeds each message's raw text — the SAME space the
+                # example utterances were calibrated in. Embedding the rendered
+                # window (names + timestamps + concatenation) systematically
+                # deflated scores and made calibrated thresholds unreachable.
+                message_vecs = await self.embedder.embed_passages([m.text for m in window])
+                # The classifier gets trailing context: messages that trickle in
+                # after an evaluation ("what do you think?") are meaningless
+                # without the burst that preceded them.
+                context = await self._prior_context(session, chat_id, thread_key, window[0])
+                rendered = "\n".join(render_message(m) for m in [*context, *window])
                 for wf in workflows:
                     evaluated += await self._evaluate(
-                        session, wf, chat_id, thread_key, window, rendered, window_vec, now
+                        session, wf, chat_id, thread_key, window, rendered, message_vecs, now
                     )
 
             state.last_tg_message_id = messages[-1].tg_message_id
             await session.commit()
             return evaluated
+
+    async def _prior_context(
+        self, session: AsyncSession, chat_id: int, thread_key: int, first: Message
+    ) -> list[Message]:
+        rows = (
+            (
+                await session.execute(
+                    select(Message)
+                    .where(
+                        Message.chat_id == chat_id,
+                        Message.tg_message_id < first.tg_message_id,
+                        Message.thread_id.is_(None) if thread_key == 0 else Message.thread_id == thread_key,
+                    )
+                    .order_by(Message.tg_message_id.desc())
+                    .limit(self.settings.intent_context_messages)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return list(reversed(rows))
 
     async def _evaluate(
         self,
@@ -170,7 +199,7 @@ class IntentSweeper:
         thread_key: int,
         window: list[Message],
         rendered: str,
-        window_vec: list[float],
+        message_vecs: list[list[float]],
         now: datetime,
     ) -> int:
         tstate = (
@@ -199,11 +228,12 @@ class IntentSweeper:
 
         # Stage 1: prefilter (skipped when the state is mid-accumulation —
         # follow-ups like "ok wednesday then" may not resemble the examples).
+        # Score = best (message, example) pair: one on-intent message is enough.
         score: float | None = None
         if not tstate.slots:
             positives = await load_positive_vectors(session, wf.id)
-            if positives:
-                score = max(dot(window_vec, p) for p in positives)
+            if positives and message_vecs:
+                score = max(dot(v, p) for v in message_vecs for p in positives)
                 if score < (wf.threshold or 0.8):
                     mark("prefilter_skip", score=score)
                     return 0

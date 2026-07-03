@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     # Intent pipeline
     intent_lull_seconds: int = 60
     intent_window_max_messages: int = 30
+    # Messages before the evaluation cursor shown to the classifier as context.
+    intent_context_messages: int = 8
     intent_min_llm_interval_seconds: int = 120
     intent_state_ttl_hours: int = 36
     confirm_timeout_minutes: int = 60
