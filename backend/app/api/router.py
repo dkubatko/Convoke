@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api import auth, bots, chats, health, mcp, providers, workflows
+from app.api import auth, bots, chats, health, mcp, providers, settings, workflows
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
@@ -11,3 +11,4 @@ api_router.include_router(providers.router, tags=["providers"])
 api_router.include_router(mcp.router, tags=["mcp"])
 api_router.include_router(mcp.public_router, tags=["mcp"])
 api_router.include_router(workflows.router, tags=["workflows"])
+api_router.include_router(settings.router, tags=["settings"])

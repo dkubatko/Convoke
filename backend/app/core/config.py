@@ -37,13 +37,38 @@ class Settings(BaseSettings):
     context_char_budget: int = 24000
     agent_concurrency: int = 4
 
-    # Intent pipeline
-    intent_lull_seconds: int = 60
+    # Intent pipeline. Timing defaults tuned for quicker reaction while keeping
+    # a settled-burst window and a model-cost cap.
+    intent_lull_seconds: int = 30
     intent_window_max_messages: int = 30
     # Messages before the evaluation cursor shown to the classifier as context.
     intent_context_messages: int = 8
-    intent_min_llm_interval_seconds: int = 120
-    intent_state_ttl_hours: int = 36
+    # Circuit-breaker floor between successful classifier calls per
+    # (workflow, thread) — the lull is the real rate limiter; this only stops
+    # a pathological burst-close loop from hammering the model.
+    intent_min_llm_interval_seconds: int = 15
+    # Concurrent classifier calls across all (workflow, chat, thread) jobs.
+    intent_classifier_concurrency: int = 4
+    # Episode lifecycle. A `candidate` (classifier said "plausible, not enough
+    # info") expires fast; `tracking` lives while the negotiation does.
+    intent_candidate_ttl_minutes: int = 20
+    intent_candidate_unrelated_k: int = 3
+    intent_tracking_idle_hours: int = 12
+    intent_episode_max_age_days: int = 7
+    # Concurrent pre-fire episodes per (workflow, thread). 1 until the small
+    # model's attribution quality is validated live; raise to ~3 after.
+    intent_max_open_episodes: int = 1
+    # Graduated slot decay: after the grace period of no attributed activity,
+    # each slot's effective confidence is multiplied by (pct/100) per hour —
+    # computed lazily, never written back.
+    intent_decay_grace_hours: int = 6
+    intent_decay_per_hour_pct: int = 85
+    # How often the detector loop wakes to look for windows to evaluate. One
+    # global loop processes every chat — not a per-chat knob.
+    intent_sweep_interval_seconds: int = 5
+    # Positive example phrases the strong model generates per workflow to
+    # calibrate the prefilter (negatives scale with it).
+    intent_example_count: int = 18
     confirm_timeout_minutes: int = 60
 
 
