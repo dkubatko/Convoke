@@ -146,6 +146,7 @@ const PILL_TONE: Record<string, string> = {
   disabled: 'idle',
   // runs / fires / imports
   done: 'ok',
+  declined: 'idle',
   running: 'accent',
   pending: 'warn',
   confirm_wait: 'warn',
@@ -175,6 +176,7 @@ const PILL_TONE: Record<string, string> = {
 const PILL_LABEL: Record<string, string> = {
   pending_auth: 'waiting for admin',
   confirm_wait: 'awaiting confirmation',
+  declined: 'agent declined',
   prefilter_skip: 'listening',
   no_match: 'listening · no intent',
   accumulating: 'gathering info',

@@ -129,7 +129,11 @@ async def execute_run(
             invocation_line=(
                 "You were triggered by an automated workflow; carry out the task given "
                 "at the end of the prompt, using tools as needed, then post a short "
-                "summary of what you did."
+                "summary of what you did. First check past_workflow_actions when the "
+                "task could be a follow-up to something already handled — prefer "
+                "updating or adjusting the earlier result over duplicating it. If you "
+                "conclude no action is warranted at all, reply with exactly "
+                "NO_ACTION: <one short reason> — nothing will be posted to the chat."
                 if is_workflow
                 else "You were invoked by a member's message (shown last in the recent messages)."
             ),
@@ -141,7 +145,11 @@ async def execute_run(
             build_model(provider), instructions, mcp_toolsets + list(extra_toolsets or [])
         )
         deps = AgentDeps(
-            sessionmaker=sessionmaker, embedder=embedder, chat_id=chat.id, run_id=run_id
+            sessionmaker=sessionmaker,
+            embedder=embedder,
+            chat_id=chat.id,
+            run_id=run_id,
+            workflow_id=run.workflow_id if is_workflow else None,
         )
 
         try:
@@ -154,10 +162,25 @@ async def execute_run(
             await stack.enter_async_context(agent)
             result = await agent.run(user_prompt, deps=deps)
         reply_text = (result.output or "").strip() or "(no reply)"
+        # The agent's structured way to stand down: a NO_ACTION reply posts
+        # nothing to the chat; the run records the decision as `declined` and
+        # the episode is satisfied with the reason, so the topic won't
+        # immediately re-fire (and the classifier sees WHY nothing happened).
+        declined = is_workflow and reply_text.upper().startswith("NO_ACTION")
 
         async with sessionmaker() as session:
             run = await session.get(AgentRun, run_id)
             chat = await session.get(Chat, run.chat_id)
+            run.response_text = reply_text
+            run.finished_at = datetime.now(timezone.utc)
+            if declined:
+                reason = reply_text[len("NO_ACTION"):].lstrip(" :—-").strip() or "no reason given"
+                run.status = "declined"
+                await finish_run_episode(
+                    session, run_id, f"Decided not to act — {reason}", run.finished_at
+                )
+                await session.commit()
+                return
             for part in split_reply(reply_text):
                 await limiter.acquire(chat.bot_id, chat.tg_chat_id)
                 await _send(
@@ -165,8 +188,6 @@ async def execute_run(
                     reply_to=trigger_message_id, thread_id=thread_id,
                 )
             run.status = "done"
-            run.response_text = reply_text
-            run.finished_at = datetime.now(timezone.utc)
             # Feedback loop: the episode that fired this run becomes
             # `satisfied`, carrying what was done.
             await finish_run_episode(session, run_id, reply_text, run.finished_at)

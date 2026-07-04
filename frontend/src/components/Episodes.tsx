@@ -72,12 +72,21 @@ function EpisodeRow({ e, requiredSlots }: { e: EpisodeInfo; requiredSlots: SlotS
         </div>
       )}
 
-      {e.execution_summary && (
-        <div className="episode-acted">
-          <span className="tick">✓ acted{e.fired_at ? ` ${timeAgo(e.fired_at)}` : ''}</span>
-          <span>{truncate(e.execution_summary, 160)}</span>
-        </div>
-      )}
+      {e.execution_summary &&
+        (e.execution_summary.startsWith('Decided not to act') ? (
+          // The agent reviewed this topic and stood down (NO_ACTION).
+          <div className="episode-acted">
+            <span className="muted" style={{ flex: 'none', fontWeight: 600, fontSize: 12 }}>
+              ∅ no action
+            </span>
+            <span>{truncate(e.execution_summary.replace(/^Decided not to act\s*—?\s*/, ''), 160)}</span>
+          </div>
+        ) : (
+          <div className="episode-acted">
+            <span className="tick">✓ acted{e.fired_at ? ` ${timeAgo(e.fired_at)}` : ''}</span>
+            <span>{truncate(e.execution_summary, 160)}</span>
+          </div>
+        ))}
 
       {e.status === 'converged' && (
         <div className="episode-note">

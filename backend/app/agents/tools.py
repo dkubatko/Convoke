@@ -7,9 +7,10 @@ from sqlalchemy import select
 
 from app.agents.deps import AgentDeps
 from app.memory.store import search_chat_history as store_search
-from app.models import Note
+from app.models import IntentEpisode, Note
 
 MAX_NOTES_RETURNED = 8
+MAX_PAST_ACTIONS = 6
 
 
 async def search_chat_history(ctx: RunContext[AgentDeps], query: str) -> str:
@@ -79,4 +80,46 @@ async def recall(ctx: RunContext[AgentDeps], query: str) -> str:
     return "\n".join(f"- {(n.key + ': ') if n.key else ''}{n.text}" for n in notes)
 
 
-AGENT_TOOLS = [search_chat_history, remember, recall]
+async def past_workflow_actions(ctx: RunContext[AgentDeps]) -> str:
+    """What the workflow that triggered you already did in this chat recently
+    — each past action's topic, gathered details, outcome, and time. Check
+    this before acting when the current task could be a follow-up to (or
+    already covered by) an earlier action, and prefer updating or adjusting
+    the earlier result over duplicating it."""
+    if ctx.deps.workflow_id is None:
+        return "This run was not triggered by a workflow — nothing to compare against."
+    async with ctx.deps.sessionmaker() as session:
+        episodes = (
+            (
+                await session.execute(
+                    select(IntentEpisode)
+                    .where(
+                        IntentEpisode.workflow_id == ctx.deps.workflow_id,
+                        IntentEpisode.chat_id == ctx.deps.chat_id,
+                        IntentEpisode.fired_at.is_not(None),
+                    )
+                    .order_by(IntentEpisode.fired_at.desc())
+                    .limit(MAX_PAST_ACTIONS + 1)  # +1: the current run's own episode
+                )
+            )
+            .scalars()
+            .all()
+        )
+    lines: list[str] = []
+    for e in episodes:
+        if e.agent_run_id == ctx.deps.run_id:
+            continue  # the action currently being executed
+        fired = e.fired_at.strftime("%Y-%m-%d %H:%M UTC")
+        lines.append(f"- [{fired}] {e.summary or '(no topic summary)'}")
+        if e.slots:
+            lines.append(
+                "  details: "
+                + "; ".join(f"{k}: {v.get('value')}" for k, v in sorted(e.slots.items()))
+            )
+        lines.append(f"  outcome: {e.execution_summary or 'in progress'}")
+    if not lines:
+        return "This workflow has taken no previous actions in this chat."
+    return "\n".join(lines)
+
+
+AGENT_TOOLS = [search_chat_history, remember, recall, past_workflow_actions]

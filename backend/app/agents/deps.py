@@ -11,3 +11,6 @@ class AgentDeps:
     embedder: Embedder
     chat_id: int
     run_id: int
+    # Set for workflow-triggered runs; lets tools look up what this workflow
+    # already did in this chat.
+    workflow_id: int | None = None

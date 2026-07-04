@@ -163,3 +163,94 @@ async def test_execute_run_without_provider_records_error(db_sessionmaker, bot_r
         run = await s.get(AgentRun, run_id)
         assert run.status == "error"
         assert "No agent model configured" in run.error
+
+
+async def test_workflow_run_can_decline_with_no_action(db_sessionmaker, bot_row, monkeypatch):
+    """A workflow-triggered agent may stand down: a NO_ACTION reply posts
+    nothing, the run records `declined`, and the fired episode is satisfied
+    with the reason — so the topic won't immediately re-fire and the
+    classifier can see why nothing happened."""
+    from pydantic_ai.models.test import TestModel
+
+    import app.agents.runtime as runtime
+    from app.models import IntentEpisode, Workflow
+
+    monkeypatch.setattr(
+        runtime,
+        "build_model",
+        lambda provider: TestModel(call_tools=[], custom_output_text="NO_ACTION: the event already exists"),
+    )
+
+    fake = AgentFakeBot()
+    chat = await authorize_chat(db_sessionmaker, fake, bot_row)
+    async with db_sessionmaker() as s:
+        s.add(ModelProvider(role="agent", base_url="http://unused", model_name="test"))
+        wf = Workflow(name="events", type="intent", action_prompt="create the event",
+                      trigger_prompt="t", required_slots=[], threshold=0.5)
+        s.add(wf)
+        await s.flush()
+        run = AgentRun(chat_id=chat.id, trigger="workflow", workflow_id=wf.id,
+                       request_text="create the event")
+        s.add(run)
+        await s.flush()
+        s.add(IntentEpisode(workflow_id=wf.id, chat_id=chat.id, status="fired",
+                            summary="dinner at 7", agent_run_id=run.id,
+                            fired_at=datetime.now(timezone.utc)))
+        await s.commit()
+        run_id = run.id
+        pre_self = len(fake.sent)
+
+    await execute_run(db_sessionmaker, FakeEmbedder(), SendLimiter(), fake, run_id)
+
+    async with db_sessionmaker() as s:
+        run = await s.get(AgentRun, run_id)
+        assert run.status == "declined", run.error
+        assert run.response_text.startswith("NO_ACTION")
+        ep = (await s.execute(select(IntentEpisode))).scalar_one()
+        assert ep.status == "satisfied"
+        assert ep.execution_summary == "Decided not to act — the event already exists"
+    assert len(fake.sent) == pre_self  # nothing was posted to the chat
+
+
+async def test_past_workflow_actions_tool(db_sessionmaker, bot_row):
+    """The agent's view of what its workflow already did in this chat —
+    excluding the action it is executing right now."""
+    from types import SimpleNamespace
+
+    from app.agents.deps import AgentDeps
+    from app.agents.tools import past_workflow_actions
+    from app.models import IntentEpisode, Workflow
+
+    fake = AgentFakeBot()
+    chat = await authorize_chat(db_sessionmaker, fake, bot_row)
+    async with db_sessionmaker() as s:
+        wf = Workflow(name="events", type="intent", action_prompt="a", trigger_prompt="t",
+                      required_slots=[], threshold=0.5)
+        s.add(wf)
+        await s.flush()
+        s.add(IntentEpisode(
+            workflow_id=wf.id, chat_id=chat.id, status="satisfied",
+            summary="dinner at 7 in Palo Alto",
+            slots={"time": {"value": "7pm", "confidence": 0.9}},
+            execution_summary="Created the calendar event for 7pm",
+            agent_run_id=41, fired_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        ))
+        s.add(IntentEpisode(
+            workflow_id=wf.id, chat_id=chat.id, status="fired",
+            summary="current task", agent_run_id=42,
+            fired_at=datetime.now(timezone.utc),
+        ))
+        await s.commit()
+        wf_id = wf.id
+
+    deps = AgentDeps(sessionmaker=db_sessionmaker, embedder=FakeEmbedder(),
+                     chat_id=chat.id, run_id=42, workflow_id=wf_id)
+    out = await past_workflow_actions(SimpleNamespace(deps=deps))
+    assert "dinner at 7 in Palo Alto" in out
+    assert "time: 7pm" in out
+    assert "Created the calendar event for 7pm" in out
+    assert "current task" not in out  # the in-flight action is excluded
+
+    deps.workflow_id = None
+    out = await past_workflow_actions(SimpleNamespace(deps=deps))
+    assert "not triggered by a workflow" in out
