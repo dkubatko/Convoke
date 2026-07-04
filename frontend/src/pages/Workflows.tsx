@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 import { api, ApiError } from '../lib/api'
 import { shortDateTime } from '../lib/format'
 import { Chat, Workflow } from '../lib/types'
+import { dedupLabel } from '../lib/intent'
+import SettingsEditor from '../components/SettingsEditor'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
@@ -14,7 +16,11 @@ import {
   Field,
   PageHead,
   StatusPill,
+  TabBar,
 } from '../components/ui'
+import { useUrlTab } from '../hooks/useUrlTab'
+
+const SUBTABS = ['Workflows', 'Settings'] as const
 
 function parseSlots(text: string) {
   return text
@@ -33,19 +39,10 @@ export default function Workflows() {
   const toast = useToast()
   const confirm = useConfirm()
 
+  const [subtab, setSubtab] = useUrlTab(SUBTABS, 'Workflows')
+  // "New" opens one form at the top; "Edit" happens inline in that card.
   const [showForm, setShowForm] = useState(false)
-  const [editing, setEditing] = useState<Workflow | null>(null)
-  const formOpen = showForm || editing !== null
-
-  function openEdit(wf: Workflow) {
-    setEditing(wf)
-    setShowForm(false)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
-  }
-  function closeForm() {
-    setShowForm(false)
-    setEditing(null)
-  }
+  const [editingId, setEditingId] = useState<number | null>(null)
 
   async function toggle(wf: Workflow) {
     try {
@@ -80,23 +77,37 @@ export default function Workflows() {
         title="Workflows"
         lede="Standing orders for your assistants: act on a schedule, or when the chat converges on an intent."
         actions={
-          <button
-            className="btn btn--primary"
-            onClick={() => (formOpen ? closeForm() : setShowForm(true))}
-          >
-            {formOpen ? 'Close' : 'New workflow'}
-          </button>
+          subtab === 'Workflows' ? (
+            <button
+              className="btn btn--primary"
+              onClick={() => {
+                setEditingId(null)
+                setShowForm((v) => !v)
+              }}
+            >
+              {showForm ? 'Close' : 'New workflow'}
+            </button>
+          ) : undefined
         }
       />
+      <TabBar tabs={SUBTABS} active={subtab} onSelect={setSubtab} />
+      {subtab === 'Settings' && (
+        <SettingsEditor
+          endpoint="/api/settings?page=workflows"
+          title="Detection & firing"
+          intro="How the detector paces itself, how workflows re-fire, and how their detectors are calibrated — applies to every chat."
+        />
+      )}
+      {subtab === 'Workflows' && (
       <div className="stack">
-        {formOpen && (
+        {showForm && (
           <WorkflowForm
-            key={editing?.id ?? 'new'}
+            key="new"
             chats={chats.data ?? []}
-            initial={editing}
-            onCancel={closeForm}
+            initial={null}
+            onCancel={() => setShowForm(false)}
             onDone={() => {
-              closeForm()
+              setShowForm(false)
               void workflows.refetch()
             }}
           />
@@ -124,18 +135,35 @@ export default function Workflows() {
             />
           </Card>
         ) : (
-          workflows.data!.map((wf) => (
-            <WorkflowCard
-              key={wf.id}
-              wf={wf}
-              chats={chats.data ?? []}
-              onEdit={() => openEdit(wf)}
-              onToggle={() => void toggle(wf)}
-              onDelete={() => void remove(wf)}
-            />
-          ))
+          workflows.data!.map((wf) =>
+            editingId === wf.id ? (
+              <WorkflowForm
+                key={wf.id}
+                chats={chats.data ?? []}
+                initial={wf}
+                onCancel={() => setEditingId(null)}
+                onDone={() => {
+                  setEditingId(null)
+                  void workflows.refetch()
+                }}
+              />
+            ) : (
+              <WorkflowCard
+                key={wf.id}
+                wf={wf}
+                chats={chats.data ?? []}
+                onEdit={() => {
+                  setShowForm(false)
+                  setEditingId(wf.id)
+                }}
+                onToggle={() => void toggle(wf)}
+                onDelete={() => void remove(wf)}
+              />
+            ),
+          )
         )}
       </div>
+      )}
     </>
   )
 }
@@ -202,13 +230,9 @@ function WorkflowCard({ wf, chats, onEdit, onToggle, onDelete }: {
                   ? 'generating example phrases…'
                   : 'fallback — configure an agent model and edit the workflow to calibrate'}
             </dd>
-            <dt>cooldown</dt>
+            <dt>dedup</dt>
             <dd>
-              {wf.cooldown_seconds === 0
-                ? 'none — fires on every match'
-                : wf.cooldown_seconds % 3600 === 0
-                  ? `${wf.cooldown_seconds / 3600} h`
-                  : `${Math.round(wf.cooldown_seconds / 60)} min`}
+              {dedupLabel(wf)}
               {wf.confirm ? ' · asks before acting' : ' · acts without asking'}
             </dd>
           </>
@@ -233,7 +257,7 @@ function WorkflowCard({ wf, chats, onEdit, onToggle, onDelete }: {
   )
 }
 
-function WorkflowForm({ chats, initial, onDone, onCancel }: {
+export function WorkflowForm({ chats, initial, onDone, onCancel }: {
   chats: Chat[]
   initial?: Workflow | null
   onDone: () => void
@@ -253,9 +277,11 @@ function WorkflowForm({ chats, initial, onDone, onCancel }: {
   const [action, setAction] = useState(initial?.action_prompt ?? '')
   const [confirmFirst, setConfirmFirst] = useState(initial?.confirm ?? true)
   const [cooldownMin, setCooldownMin] = useState(
-    initial ? Math.round(initial.cooldown_seconds / 60) : 60,
+    initial ? Math.round(initial.cooldown_seconds / 60) : 0,
   )
+  const [dedupHours, setDedupHours] = useState(initial?.dedup_window_hours ?? 12)
   const [chatIds, setChatIds] = useState<number[]>(initial?.chat_ids ?? [])
+  const hasSlots = parseSlots(slots).length > 0
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -272,7 +298,8 @@ function WorkflowForm({ chats, initial, onDone, onCancel }: {
       trigger_prompt: type === 'intent' ? trigger : null,
       required_slots: type === 'intent' ? parseSlots(slots) : [],
       confirm: confirmFirst,
-      cooldown_seconds: type === 'intent' ? Math.max(0, Math.round(cooldownMin * 60)) : 3600,
+      cooldown_seconds: type === 'intent' ? Math.max(0, Math.round(cooldownMin * 60)) : 0,
+      dedup_window_hours: type === 'intent' ? Math.max(1, Math.round(dedupHours)) : 12,
       chat_ids: chatIds,
     }
     try {
@@ -344,20 +371,52 @@ function WorkflowForm({ chats, initial, onDone, onCancel }: {
                 placeholder={'date: the agreed date and time\ntitle: what the event is'}
               />
             </Field>
-            <Field
-              label="Cooldown (minutes)"
-              hint="After it fires, the workflow won't fire again in the same chat for this long — stops one ongoing conversation from re-triggering it. 0 = fire on every match. Slot-based workflows also self-dedupe by resetting their gathered values."
+            <div
+              style={{
+                fontSize: 12.5,
+                color: 'var(--ink-2)',
+                background: 'var(--surface-2)',
+                border: '1px solid var(--line)',
+                borderRadius: 'var(--radius-s)',
+                padding: '9px 12px',
+              }}
             >
-              <input
-                type="number"
-                min={0}
-                step={1}
-                className="mono"
-                style={{ maxWidth: 120 }}
-                value={cooldownMin}
-                onChange={(e) => setCooldownMin(Number(e.target.value))}
-              />
-            </Field>
+              <b style={{ color: 'var(--ink)' }}>Acts once per occurrence.</b>{' '}
+              Each occurrence of the trigger is tracked as its own topic
+              {hasSlots ? ', gathering its information as the conversation unfolds' : ''}. After
+              acting, the workflow remembers what it did — follow-ups, thanks, and refinements of
+              a handled topic don&rsquo;t make it act twice. A genuinely new occurrence does.
+            </div>
+            <div className="grid-2">
+              <Field
+                label="Follow-up window (hours)"
+                hint="How long a handled topic is remembered so its follow-ups are recognized. After this, the same subject counts as new."
+              >
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  className="mono"
+                  style={{ maxWidth: 120 }}
+                  value={dedupHours}
+                  onChange={(e) => setDedupHours(Number(e.target.value))}
+                />
+              </Field>
+              <Field
+                label="Rate limit — minimum minutes between actions"
+                hint="Optional. A topic that's ready during the wait parks; when the limit lifts it double-checks it's still wanted, then acts. Nothing is dropped. 0 = no limit."
+              >
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  className="mono"
+                  style={{ maxWidth: 120 }}
+                  value={cooldownMin}
+                  onChange={(e) => setCooldownMin(Number(e.target.value))}
+                />
+              </Field>
+            </div>
             <label className="row" style={{ gap: 8 }}>
               <input
                 type="checkbox"

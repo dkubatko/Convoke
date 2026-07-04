@@ -4,7 +4,11 @@ import { timeAgo } from '../lib/format'
 import { Provider } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
-import { Card, CardSkeleton, ErrorNote, Field, PageHead } from '../components/ui'
+import { Card, CardSkeleton, ErrorNote, Field, PageHead, TabBar } from '../components/ui'
+import SettingsEditor from '../components/SettingsEditor'
+import { useUrlTab } from '../hooks/useUrlTab'
+
+const SUBTABS = ['Providers', 'Settings'] as const
 
 const ROLES: { role: string; title: string; blurb: string; placeholder: string }[] = [
   {
@@ -24,6 +28,7 @@ const ROLES: { role: string; title: string; blurb: string; placeholder: string }
 
 export default function Models() {
   const providers = useQuery<Provider[]>(() => api.get('/api/providers'), [])
+  const [subtab, setSubtab] = useUrlTab(SUBTABS, 'Providers')
 
   return (
     <>
@@ -31,7 +36,16 @@ export default function Models() {
         title="Models"
         lede="Point each role at any OpenAI-compatible endpoint — Ollama, LM Studio, OpenRouter, OpenAI. Connections are tested before they can be saved; keys are stored encrypted."
       />
-      {providers.loading ? (
+      <TabBar tabs={SUBTABS} active={subtab} onSelect={setSubtab} />
+      {subtab === 'Settings' && (
+        <SettingsEditor
+          endpoint="/api/settings?page=models"
+          title="Classifier tuning"
+          intro="How the intent classifier model is called while watching chats."
+        />
+      )}
+      {subtab === 'Providers' &&
+        (providers.loading ? (
         <div className="stack">
           <CardSkeleton lines={2} />
           <CardSkeleton lines={3} />
@@ -63,7 +77,7 @@ export default function Models() {
             />
           ))}
         </div>
-      )}
+        ))}
     </>
   )
 }

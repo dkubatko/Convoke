@@ -12,7 +12,9 @@ import {
   Run,
   SearchHit,
 } from '../lib/types'
-import { coolingDown, funnel, stageStory, statusChip } from '../lib/intent'
+import { dedupLabel, funnel, stageStory, statusChip } from '../lib/intent'
+import { EpisodeList } from '../components/Episodes'
+import SettingsEditor from '../components/SettingsEditor'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
@@ -23,18 +25,20 @@ import {
   EmptyState,
   ErrorNote,
   Funnel,
+  HoverCard,
   PageHead,
   StatusPill,
+  TabBar,
   TableSkeleton,
 } from '../components/ui'
+import { useUrlTab } from '../hooks/useUrlTab'
 
-const TABS = ['Memory', 'Workflows', 'Import history', 'Tools', 'Agent runs'] as const
-type Tab = (typeof TABS)[number]
+const TABS = ['Memory', 'Workflows', 'Import history', 'Tools', 'Agent runs', 'Settings'] as const
 
 export default function ChatDetail() {
   const { chatId } = useParams()
   const id = Number(chatId)
-  const [tab, setTab] = useState<Tab>('Memory')
+  const [tab, setTab] = useUrlTab(TABS, 'Memory')
 
   const chat = useQuery<Chat | undefined>(
     async () => (await api.get<Chat[]>('/api/chats')).find((c) => c.id === id),
@@ -65,24 +69,19 @@ export default function ChatDetail() {
             : 'Waiting for a chat admin to tap “Authorize Convoke” in Telegram. Nothing is stored until then.'
         }
       />
-      <div className="tabs" role="tablist">
-        {TABS.map((t) => (
-          <button
-            key={t}
-            role="tab"
-            aria-selected={tab === t}
-            className={tab === t ? 'active' : ''}
-            onClick={() => setTab(t)}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
+      <TabBar tabs={TABS} active={tab} onSelect={setTab} />
       {tab === 'Memory' && <MemoryTab chatId={id} />}
       {tab === 'Workflows' && <WorkflowsTab chatId={id} />}
       {tab === 'Import history' && <ImportTab chatId={id} />}
       {tab === 'Tools' && <ToolsTab chatId={id} />}
       {tab === 'Agent runs' && <RunsTab chatId={id} />}
+      {tab === 'Settings' && (
+        <SettingsEditor
+          endpoint={`/api/chats/${id}/settings`}
+          title="Detection timing for this chat"
+          intro="Override how the detector windows this chat's conversation. Left at their defaults, these follow the global settings."
+        />
+      )}
     </>
   )
 }
@@ -254,7 +253,7 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
   const workflows = useQuery<ChatWorkflow[]>(
     () => api.get(`/api/chats/${chatId}/workflows`),
     [chatId],
-    { pollMs: 5000 },
+    { pollMs: 3000 },
   )
   // Optimistic assignment state so the checkbox responds instantly;
   // reconciled from the server on every (re)fetch. A ref mirrors it so the
@@ -310,20 +309,8 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
     )
   }
 
-  const pending = workflows.data![0]?.pending_messages ?? 0
   return (
     <div className="stack">
-      {pending > 0 && (
-        <p className="row" style={{ gap: 8 }}>
-          <span className="pill pill--accent pill--live">
-            <span className="lamp" aria-hidden />
-            {pending} message{pending === 1 ? '' : 's'} waiting
-          </span>
-          <span className="muted" style={{ fontSize: 12.5 }}>
-            evaluated ~1 minute after the chat goes quiet
-          </span>
-        </p>
-      )}
       {workflows.data!.map((wf) => {
         const assigned = assignedIds.includes(wf.id)
         const expanded = expandedIds.includes(wf.id)
@@ -333,36 +320,26 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
           )
         return (
           <Card key={wf.id}>
-            {/* Clicking the header toggles details; interactive children below
-                stopPropagation so they don't also fire it. */}
-            <div
-              className="page-head-row"
-              onClick={assigned ? toggleExpand : undefined}
-              style={assigned ? { cursor: 'pointer' } : undefined}
-            >
+            {/* The Details button is the expand affordance — the card surface
+                itself is inert, so no misleading pointer cursor. */}
+            <div className="page-head-row">
               {/* Checkbox standalone — never wrapped in a <label> with other
                   content, or a click bubbles to the label and re-fires on the
-                  input, toggling twice (spurious PUT, box won't stay checked).
-                  Only the checkbox stops propagation, so clicking the title
-                  still toggles the card's details. */}
+                  input, toggling twice (spurious PUT, box won't stay checked). */}
               <div className="row" style={{ gap: 10 }}>
                 <input
                   type="checkbox"
                   aria-label={`Enable ${wf.name} for this chat`}
                   style={{ width: 'auto', cursor: 'pointer' }}
                   checked={assigned}
-                  onClick={(e) => e.stopPropagation()}
                   onChange={(e) => void toggle(wf, e.target.checked)}
                 />
                 <h3 style={{ fontSize: 15, margin: 0 }}>
-                  <Link
-                    to={`/workflows/${wf.id}`}
-                    onClick={(e) => e.stopPropagation()}
-                    style={{ color: 'inherit' }}
-                    title="Open this workflow"
-                  >
-                    {wf.name}
-                  </Link>
+                  <HoverCard content={<WorkflowPreview wf={wf} />}>
+                    <Link to={`/workflows/${wf.id}`} style={{ color: 'inherit' }}>
+                      {wf.name}
+                    </Link>
+                  </HoverCard>
                 </h3>
                 <span className="pill pill--accent">
                   <span className="lamp" aria-hidden />
@@ -379,10 +356,7 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
                   <button
                     className="btn btn--quiet btn--sm"
                     aria-expanded={expanded}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      toggleExpand()
-                    }}
+                    onClick={toggleExpand}
                   >
                     {expanded ? 'Hide details \u25be' : 'Details \u25b8'}
                   </button>
@@ -393,16 +367,17 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
               <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
                 {wf.type === 'scheduled'
                   ? `${wf.cron ?? ''} \u00b7 next ${wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '\u2014'}`
-                  : stageStory(wf.states[0], wf.threshold, wf.examples_status)}
+                  : stageStory(wf.cursors[0], wf.episodes, wf.threshold, wf.examples_status)}
                 {wf.type === 'intent' && wf.pending_messages > 0 && (
                   <span className="muted">
-                    {' '}\u00b7 {wf.pending_messages} new message{wf.pending_messages === 1 ? '' : 's'} waiting for
+                    {' \u00b7 '}
+                    {wf.pending_messages} new message{wf.pending_messages === 1 ? '' : 's'} waiting for
                     the next check
                   </span>
                 )}
               </p>
             )}
-            {assigned && expanded && <ExpandedWorkflow wf={wf} />}
+            {assigned && expanded && <ExpandedWorkflow wf={wf} chatId={chatId} />}
           </Card>
         )
       })}
@@ -411,9 +386,36 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
 }
 
 function IntentStatus({ wf }: { wf: ChatWorkflow }) {
-  const s = wf.states[0]
-  const { label, tone } = statusChip(s, wf.examples_status)
-  return <Chip label={label} tone={tone} live={s?.last_stage === 'accumulating'} />
+  // The agent running (post-fire) is the other live LLM call — surface it.
+  if (wf.recent_runs[0]?.status === 'running') {
+    return <Chip label="acting now" tone="accent" live />
+  }
+  return <Chip {...statusChip(wf.cursors, wf.episodes, wf.examples_status)} />
+}
+
+/** Glanceable config shown on hover over a workflow name. */
+function WorkflowPreview({ wf }: { wf: ChatWorkflow }) {
+  return (
+    <span className="stack" style={{ gap: 7, fontSize: 12.5, display: 'flex' }}>
+      <b style={{ fontSize: 13 }}>{wf.name}</b>
+      <span>
+        <span className="muted">watches for</span>{' '}
+        {wf.type === 'scheduled' ? (
+          <span className="mono">{wf.cron}</span>
+        ) : (
+          wf.trigger_prompt
+        )}
+      </span>
+      <span>
+        <span className="muted">then</span> {wf.action_prompt}
+      </span>
+      <span className="muted" style={{ fontSize: 12 }}>
+        {wf.type === 'intent' ? `${dedupLabel(wf)}; ` : ''}
+        {wf.confirm ? 'asks in the chat before acting' : 'acts without asking'}
+      </span>
+      <span className="accent" style={{ fontSize: 12 }}>Click to configure →</span>
+    </span>
+  )
 }
 
 interface ActivityEntry {
@@ -459,76 +461,49 @@ function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
   return entries.sort((a, b) => b.when.localeCompare(a.when))
 }
 
-export function cooldownLabel(seconds: number): string {
-  if (!seconds) return 'none — fires on every match'
-  if (seconds % 3600 === 0) return `${seconds / 3600} h`
-  if (seconds % 60 === 0) return `${seconds / 60} min`
-  return `${seconds} s`
-}
-
-function SettingsLine({ wf }: { wf: ChatWorkflow }) {
-  return (
-    <dl className="kv">
-      {wf.type === 'intent' && (
-        <>
-          <dt>cooldown length</dt>
-          <dd>{cooldownLabel(wf.cooldown_seconds)}</dd>
-        </>
-      )}
-      <dt>on fire</dt>
-      <dd>{wf.confirm ? 'asks in the chat before acting' : 'acts without asking'}</dd>
-    </dl>
-  )
-}
-
-function ExpandedWorkflow({ wf }: { wf: ChatWorkflow }) {
+/** The chat's live view of a workflow: what it's doing right now and what it's
+    done here. Configuration lives on the workflow page (linked), not inline. */
+function ExpandedWorkflow({ wf, chatId }: { wf: ChatWorkflow; chatId: number }) {
   const activity = mergeActivity(wf)
-  const forum = wf.states.length > 1
+  const forum = wf.cursors.length > 1
   return (
     <div className="stack" style={{ gap: 14, marginTop: 12 }}>
       {wf.type === 'intent' &&
-        (wf.states.length === 0 ? (
+        (wf.cursors.length === 0 ? (
           <p className="muted" style={{ fontSize: 12.5 }}>
-            {stageStory(undefined, wf.threshold, wf.examples_status)}
+            {stageStory(undefined, wf.episodes, wf.threshold, wf.examples_status)}
           </p>
         ) : (
-          wf.states.map((s) => {
-            const cooling = coolingDown(s)
-            return (
-              <div className="stack" key={s.thread_key} style={{ gap: 8 }}>
-                {forum && (
-                  <div className="muted mono" style={{ fontSize: 11.5 }}>
-                    thread {s.thread_key || 'main'}
-                  </div>
-                )}
-                <div className="muted" style={{ fontSize: 11.5 }}>
-                  last check {s.last_evaluated_at ? timeAgo(s.last_evaluated_at) : 'never'}
-                  {wf.pending_messages > 0 && ` · ${wf.pending_messages} new waiting`}
+          wf.cursors.map((c) => (
+            <div className="stack" key={c.thread_key} style={{ gap: 8 }}>
+              {forum && (
+                <div className="muted mono" style={{ fontSize: 11.5 }}>
+                  thread {c.thread_key || 'main'}
                 </div>
-                <p style={{ fontSize: 12.5, margin: 0 }}>
-                  {stageStory(s, wf.threshold, wf.examples_status)}
-                </p>
-                <Funnel steps={funnel(s, wf.threshold, wf.required_slots)} />
-                <dl className="kv">
-                  <dt>gathered</dt>
-                  <dd>
-                    {Object.keys(s.slots).length === 0
-                      ? `nothing yet (needs: ${wf.required_slots.map((r) => r.name).join(', ') || 'any match'})`
-                      : Object.entries(s.slots)
-                          .map(([k, v]) => `${k}: ${v.value}`)
-                          .join('  ·  ')}
-                  </dd>
-                  {cooling && (
-                    <>
-                      <dt>cooldown</dt>
-                      <dd>until {shortDateTime(s.cooldown_until!)}</dd>
-                    </>
-                  )}
-                </dl>
-              </div>
-            )
-          })
+              )}
+              <p style={{ fontSize: 13, margin: 0 }}>
+                {stageStory(c, wf.episodes, wf.threshold, wf.examples_status)}
+              </p>
+              <Funnel
+                steps={funnel(c, wf.episodes, wf.threshold, wf.required_slots, {
+                  pending: wf.pending_messages > 0,
+                  awaitingConfirm: wf.recent_fires[0]?.status === 'confirm_wait',
+                })}
+              />
+              <dl className="kv">
+                <dt>last check</dt>
+                <dd>
+                  {c.last_evaluated_at ? timeAgo(c.last_evaluated_at) : 'never'}
+                  {wf.pending_messages > 0 && ` · ${wf.pending_messages} new waiting`}
+                </dd>
+              </dl>
+            </div>
+          ))
         ))}
+
+      {wf.type === 'intent' && (
+        <EpisodeList episodes={wf.episodes} requiredSlots={wf.required_slots} />
+      )}
 
       {wf.type === 'scheduled' && (
         <dl className="kv">
@@ -538,8 +513,6 @@ function ExpandedWorkflow({ wf }: { wf: ChatWorkflow }) {
           </dd>
         </dl>
       )}
-
-      <SettingsLine wf={wf} />
 
       {activity.length > 0 && (
         <div>
@@ -553,7 +526,7 @@ function ExpandedWorkflow({ wf }: { wf: ChatWorkflow }) {
                     <StatusPill status={a.status} />
                   </td>
                   <td className={a.error ? 'field-error' : 'muted'} style={{ fontSize: 12.5 }}>
-                    {a.detail.join(' · ') || '—'}
+                    {a.detail.join(' · ') || '—'}
                   </td>
                 </tr>
               ))}
@@ -563,9 +536,12 @@ function ExpandedWorkflow({ wf }: { wf: ChatWorkflow }) {
       )}
 
       <p className="muted" style={{ fontSize: 12 }}>
-        {wf.type === 'intent' &&
-          'Windows are evaluated ~1 minute after new messages stop (or every 30 messages). '}
-        <Link to={`/workflows/${wf.id}`}>Open this workflow across all chats →</Link>
+        {wf.type === 'intent' && (
+          <>
+            Timing follows this chat's <Link to={`/chats/${chatId}?tab=Settings`}>Settings</Link>.{' '}
+          </>
+        )}
+        <Link to={`/workflows/${wf.id}`}>Configure this workflow →</Link>
       </p>
     </div>
   )

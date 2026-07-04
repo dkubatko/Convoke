@@ -1,11 +1,13 @@
+import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api } from '../lib/api'
 import { shortDateTime, timeAgo, truncate } from '../lib/format'
-import { WorkflowDetail as WorkflowDetailT, WorkflowChat } from '../lib/types'
-import { coolingDown, funnel, stageStory, statusChip } from '../lib/intent'
+import { Chat, WorkflowDetail as WorkflowDetailT, WorkflowChat } from '../lib/types'
+import { dedupLabel, funnel, stageStory, statusChip } from '../lib/intent'
 import { useQuery } from '../hooks/useQuery'
 import { Card, CardSkeleton, Chip, EmptyState, ErrorNote, Funnel, PageHead, StatusPill } from '../components/ui'
-import { cooldownLabel } from './ChatDetail'
+import { EpisodeList } from '../components/Episodes'
+import { WorkflowForm } from './Workflows'
 
 export default function WorkflowDetail() {
   const { workflowId } = useParams()
@@ -13,6 +15,8 @@ export default function WorkflowDetail() {
   const wf = useQuery<WorkflowDetailT>(() => api.get(`/api/workflows/${id}/detail`), [id], {
     pollMs: 5000,
   })
+  const chats = useQuery<Chat[]>(() => api.get('/api/chats'), [])
+  const [editing, setEditing] = useState(false)
 
   if (wf.loading) return <CardSkeleton lines={5} />
   if (wf.error) return <ErrorNote message={wf.error} onRetry={() => void wf.refetch()} />
@@ -27,8 +31,26 @@ export default function WorkflowDetail() {
             <Link to="/workflows">Workflows</Link> · {w.type} workflow
           </span>
         }
+        actions={
+          !editing ? (
+            <button className="btn btn--quiet" onClick={() => setEditing(true)}>
+              Edit
+            </button>
+          ) : undefined
+        }
       />
 
+      {editing ? (
+        <WorkflowForm
+          chats={chats.data ?? []}
+          initial={w}
+          onCancel={() => setEditing(false)}
+          onDone={() => {
+            setEditing(false)
+            void wf.refetch()
+          }}
+        />
+      ) : (
       <Card title="Definition">
         <dl className="kv">
           {w.type === 'intent' ? (
@@ -37,8 +59,8 @@ export default function WorkflowDetail() {
               <dd style={{ fontFamily: 'var(--font-body)' }}>{w.trigger_prompt}</dd>
               <dt>waits for</dt>
               <dd>{w.required_slots.map((s) => s.name).join(', ') || 'any match (fires on first match)'}</dd>
-              <dt>cooldown</dt>
-              <dd>{cooldownLabel(w.cooldown_seconds)}</dd>
+              <dt>dedup</dt>
+              <dd>{dedupLabel(w)}</dd>
               <dt>detector</dt>
               <dd>
                 {w.examples_status}
@@ -59,8 +81,15 @@ export default function WorkflowDetail() {
           <dd style={{ fontFamily: 'var(--font-body)' }}>{w.action_prompt}</dd>
           <dt>enabled</dt>
           <dd>{w.enabled ? 'yes' : 'no (paused globally)'}</dd>
+          <dt>chats</dt>
+          <dd>
+            {w.chats.length === 0
+              ? 'none assigned — this workflow can’t fire'
+              : w.chats.map((c) => c.chat_title).join(', ')}
+          </dd>
         </dl>
       </Card>
+      )}
 
       <div>
         <PageHead title="In these chats" />
@@ -84,8 +113,7 @@ export default function WorkflowDetail() {
 }
 
 function ChatStateCard({ c, wf }: { c: WorkflowChat; wf: WorkflowDetailT }) {
-  const s = c.states[0]
-  const forum = c.states.length > 1
+  const forum = c.cursors.length > 1
   return (
     <Card>
       <div className="page-head-row">
@@ -95,7 +123,7 @@ function ChatStateCard({ c, wf }: { c: WorkflowChat; wf: WorkflowDetailT }) {
           </Link>
         </h3>
         <span className="row" style={{ gap: 8 }}>
-          {wf.type === 'intent' && <Chip {...statusChip(s, wf.examples_status)} live={s?.last_stage === 'accumulating'} />}
+          {wf.type === 'intent' && <Chip {...statusChip(c.cursors, c.episodes, wf.examples_status)} />}
           {wf.type === 'intent' && c.pending_messages > 0 && <Chip label={`${c.pending_messages} new`} tone="idle" />}
           <StatusPill status={c.chat_status} live={c.chat_status === 'authorized'} />
         </span>
@@ -103,39 +131,35 @@ function ChatStateCard({ c, wf }: { c: WorkflowChat; wf: WorkflowDetailT }) {
 
       {wf.type === 'intent' && (
         <div className="stack" style={{ gap: 8, marginTop: 10 }}>
-          {c.states.length === 0 ? (
+          {c.cursors.length === 0 ? (
             <p className="muted" style={{ fontSize: 12.5 }}>
-              {stageStory(undefined, wf.threshold, wf.examples_status)}
+              {stageStory(undefined, c.episodes, wf.threshold, wf.examples_status)}
             </p>
           ) : (
-            c.states.map((st) => (
-              <div className="stack" key={st.thread_key} style={{ gap: 8 }}>
+            c.cursors.map((cur) => (
+              <div className="stack" key={cur.thread_key} style={{ gap: 8 }}>
                 {forum && (
                   <div className="muted mono" style={{ fontSize: 11.5 }}>
-                    thread {st.thread_key || 'main'}
+                    thread {cur.thread_key || 'main'}
                   </div>
                 )}
-                <p style={{ fontSize: 12.5, margin: 0 }}>{stageStory(st, wf.threshold, wf.examples_status)}</p>
-                <Funnel steps={funnel(st, wf.threshold, wf.required_slots)} />
+                <p style={{ fontSize: 12.5, margin: 0 }}>
+                  {stageStory(cur, c.episodes, wf.threshold, wf.examples_status)}
+                </p>
+                <Funnel
+                  steps={funnel(cur, c.episodes, wf.threshold, wf.required_slots, {
+                    pending: c.pending_messages > 0,
+                    awaitingConfirm: c.recent_fires[0]?.status === 'confirm_wait',
+                  })}
+                />
                 <dl className="kv">
                   <dt>last check</dt>
-                  <dd>{st.last_evaluated_at ? timeAgo(st.last_evaluated_at) : 'never'}</dd>
-                  <dt>gathered</dt>
-                  <dd>
-                    {Object.keys(st.slots).length === 0
-                      ? `nothing yet (needs: ${wf.required_slots.map((r) => r.name).join(', ') || 'any match'})`
-                      : Object.entries(st.slots).map(([k, v]) => `${k}: ${v.value}`).join('  ·  ')}
-                  </dd>
-                  {coolingDown(st) && (
-                    <>
-                      <dt>cooldown</dt>
-                      <dd>until {shortDateTime(st.cooldown_until!)}</dd>
-                    </>
-                  )}
+                  <dd>{cur.last_evaluated_at ? timeAgo(cur.last_evaluated_at) : 'never'}</dd>
                 </dl>
               </div>
             ))
           )}
+          <EpisodeList episodes={c.episodes} requiredSlots={wf.required_slots} />
         </div>
       )}
 

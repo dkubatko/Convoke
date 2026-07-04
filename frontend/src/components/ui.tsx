@@ -1,4 +1,4 @@
-import { ReactNode } from 'react'
+import { CSSProperties, ReactNode } from 'react'
 
 /* Small shared primitives. Anything used on two or more pages lives here. */
 
@@ -21,13 +21,15 @@ export function PageHead({ title, lede, actions }: {
   )
 }
 
-export function Card({ title, children, pad = true }: {
+export function Card({ title, children, pad = true, onClick, style }: {
   title?: string
   children: ReactNode
   pad?: boolean
+  onClick?: () => void
+  style?: CSSProperties
 }) {
   return (
-    <section className="card">
+    <section className="card" onClick={onClick} style={style}>
       {title && (
         <div className="card-pad" style={{ paddingBottom: 0 }}>
           <div className="card-title">{title}</div>
@@ -163,7 +165,10 @@ const PILL_TONE: Record<string, string> = {
   accumulating: 'accent',
   fired: 'ok',
   cooldown: 'warn',
+  held: 'warn',
   throttled: 'warn',
+  evaluating: 'accent',
+  evaluating_prefilter: 'accent',
   classifier_error: 'err',
 }
 
@@ -174,7 +179,9 @@ const PILL_LABEL: Record<string, string> = {
   no_match: 'listening · no intent',
   accumulating: 'gathering info',
   cooldown: 'cooling down',
+  held: 'recently fired',
   throttled: 'rate-limited',
+  evaluating: 'checking now',
   classifier_error: 'classifier error',
 }
 
@@ -186,6 +193,41 @@ export function StatusPill({ status, live = false }: { status: string; live?: bo
       <span className="lamp" aria-hidden />
       {PILL_LABEL[status] ?? status.replaceAll('_', ' ')}
     </span>
+  )
+}
+
+/** Shows a styled popover card when the trigger is hovered/focused. */
+export function HoverCard({ children, content }: { children: ReactNode; content: ReactNode }) {
+  return (
+    <span className="hovercard" tabIndex={0}>
+      {children}
+      <span className="hovercard-pop" role="tooltip">
+        {content}
+      </span>
+    </span>
+  )
+}
+
+/** A row of sub-tabs, consistent across every page that has them. */
+export function TabBar<T extends string>({ tabs, active, onSelect }: {
+  tabs: readonly T[]
+  active: T
+  onSelect: (t: T) => void
+}) {
+  return (
+    <div className="tabs" role="tablist">
+      {tabs.map((t) => (
+        <button
+          key={t}
+          role="tab"
+          aria-selected={active === t}
+          className={active === t ? 'active' : ''}
+          onClick={() => onSelect(t)}
+        >
+          {t}
+        </button>
+      ))}
+    </div>
   )
 }
 
@@ -204,9 +246,11 @@ export function Chip({ label, tone = 'idle', live = false }: {
 }
 
 /** The intent funnel: Prefilter → Classifier → Fire, coloured by how far the
-    last evaluation got. */
+    last evaluation got. 'stop' (amber) = this node deliberately blocked the
+    run (dedup/rate limit working); 'held' (dashed) = downstream of a stop;
+    'fail' (red) stays reserved for genuine rejections/errors. */
 export function Funnel({ steps }: {
-  steps: { name: string; status: 'pass' | 'fail' | 'wait' | 'skip'; detail?: string }[]
+  steps: { name: string; status: 'pass' | 'fail' | 'wait' | 'skip' | 'stop' | 'held'; detail?: string }[]
 }) {
   return (
     <div className="funnel" role="list">

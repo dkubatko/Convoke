@@ -108,7 +108,8 @@ export interface Workflow {
   trigger_prompt: string | null
   required_slots: SlotSpec[]
   confirm: boolean
-  cooldown_seconds: number
+  cooldown_seconds: number // optional rate limit; 0 = off. Parks + rechecks, never drops.
+  dedup_window_hours: number // how long a handled topic suppresses continuations
   threshold: number | null
   examples_status: string
   chat_ids: number[]
@@ -126,15 +127,28 @@ export interface Fire {
   created_at: string
 }
 
-export interface TriggerStateInfo {
+export interface CursorInfo {
   thread_key: number
-  slots: Record<string, { value: string; confidence: number }>
+  last_tg_message_id: number
   last_evaluated_at: string | null
   last_stage: string | null
   last_score: number | null
   last_confidence: number | null
-  last_match_at: string | null
-  cooldown_until: string | null
+}
+
+export interface EpisodeInfo {
+  id: number
+  thread_key: number
+  status: string // candidate | tracking | converged | fired | satisfied | closed
+  summary: string | null
+  slots: Record<string, { value: string; confidence: number }>
+  confidence: number | null
+  execution_summary: string | null
+  close_reason: string | null
+  opened_at: string
+  last_activity_at: string
+  fired_at: string | null
+  closed_at: string | null
 }
 
 export interface ChatWorkflowRun {
@@ -152,13 +166,17 @@ export interface ChatWorkflow {
   enabled: boolean
   confirm: boolean
   cooldown_seconds: number
+  dedup_window_hours: number
   threshold: number | null
   examples_status: string
   cron: string | null
   next_fire_at: string | null
+  trigger_prompt: string | null
+  action_prompt: string
   required_slots: SlotSpec[]
   assigned: boolean
-  states: TriggerStateInfo[]
+  cursors: CursorInfo[]
+  episodes: EpisodeInfo[]
   recent_fires: Fire[]
   recent_runs: ChatWorkflowRun[]
   pending_messages: number
@@ -168,7 +186,8 @@ export interface WorkflowChat {
   chat_id: number
   chat_title: string
   chat_status: string
-  states: TriggerStateInfo[]
+  cursors: CursorInfo[]
+  episodes: EpisodeInfo[]
   pending_messages: number
   recent_fires: Fire[]
   recent_runs: ChatWorkflowRun[]
@@ -176,4 +195,16 @@ export interface WorkflowChat {
 
 export interface WorkflowDetail extends Workflow {
   chats: WorkflowChat[]
+}
+
+export interface AppSetting {
+  key: string
+  label: string
+  description: string
+  unit: string
+  minimum: number
+  maximum: number
+  value: number
+  default: number
+  overridden: boolean
 }
