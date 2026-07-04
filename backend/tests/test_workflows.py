@@ -7,16 +7,15 @@ from app.core.crypto import encrypt
 from app.intent.examples import calibrate_threshold
 from app.intent.executor import FireExecutor, handle_confirm_callback
 from app.intent.pipeline import IntentSweeper
-from app.intent.schemas import IntentVerdict, SlotUpdate
-from app.intent.state import apply_verdict, decay_state, is_converged
+from app.intent.schemas import DetectVerdict
 from app.memory.embeddings import FakeEmbedder
 from app.models import (
     AgentRun,
     Bot,
     Chat,
+    IntentCursor,
     Message,
     PendingFire,
-    TriggerState,
     Workflow,
     WorkflowAssignment,
     WorkflowExample,
@@ -29,54 +28,10 @@ from tests.test_agent import AgentFakeBot
 NOW = datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc)
 REQUIRED = [{"name": "date", "description": "agreed date"}, {"name": "title", "description": ""}]
 
-
-# ---------- state machine ----------
-
-def verdict(match=True, confidence=0.9, updates=()):
-    return IntentVerdict(match=match, confidence=confidence, slot_updates=list(updates))
-
-
-def test_apply_fills_and_overwrites():
-    slots = apply_verdict({}, verdict(updates=[SlotUpdate(name="date", value="Tue 7pm", confidence=0.8)]), NOW, 10)
-    assert slots["date"]["value"] == "Tue 7pm"
-    slots = apply_verdict(slots, verdict(updates=[SlotUpdate(name="date", value="Wed 8pm", confidence=0.9)]), NOW, 12)
-    assert slots["date"]["value"] == "Wed 8pm"  # last-write-wins
-
-
-def test_retraction_clears_slot():
-    slots = {"date": {"value": "Tue", "confidence": 0.9, "message_id": 1, "ts": "x"}}
-    slots = apply_verdict(slots, verdict(updates=[SlotUpdate(name="date", value=None, confidence=0.9)]), NOW, 2)
-    assert "date" not in slots
-
-
-def test_low_confidence_update_ignored():
-    slots = apply_verdict({}, verdict(updates=[SlotUpdate(name="date", value="maybe Tue?", confidence=0.3)]), NOW, 1)
-    assert slots == {}
-
-
-def test_no_match_leaves_state():
-    before = {"date": {"value": "Tue", "confidence": 0.9, "message_id": 1, "ts": "x"}}
-    assert apply_verdict(before, verdict(match=False, updates=[SlotUpdate(name="date", value=None, confidence=1)]), NOW, 2) == before
-
-
-def test_ttl_decay():
-    slots = {"date": {"value": "Tue", "confidence": 0.9, "message_id": 1, "ts": "x"}}
-    fresh = decay_state(slots, NOW - timedelta(hours=10), NOW, timedelta(hours=36))
-    assert fresh == slots
-    stale = decay_state(slots, NOW - timedelta(hours=40), NOW, timedelta(hours=36))
-    assert stale == {}
-
-
-def test_convergence_requires_all_slots_confident():
-    assert not is_converged(REQUIRED, {"date": {"value": "Tue", "confidence": 0.9}})
-    assert not is_converged(
-        REQUIRED,
-        {"date": {"value": "Tue", "confidence": 0.9}, "title": {"value": "dinner", "confidence": 0.4}},
-    )
-    assert is_converged(
-        REQUIRED,
-        {"date": {"value": "Tue", "confidence": 0.9}, "title": {"value": "dinner", "confidence": 0.8}},
-    )
+# Episode/state-machine behaviour is covered by tests/test_intent_state.py
+# (pure functions) and tests/test_intent_replay.py (failure-case replays).
+# This file keeps: threshold calibration, prefilter mechanics, scheduler,
+# runtime settings plumbing, and the fire executor.
 
 
 # ---------- threshold calibration ----------
@@ -100,34 +55,7 @@ def test_calibrate_threshold_empty_defaults():
     assert calibrate_threshold([], []) == pytest.approx(0.80)
 
 
-async def test_prefilter_passes_when_one_message_matches(db_sessionmaker, monkeypatch):
-    """A burst where only one line resembles the examples must still reach the
-    classifier — scoring is per message, not per rendered window."""
-    _, chat, _ = await _intent_setup(db_sessionmaker)
-    sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
-    seen_windows: list[str] = []
-
-    async def fake_classify(session, wf, tstate, rendered):
-        seen_windows.append(rendered)
-        return verdict(match=False)
-
-    monkeypatch.setattr(sweeper, "_classify", fake_classify)
-
-    async with db_sessionmaker() as s:
-        # threshold high: whole-window dilution would fail; message-level max passes
-        from app.models import Workflow as Wf
-        wf = (await s.execute(select(Wf))).scalar_one()
-        wf.threshold = 0.95
-        s.add(_msg(chat.id, 1, "completely unrelated chatter about taxes", minutes_ago=6))
-        s.add(_msg(chat.id, 2, "more noise here", minutes_ago=5))
-        s.add(_msg(chat.id, 3, "let's schedule dinner", minutes_ago=4))  # == example text
-        await s.commit()
-
-    assert await sweeper.sweep() == 1
-    assert seen_windows, "classifier was never reached — prefilter blocked a matching message"
-
-
-# ---------- scheduler ----------
+# ---------- shared setup ----------
 
 async def _bot_and_chat(db_sessionmaker):
     async with db_sessionmaker() as s:
@@ -141,6 +69,106 @@ async def _bot_and_chat(db_sessionmaker):
         await s.commit()
         return bot, chat
 
+
+async def _intent_setup(db_sessionmaker, confirm=False):
+    bot, chat = await _bot_and_chat(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        wf = Workflow(
+            name="event", type="intent", action_prompt="Create the event",
+            trigger_prompt="intent to schedule an event", required_slots=REQUIRED,
+            confirm=confirm, cooldown_seconds=0, threshold=0.1, examples_status="ready",
+        )
+        s.add(wf)
+        await s.flush()
+        s.add(WorkflowAssignment(workflow_id=wf.id, chat_id=chat.id))
+        # assignment-time cursor seed (the API does this in production)
+        s.add(IntentCursor(workflow_id=wf.id, chat_id=chat.id, thread_key=0,
+                           last_tg_message_id=0))
+        emb = FakeEmbedder()
+        vec = (await emb.embed_passages(["let's schedule dinner"]))[0]
+        s.add(WorkflowExample(workflow_id=wf.id, kind="positive",
+                              text="let's schedule dinner", embedding=vec))
+        await s.commit()
+        return bot, chat, wf.id
+
+
+def _msg(chat_id, tg_id, text, minutes_ago, thread=None):
+    return Message(
+        chat_id=chat_id, tg_message_id=tg_id, thread_id=thread, sender_id=5,
+        sender_name="Alice", text=text,
+        sent_at=datetime.now(timezone.utc) - timedelta(minutes=minutes_ago), source="live",
+    )
+
+
+class _RecordingModel:
+    def __init__(self, verdict=None):
+        self.prompts: list[str] = []
+        self.verdict = verdict or DetectVerdict(relation="unrelated")
+
+    async def __call__(self, session, prompt, output_type):
+        self.prompts.append(prompt)
+        return self.verdict
+
+
+def _sweeper(db_sessionmaker, model):
+    sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
+    sweeper._base = sweeper._base.model_copy(update={"intent_min_llm_interval_seconds": 0})
+    sweeper._model_call = model
+    return sweeper
+
+
+# ---------- prefilter mechanics ----------
+
+async def test_prefilter_passes_when_one_message_matches(db_sessionmaker):
+    """A burst where only one line resembles the examples must still reach the
+    classifier — scoring is per message, not per rendered window."""
+    _, chat, _ = await _intent_setup(db_sessionmaker)
+    model = _RecordingModel()
+    sweeper = _sweeper(db_sessionmaker, model)
+
+    async with db_sessionmaker() as s:
+        # threshold high: whole-window dilution would fail; message-level max passes
+        wf = (await s.execute(select(Workflow))).scalar_one()
+        wf.threshold = 0.95
+        s.add(_msg(chat.id, 1, "completely unrelated chatter about taxes", minutes_ago=6))
+        s.add(_msg(chat.id, 2, "more noise here", minutes_ago=5))
+        s.add(_msg(chat.id, 3, "let's schedule dinner", minutes_ago=4))  # == example text
+        await s.commit()
+
+    assert await sweeper.sweep() == 1
+    assert model.prompts, "classifier was never reached — prefilter blocked a matching message"
+
+
+async def test_prefilter_skip_consumes_window(db_sessionmaker):
+    _, chat, _ = await _intent_setup(db_sessionmaker)
+    model = _RecordingModel()
+    sweeper = _sweeper(db_sessionmaker, model)
+    async with db_sessionmaker() as s:
+        wf = (await s.execute(select(Workflow))).scalar_one()
+        wf.threshold = 0.95
+        s.add(_msg(chat.id, 1, "completely unrelated chatter about taxes", minutes_ago=6))
+        await s.commit()
+    assert await sweeper.sweep() == 0
+    assert not model.prompts
+    async with db_sessionmaker() as s:
+        cursor = (await s.execute(select(IntentCursor))).scalar_one()
+        assert cursor.last_stage == "prefilter_skip"
+        assert cursor.last_tg_message_id == 1  # consumed
+        assert cursor.last_score is not None
+
+
+async def test_sweeper_waits_for_lull(db_sessionmaker):
+    _, chat, _ = await _intent_setup(db_sessionmaker)
+    model = _RecordingModel()
+    sweeper = _sweeper(db_sessionmaker, model)
+    async with db_sessionmaker() as s:
+        s.add(_msg(chat.id, 1, "let's schedule dinner", minutes_ago=0))  # too fresh
+        await s.commit()
+    assert await sweeper.sweep() == 0
+    assert not model.prompts
+
+
+# ---------- scheduler ----------
 
 async def test_scheduled_workflow_fires_when_due(db_sessionmaker):
     _, chat = await _bot_and_chat(db_sessionmaker)
@@ -180,185 +208,80 @@ async def test_scheduled_workflow_initializes_next_fire(db_sessionmaker):
         assert wf.next_fire_at is not None
 
 
-# ---------- intent sweeper integration ----------
+# ---------- runtime settings plumbing ----------
 
-async def _intent_setup(db_sessionmaker, confirm=False):
-    bot, chat = await _bot_and_chat(db_sessionmaker)
-    async with db_sessionmaker() as s:
-        wf = Workflow(
-            name="event", type="intent", action_prompt="Create the event",
-            trigger_prompt="intent to schedule an event", required_slots=REQUIRED,
-            confirm=confirm, cooldown_seconds=3600, threshold=0.1, examples_status="ready",
-        )
-        s.add(wf)
-        await s.flush()
-        s.add(WorkflowAssignment(workflow_id=wf.id, chat_id=chat.id))
-        emb = FakeEmbedder()
-        vec = (await emb.embed_passages(["let's schedule dinner"]))[0]
-        s.add(WorkflowExample(workflow_id=wf.id, kind="positive",
-                              text="let's schedule dinner", embedding=vec))
-        await s.commit()
-        return bot, chat, wf.id
+async def test_global_setting_override_reaches_the_sweeper(db_sessionmaker):
+    """A global override is applied to the sweeper's effective settings on the
+    next sweep (no restart)."""
+    from app.core.runtime_settings import effective_settings, load_overrides, set_override
 
-
-def _msg(chat_id, tg_id, text, minutes_ago, thread=None):
-    return Message(
-        chat_id=chat_id, tg_message_id=tg_id, thread_id=thread, sender_id=5,
-        sender_name="Alice", text=text,
-        sent_at=datetime.now(timezone.utc) - timedelta(minutes=minutes_ago), source="live",
-    )
-
-
-async def test_intent_pipeline_converges_and_fires_once(db_sessionmaker, monkeypatch):
-    _, chat, wf_id = await _intent_setup(db_sessionmaker)
     sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
-
-    verdicts = iter([
-        verdict(updates=[SlotUpdate(name="date", value="Tue 7pm", confidence=0.9)]),
-        verdict(updates=[SlotUpdate(name="title", value="dinner", confidence=0.9)]),
-    ])
-
-    async def fake_classify(session, wf, tstate, rendered):
-        return next(verdicts)
-
-    monkeypatch.setattr(sweeper, "_classify", fake_classify)
-    sweeper.settings = sweeper.settings.model_copy(
-        update={"intent_min_llm_interval_seconds": 0}
-    )
-
+    base = sweeper._base.intent_min_llm_interval_seconds
     async with db_sessionmaker() as s:
-        s.add(_msg(chat.id, 1, "let's schedule dinner", minutes_ago=5))
+        assert (await effective_settings(s, sweeper._base)).intent_min_llm_interval_seconds == base
+        await set_override(s, "intent_min_llm_interval_seconds", 9)
         await s.commit()
-    assert await sweeper.sweep() == 1  # window 1: partial slots, no fire
+    async with db_sessionmaker() as s:
+        eff = await effective_settings(s, sweeper._base)
+        assert eff.intent_min_llm_interval_seconds == 9
+        await set_override(s, "intent_min_llm_interval_seconds", base)  # default clears the row
+        await s.commit()
+        assert "intent_min_llm_interval_seconds" not in await load_overrides(s)
 
+
+async def test_chat_setting_override_used_by_sweep(db_sessionmaker):
+    """A per-chat window override changes when that chat's window is ready."""
+    from app.core.runtime_settings import load_chat_overrides, set_chat_override
+
+    _, chat, _ = await _intent_setup(db_sessionmaker)
+    model = _RecordingModel()
+    sweeper = _sweeper(db_sessionmaker, model)
+    # a 3-minute-old message: closed under the default lull, still open at a 600s lull
+    async with db_sessionmaker() as s:
+        await set_chat_override(s, chat.id, "intent_lull_seconds", 600)
+        assert await load_chat_overrides(s, chat.id) == {"intent_lull_seconds": 600}
+        s.add(_msg(chat.id, 1, "let's schedule dinner", minutes_ago=3))
+        await s.commit()
+    assert await sweeper.sweep() == 0  # window not ready under the per-chat 600s lull
     async with db_sessionmaker() as s:
         assert (await s.execute(select(PendingFire))).scalar_one_or_none() is None
-        state = (await s.execute(select(TriggerState))).scalar_one()
-        assert "date" in state.slots
-        assert state.last_stage == "accumulating"
-        assert state.last_score is not None  # prefilter ran and passed
-        assert state.last_confidence == 0.9
-        assert state.last_evaluated_at is not None
+
+
+async def test_setting_scope_and_range_validation(db_sessionmaker):
+    from app.core.runtime_settings import set_chat_override, set_override
 
     async with db_sessionmaker() as s:
-        s.add(_msg(chat.id, 2, "call it dinner, Tuesday works", minutes_ago=3))
-        await s.commit()
-    assert await sweeper.sweep() == 1  # window 2: converges
-
-    async with db_sessionmaker() as s:
-        fire = (await s.execute(select(PendingFire))).scalar_one()
-        assert fire.status == "pending"
-        assert fire.slots["date"]["value"] == "Tue 7pm"
-        state = (await s.execute(select(TriggerState))).scalar_one()
-        assert state.slots == {}  # reset after firing
-        assert state.cooldown_until is not None
-        assert state.last_stage == "fired"
-
-    # cooldown: further messages don't re-fire
-    async with db_sessionmaker() as s:
-        s.add(_msg(chat.id, 3, "let's schedule dinner again", minutes_ago=1))
-        await s.commit()
-    await sweeper.sweep()
-    async with db_sessionmaker() as s:
-        fires = (await s.execute(select(PendingFire))).scalars().all()
-        assert len(fires) == 1
-        state = (await s.execute(select(TriggerState))).scalar_one()
-        assert state.last_stage == "cooldown"
+        with pytest.raises(ValueError, match="between"):
+            await set_override(s, "intent_min_llm_interval_seconds", 999999)
+        with pytest.raises(ValueError, match="unknown"):
+            await set_override(s, "not_a_setting", 5)
+        with pytest.raises(ValueError, match="not a global"):
+            await set_override(s, "intent_lull_seconds", 30)  # chat-scoped
+        with pytest.raises(ValueError, match="not a chat"):
+            await set_chat_override(s, 1, "intent_min_llm_interval_seconds", 30)  # global
 
 
-async def test_classifier_error_keeps_cursor_for_retry(db_sessionmaker, monkeypatch):
-    """When the classifier fails (model endpoint down), the window must NOT be
-    consumed — it should retry once the model is back, not be lost forever."""
-    _, chat, _ = await _intent_setup(db_sessionmaker)
-    sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
-    sweeper.settings = sweeper.settings.model_copy(update={"intent_min_llm_interval_seconds": 0})
+async def test_new_episode_tunables_are_registered():
+    """Every episode-lifecycle knob is operator-tunable and maps to a real
+    Settings field (a typo here would silently never apply)."""
+    from app.core.config import get_settings
+    from app.core.runtime_settings import TUNABLES
 
-    async def failing_classify(session, wf, tstate, rendered):
-        return None  # simulates ProviderNotConfigured / endpoint error
-
-    monkeypatch.setattr(sweeper, "_classify", failing_classify)
-
-    async with db_sessionmaker() as s:
-        s.add(_msg(chat.id, 1, "let's schedule dinner", minutes_ago=5))
-        await s.commit()
-    await sweeper.sweep()
-
-    async with db_sessionmaker() as s:
-        ts = (await s.execute(select(TriggerState))).scalar_one()
-        assert ts.last_tg_message_id == 0, "window was consumed despite classifier failure"
-
-    # model recovers → same window now classifies and converges
-    verdicts = iter([verdict(updates=[])])
-
-    async def working_classify(session, wf, tstate, rendered):
-        return next(verdicts)
-
-    monkeypatch.setattr(sweeper, "_classify", working_classify)
-    await sweeper.sweep()
-    async with db_sessionmaker() as s:
-        ts = (await s.execute(select(TriggerState))).scalar_one()
-        assert ts.last_tg_message_id == 1  # advanced after success
-
-
-async def test_cooling_workflow_keeps_messages_for_after_cooldown(db_sessionmaker, monkeypatch):
-    """A workflow in cooldown must NOT consume matching messages that arrive
-    during the cooldown — it should evaluate (and fire on) them once the
-    cooldown lifts, even if another workflow evaluated the same window."""
-    _, chat, wf_id = await _intent_setup(db_sessionmaker)  # no required slots → fires on match
-    sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
-    sweeper.settings = sweeper.settings.model_copy(update={"intent_min_llm_interval_seconds": 0})
-
-    async def always_match(session, wf, tstate, rendered):
-        return verdict(match=True, confidence=0.9, updates=[])
-
-    monkeypatch.setattr(sweeper, "_classify", always_match)
-
-    # no required slots → a confident match fires immediately
-    async with db_sessionmaker() as s:
-        wf = await s.get(Workflow, wf_id)
-        wf.required_slots = []
-        ts = TriggerState(
-            workflow_id=wf_id, chat_id=chat.id, thread_key=0, last_tg_message_id=5,
-            cooldown_until=datetime.now(timezone.utc) + timedelta(minutes=30),
-        )
-        s.add(ts)
-        s.add(_msg(chat.id, 10, "let's schedule dinner", minutes_ago=5))  # arrives during cooldown
-        await s.commit()
-
-    await sweeper.sweep()  # in cooldown → must not fire, must not advance
-    async with db_sessionmaker() as s:
-        assert (await s.execute(select(PendingFire))).scalar_one_or_none() is None
-        ts = (await s.execute(select(TriggerState))).scalar_one()
-        assert ts.last_tg_message_id == 5, "cooling workflow consumed a during-cooldown message"
-
-    # cooldown lifts → the same message is still pending → fires
-    async with db_sessionmaker() as s:
-        ts = (await s.execute(select(TriggerState))).scalar_one()
-        ts.cooldown_until = datetime.now(timezone.utc) - timedelta(seconds=1)
-        await s.commit()
-    await sweeper.sweep()
-    async with db_sessionmaker() as s:
-        assert (await s.execute(select(PendingFire))).scalar_one() is not None
-
-
-async def test_sweeper_ignores_self_messages_and_hot_windows(db_sessionmaker, monkeypatch):
-    _, chat, _ = await _intent_setup(db_sessionmaker)
-    sweeper = IntentSweeper(db_sessionmaker, FakeEmbedder())
-    called = False
-
-    async def fake_classify(*a):
-        nonlocal called
-        called = True
-        return verdict()
-
-    monkeypatch.setattr(sweeper, "_classify", fake_classify)
-
-    async with db_sessionmaker() as s:
-        m = _msg(chat.id, 1, "let's schedule dinner", minutes_ago=0)  # too fresh (no lull)
-        s.add(m)
-        await s.commit()
-    assert await sweeper.sweep() == 0
-    assert not called
+    keys = {t.key for t in TUNABLES}
+    for expected in (
+        "intent_classifier_concurrency",
+        "intent_candidate_ttl_minutes",
+        "intent_candidate_unrelated_k",
+        "intent_tracking_idle_hours",
+        "intent_decay_grace_hours",
+        "intent_decay_per_hour_pct",
+        "intent_episode_max_age_days",
+        "intent_max_open_episodes",
+    ):
+        assert expected in keys
+    settings = get_settings()
+    for t in TUNABLES:
+        assert hasattr(settings, t.key), f"tunable {t.key} has no Settings field"
 
 
 # ---------- fire executor ----------
@@ -399,7 +322,7 @@ async def test_poison_fire_is_isolated_not_queue_wedging(db_sessionmaker):
         s.add(chat2)
         wf2 = Workflow(name="ok", type="intent", action_prompt="do it",
                        trigger_prompt="t", required_slots=[], confirm=False,
-                       cooldown_seconds=3600, threshold=0.1, examples_status="ready")
+                       cooldown_seconds=0, threshold=0.1, examples_status="ready")
         s.add(wf2)
         await s.flush()
         s.add(PendingFire(workflow_id=wf_id, chat_id=chat.id, slots={}))  # needs confirm → send fails

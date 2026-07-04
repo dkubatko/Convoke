@@ -35,19 +35,28 @@ async def main() -> None:
 
     # We are the only worker: any run still 'running' was orphaned by a crash
     # or restart mid-execution. Without this it would show as running forever.
-    from sqlalchemy import update
+    from datetime import datetime, timezone
 
+    from sqlalchemy import select
+
+    from app.intent.episodes import finish_run_episode
     from app.models import AgentRun
 
     async with sessionmaker() as session:
-        result = await session.execute(
-            update(AgentRun)
-            .where(AgentRun.status == "running")
-            .values(status="error", error="interrupted by a worker restart")
+        now = datetime.now(timezone.utc)
+        orphaned = (
+            (await session.execute(select(AgentRun).where(AgentRun.status == "running")))
+            .scalars()
+            .all()
         )
+        for run in orphaned:
+            run.status = "error"
+            run.error = "interrupted by a worker restart"
+            # The topic wasn't handled — its episode reverts to tracking.
+            await finish_run_episode(session, run.id, None, now)
         await session.commit()
-        if result.rowcount:
-            log.warning("marked %d orphaned agent run(s) as interrupted", result.rowcount)
+        if orphaned:
+            log.warning("marked %d orphaned agent run(s) as interrupted", len(orphaned))
     try:
         embedder = get_embedder()
         limiter = SendLimiter()
@@ -65,7 +74,8 @@ async def main() -> None:
                         await regenerate_stale_pending(sessionmaker, embedder)
                 except Exception:  # noqa: BLE001 — the loop must survive
                     log.exception("intent sweep failed")
-                await asyncio.sleep(5)
+                # sweep() refreshes settings with operator overrides each pass
+                await asyncio.sleep(sweeper.settings.intent_sweep_interval_seconds)
 
         async with asyncio.TaskGroup() as tg:
             tg.create_task(Gateway(sessionmaker).run(), name="gateway")

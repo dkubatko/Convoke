@@ -16,6 +16,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.models import ProviderNotConfigured, build_model, get_provider
+from app.core.runtime_settings import effective_settings
 from app.intent.schemas import GeneratedExamples
 from app.memory.embeddings import Embedder
 from app.models import Workflow, WorkflowExample
@@ -36,10 +37,10 @@ A Telegram group-chat bot watches conversations for this intent:
 Data to extract when the intent occurs (slots): {slots}
 
 Generate example chat messages for training a semantic prefilter:
-- positives: realistic short messages members might send while this intent is \
-being expressed or converging. Vary phrasing, formality and language (include \
-a few in Spanish/Russian/German if plausible for a generic group).
-- negatives: near-misses — same topic area but NOT expressing the intent.
+- positives: about {n_pos} realistic short messages members might send while \
+this intent is being expressed or converging. Vary phrasing, formality and \
+language (include a few in Spanish/Russian/German if plausible for a generic group).
+- negatives: about {n_neg} near-misses — same topic area but NOT expressing the intent.
 """
 
 
@@ -130,9 +131,13 @@ async def _generate(session: AsyncSession, wf: Workflow) -> GeneratedExamples:
         "; ".join(f"{s['name']} ({s.get('description', '')})" for s in wf.required_slots or [])
         or "none"
     )
-    agent = Agent(build_model(provider), output_type=GeneratedExamples)
+    n_pos = (await effective_settings(session)).intent_example_count
+    n_neg = max(4, round(n_pos * 0.4))
+    agent = Agent(build_model(provider), output_type=GeneratedExamples, retries=3)
     result = await agent.run(
-        GENERATION_PROMPT.format(trigger_prompt=wf.trigger_prompt, slots=slots_desc)
+        GENERATION_PROMPT.format(
+            trigger_prompt=wf.trigger_prompt, slots=slots_desc, n_pos=n_pos, n_neg=n_neg
+        )
     )
     return result.output
 

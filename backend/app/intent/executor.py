@@ -21,8 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.core.crypto import decrypt
+from app.intent.episodes import revert_fired
 from app.intent.state import render_slots
-from app.models import AgentRun, Bot, Chat, PendingFire, Workflow
+from app.models import AgentRun, Bot, Chat, IntentEpisode, PendingFire, Workflow
 from app.telegram.client import BotCache
 from app.telegram.limiter import SendLimiter
 from app.telegram.sender import send_and_persist
@@ -92,6 +93,7 @@ class FireExecutor:
                 if wf is None or chat is None:
                     fire.status = "cancelled"
                     fire.finished_at = now
+                    await revert_fired(session, fire.episode_id, now)
                     await session.commit()
                     continue
                 # Each fire is its own transaction: a bad send (bot kicked,
@@ -111,6 +113,7 @@ class FireExecutor:
                         fresh.status = "error"
                         fresh.error = f"{type(e).__name__}: {e}"[:300]
                         fresh.finished_at = datetime.now(timezone.utc)
+                        await revert_fired(session, fresh.episode_id, datetime.now(timezone.utc))
                         await session.commit()
             await self._expire_stale_confirmations(session, now)
             await session.commit()
@@ -128,6 +131,12 @@ class FireExecutor:
         fire.status = "done"
         fire.finished_at = datetime.now(timezone.utc)
         fire.agent_run_id = run.id
+        # Link the episode to the run so its completion can write back what
+        # was done (the classifier's suppression evidence).
+        if fire.episode_id is not None:
+            episode = await session.get(IntentEpisode, fire.episode_id)
+            if episode is not None:
+                episode.agent_run_id = run.id
         log.info("workflow %s fired in chat %s (run %s queued)", wf.id, fire.chat_id, run.id)
 
     async def _request_confirmation(
@@ -181,6 +190,7 @@ class FireExecutor:
                 fire.status = "cancelled"
                 fire.error = "confirmation timed out"
                 fire.finished_at = now
+                await revert_fired(session, fire.episode_id, now)
 
 
 async def handle_confirm_callback(
@@ -205,6 +215,7 @@ async def handle_confirm_callback(
     else:
         fire.status = "cancelled"
         fire.finished_at = datetime.now(timezone.utc)
+        await revert_fired(session, fire.episode_id, fire.finished_at)
         await bot.answer_callback_query(cb_id, text="Cancelled")
         outcome = f"❌ Cancelled by {html.escape(from_user_name)}."
     if fire.confirm_tg_message_id is not None:

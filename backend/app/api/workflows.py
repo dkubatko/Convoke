@@ -16,9 +16,10 @@ from sqlalchemy import func
 from app.models import (
     AgentRun,
     Chat,
+    IntentCursor,
+    IntentEpisode,
     Message,
     PendingFire,
-    TriggerState,
     Workflow,
     WorkflowAssignment,
 )
@@ -40,7 +41,11 @@ class WorkflowIn(BaseModel):
     trigger_prompt: str | None = None
     required_slots: list[SlotSpec] = []
     confirm: bool = True
-    cooldown_seconds: int = 3600
+    # 0 = no rate limit. A topic converging during the cooldown parks and is
+    # rechecked when it lifts — never dropped. Episode dedup governs re-firing.
+    cooldown_seconds: int = 0
+    # How long a handled topic stays open as dedup memory (prefilter-gated).
+    dedup_window_hours: int = 12
     chat_ids: list[int] = []
 
 
@@ -56,6 +61,7 @@ class WorkflowOut(BaseModel):
     required_slots: list
     confirm: bool
     cooldown_seconds: int
+    dedup_window_hours: int
     threshold: float | None
     examples_status: str
     chat_ids: list[int]
@@ -91,9 +97,29 @@ async def _out(session: AsyncSession, wf: Workflow) -> WorkflowOut:
         required_slots=wf.required_slots or [],
         confirm=wf.confirm,
         cooldown_seconds=wf.cooldown_seconds,
+        dedup_window_hours=wf.dedup_window_hours,
         threshold=wf.threshold,
         examples_status=wf.examples_status,
         chat_ids=chat_ids,
+    )
+
+
+async def _seed_cursor(session: AsyncSession, workflow_id: int, chat_id: int) -> None:
+    """Seed a newly assigned intent workflow's cursor at the chat's current
+    tail, so it starts evaluating from 'now' — never the imported backlog."""
+    existing = await session.get(IntentCursor, (workflow_id, chat_id, 0))
+    if existing is not None:
+        return
+    tail = (
+        await session.execute(
+            select(func.max(Message.tg_message_id)).where(Message.chat_id == chat_id)
+        )
+    ).scalar()
+    session.add(
+        IntentCursor(
+            workflow_id=workflow_id, chat_id=chat_id, thread_key=0,
+            last_tg_message_id=tail or 0,
+        )
     )
 
 
@@ -105,6 +131,8 @@ async def _set_assignments(session: AsyncSession, wf: Workflow, chat_ids: list[i
         if await session.get(Chat, cid) is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown chat id {cid}")
         session.add(WorkflowAssignment(workflow_id=wf.id, chat_id=cid))
+        if wf.type == "intent":
+            await _seed_cursor(session, wf.id, cid)
 
 
 def _apply(wf: Workflow, body: WorkflowIn) -> bool:
@@ -121,6 +149,7 @@ def _apply(wf: Workflow, body: WorkflowIn) -> bool:
     wf.required_slots = [s.model_dump() for s in body.required_slots]
     wf.confirm = body.confirm
     wf.cooldown_seconds = body.cooldown_seconds
+    wf.dedup_window_hours = body.dedup_window_hours
     if wf.type == "scheduled":
         wf.next_fire_at = None  # recomputed from cron on the next tick
     return wf.type == "intent" and trigger_changed
@@ -217,17 +246,82 @@ async def list_fires(
 # ---------- per-chat observability + control ----------
 
 
-class TriggerStateOut(BaseModel):
+class CursorOut(BaseModel):
+    """Where the detector's last check of one thread ended."""
+
     thread_key: int
-    slots: dict
+    last_tg_message_id: int
     last_evaluated_at: datetime | None
     last_stage: str | None
     last_score: float | None
     last_confidence: float | None
-    last_match_at: datetime | None
-    cooldown_until: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+class EpisodeOut(BaseModel):
+    """One tracked occurrence of the intent — the unit the UI renders."""
+
+    id: int
+    thread_key: int
+    status: str
+    summary: str | None
+    slots: dict
+    confidence: float | None
+    execution_summary: str | None
+    close_reason: str | None
+    opened_at: datetime
+    last_activity_at: datetime
+    fired_at: datetime | None
+    closed_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+async def _episodes_for(
+    session: AsyncSession, workflow_id: int, chat_id: int, limit: int = 10
+) -> list[EpisodeOut]:
+    rows = (
+        (
+            await session.execute(
+                select(IntentEpisode)
+                .where(
+                    IntentEpisode.workflow_id == workflow_id,
+                    IntentEpisode.chat_id == chat_id,
+                )
+                .order_by(
+                    # open episodes first, then most recent activity
+                    (IntentEpisode.status == "closed").asc(),
+                    IntentEpisode.last_activity_at.desc(),
+                    IntentEpisode.id.desc(),
+                )
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [EpisodeOut.model_validate(e) for e in rows]
+
+
+async def _cursors_for(
+    session: AsyncSession, workflow_id: int, chat_id: int
+) -> list[CursorOut]:
+    rows = (
+        (
+            await session.execute(
+                select(IntentCursor)
+                .where(
+                    IntentCursor.workflow_id == workflow_id,
+                    IntentCursor.chat_id == chat_id,
+                )
+                .order_by(IntentCursor.thread_key)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [CursorOut.model_validate(c) for c in rows]
 
 
 class ChatRunOut(BaseModel):
@@ -247,13 +341,17 @@ class ChatWorkflowOut(BaseModel):
     enabled: bool
     confirm: bool
     cooldown_seconds: int
+    dedup_window_hours: int
     threshold: float | None
     examples_status: str
     cron: str | None
     next_fire_at: datetime | None
+    trigger_prompt: str | None
+    action_prompt: str
     required_slots: list
     assigned: bool
-    states: list[TriggerStateOut]
+    cursors: list[CursorOut]
+    episodes: list[EpisodeOut]
     recent_fires: list[FireOut]
     recent_runs: list[ChatRunOut]
     # Messages THIS workflow hasn't evaluated yet (past its own cursor).
@@ -293,23 +391,17 @@ async def chat_workflows(
 
     out: list[ChatWorkflowOut] = []
     for wf in workflows:
-        states = (
-            (
-                await session.execute(
-                    select(TriggerState)
-                    .where(TriggerState.workflow_id == wf.id, TriggerState.chat_id == chat_id)
-                    .order_by(TriggerState.thread_key)
-                )
-            )
-            .scalars()
-            .all()
+        cursors = await _cursors_for(session, wf.id, chat_id)
+        episodes = (
+            await _episodes_for(session, wf.id, chat_id) if wf.type == "intent" else []
         )
         # Messages THIS workflow hasn't evaluated yet: newer than its own
-        # least-advanced cursor (0 if it has no state → everything is pending).
-        # Only meaningful for an assigned intent workflow.
+        # least-advanced cursor. Only meaningful for an assigned intent
+        # workflow with a seeded cursor (no cursor yet → nothing counted;
+        # seeding starts it at the chat tail anyway).
         pending_messages = 0
-        if wf.type == "intent" and wf.id in assigned_ids:
-            wf_cursor = min((s.last_tg_message_id for s in states), default=0)
+        if wf.type == "intent" and wf.id in assigned_ids and cursors:
+            wf_cursor = min(c.last_tg_message_id for c in cursors)
             pending_messages = await pending_since(wf_cursor)
         fires = (
             (
@@ -343,13 +435,17 @@ async def chat_workflows(
                 enabled=wf.enabled,
                 confirm=wf.confirm,
                 cooldown_seconds=wf.cooldown_seconds,
+                dedup_window_hours=wf.dedup_window_hours,
                 threshold=wf.threshold,
                 examples_status=wf.examples_status,
                 cron=wf.cron,
                 next_fire_at=wf.next_fire_at,
+                trigger_prompt=wf.trigger_prompt,
+                action_prompt=wf.action_prompt,
                 required_slots=wf.required_slots or [],
                 assigned=wf.id in assigned_ids,
-                states=[TriggerStateOut.model_validate(s) for s in states],
+                cursors=cursors,
+                episodes=episodes,
                 recent_fires=[
                     FireOut(
                         id=f.id, workflow_id=f.workflow_id, chat_id=f.chat_id,
@@ -372,7 +468,8 @@ class WorkflowChatOut(BaseModel):
     chat_id: int
     chat_title: str
     chat_status: str
-    states: list[TriggerStateOut]
+    cursors: list[CursorOut]
+    episodes: list[EpisodeOut]
     pending_messages: int
     recent_fires: list[FireOut]
     recent_runs: list[ChatRunOut]
@@ -408,20 +505,13 @@ async def workflow_detail(
 
     chat_out: list[WorkflowChatOut] = []
     for chat in chats:
-        states = (
-            (
-                await session.execute(
-                    select(TriggerState)
-                    .where(TriggerState.workflow_id == workflow_id, TriggerState.chat_id == chat.id)
-                    .order_by(TriggerState.thread_key)
-                )
-            )
-            .scalars()
-            .all()
+        cursors = await _cursors_for(session, workflow_id, chat.id)
+        episodes = (
+            await _episodes_for(session, workflow_id, chat.id) if wf.type == "intent" else []
         )
         pending = 0
-        if wf.type == "intent":
-            wf_cursor = min((s.last_tg_message_id for s in states), default=0)
+        if wf.type == "intent" and cursors:
+            wf_cursor = min(c.last_tg_message_id for c in cursors)
             pending = (
                 await session.execute(
                     select(func.count())
@@ -462,7 +552,8 @@ async def workflow_detail(
                 chat_id=chat.id,
                 chat_title=chat.title or str(chat.tg_chat_id),
                 chat_status=chat.status,
-                states=[TriggerStateOut.model_validate(s) for s in states],
+                cursors=cursors,
+                episodes=episodes,
                 pending_messages=pending,
                 recent_fires=[
                     FireOut(
@@ -489,8 +580,11 @@ async def set_chat_workflows(
         delete(WorkflowAssignment).where(WorkflowAssignment.chat_id == chat_id)
     )
     for wid in set(workflow_ids):
-        if await session.get(Workflow, wid) is None:
+        wf = await session.get(Workflow, wid)
+        if wf is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown workflow id {wid}")
         session.add(WorkflowAssignment(workflow_id=wid, chat_id=chat_id))
+        if wf.type == "intent":
+            await _seed_cursor(session, wid, chat_id)
     await session.commit()
     return sorted(set(workflow_ids))

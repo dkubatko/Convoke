@@ -16,6 +16,7 @@ from app.agents.deps import AgentDeps
 from app.agents.mcp import toolsets_for_chat
 from app.agents.models import ProviderNotConfigured, build_model, get_provider
 from app.agents.tools import AGENT_TOOLS
+from app.intent.episodes import finish_run_episode
 from app.memory.embeddings import Embedder
 from app.models import AgentRun, Bot, Chat
 from app.telegram.limiter import SendLimiter
@@ -166,6 +167,9 @@ async def execute_run(
             run.status = "done"
             run.response_text = reply_text
             run.finished_at = datetime.now(timezone.utc)
+            # Feedback loop: the episode that fired this run becomes
+            # `satisfied`, carrying what was done.
+            await finish_run_episode(session, run_id, reply_text, run.finished_at)
             await session.commit()
     except Exception as e:  # noqa: BLE001 — any failure ends the run cleanly
         log.exception("agent run %s failed", run_id)
@@ -199,6 +203,8 @@ async def _fail(session, run, error: str, bot, limiter, bot_row, chat, notify: s
     run.status = "error"
     run.error = error
     run.finished_at = datetime.now(timezone.utc)
+    # A failed run didn't handle the topic — the episode reverts to tracking.
+    await finish_run_episode(session, run.id, None, run.finished_at)
     if notify:
         try:
             await limiter.acquire(chat.bot_id, chat.tg_chat_id)
