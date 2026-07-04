@@ -102,6 +102,9 @@ class Message(Base):
     chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
     tg_message_id: Mapped[int] = mapped_column(BigInteger)
     thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # The message this one replies to — lets the intent classifier pull the
+    # quoted original into context even when it's far back in the history.
+    reply_to_tg_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     sender_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     sender_name: Mapped[str] = mapped_column(Text, default="")
     text: Mapped[str] = mapped_column(Text)

@@ -206,7 +206,22 @@ function MemoryTab({ chatId }: { chatId: number }) {
                       {m.source !== 'live' ? ` · ${m.source}` : ''}
                     </div>
                   </td>
-                  <td>{m.text}</td>
+                  <td>
+                    {m.reply_to && (
+                      <div
+                        className="muted"
+                        style={{
+                          fontSize: 12,
+                          borderLeft: '2px solid var(--line-strong)',
+                          padding: '1px 8px',
+                          marginBottom: 4,
+                        }}
+                      >
+                        ↪ <b>{m.reply_to.sender_name}</b>: {m.reply_to.text}
+                      </div>
+                    )}
+                    {m.text}
+                  </td>
                 </tr>
               ))}
             </tbody>

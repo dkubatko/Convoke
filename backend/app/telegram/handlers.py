@@ -230,6 +230,9 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
             chat_id=chat.id,
             tg_message_id=msg.message_id,
             thread_id=msg.message_thread_id,
+            reply_to_tg_message_id=(
+                msg.reply_to_message.message_id if msg.reply_to_message else None
+            ),
             sender_id=msg.from_user.id if msg.from_user else None,
             sender_name=msg.from_user.full_name if msg.from_user else "",
             text=text,

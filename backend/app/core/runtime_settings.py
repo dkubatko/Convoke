@@ -78,21 +78,21 @@ TUNABLES: list[Tunable] = [
         "phrases", 6, 60, "global", "workflows",
     ),
     Tunable(
-        "intent_candidate_ttl_minutes", "Tentative-topic lifetime",
-        "When the classifier says a conversation is plausibly on-intent but not clear yet, "
-        "the detector starts following it tentatively. If nothing on-topic happens for this "
-        "long, the tentative topic is dropped.",
+        "intent_candidate_ttl_minutes", "Vague-topic lifetime",
+        "A followed topic with no concrete details gathered yet is dropped after this much "
+        "time without on-topic activity. Once a detail lands, the topic switches to the "
+        "longer idle limit below.",
         "minutes", 1, 720, "global", "workflows",
     ),
     Tunable(
-        "intent_candidate_unrelated_k", "Off-topic checks to drop a tentative topic",
-        "A tentative topic is also dropped after this many consecutive evaluations judged "
-        "unrelated — cheaper than waiting out its lifetime.",
+        "intent_candidate_unrelated_k", "Off-topic checks to drop a vague topic",
+        "A topic with no details gathered is also dropped after this many consecutive "
+        "evaluations judged unrelated — cheaper than waiting out its lifetime.",
         "checks", 1, 10, "global", "workflows",
     ),
     Tunable(
-        "intent_tracking_idle_hours", "Tracked-topic idle limit",
-        "A topic the detector is actively following is closed after this much time with no "
+        "intent_tracking_idle_hours", "Detailed-topic idle limit",
+        "A topic that has gathered concrete details is closed after this much time with no "
         "on-topic activity (off-topic chatter doesn't keep it alive).",
         "hours", 1, 168, "global", "workflows",
     ),

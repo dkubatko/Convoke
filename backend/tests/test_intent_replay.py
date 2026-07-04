@@ -64,7 +64,7 @@ class ScriptedModel:
         return verdict
 
 
-def detect(relation="active", conf=0.9, summary="dinner tonight", updates=()):
+def detect(relation="clear", conf=0.9, summary="dinner tonight", updates=()):
     return DetectVerdict(
         relation=relation, confidence=conf, topic_summary=summary, slot_updates=list(updates)
     )
@@ -85,10 +85,11 @@ def upd(name, value, conf=0.9):
     return SlotUpdate(name=name, value=value, confidence=conf)
 
 
-def _msg(chat_id, tg_id, text, at, source="live", thread=None):
+def _msg(chat_id, tg_id, text, at, source="live", thread=None, reply_to=None):
     return Message(
         chat_id=chat_id, tg_message_id=tg_id, thread_id=thread, sender_id=5,
         sender_name="Alice", text=text, sent_at=at, source=source,
+        reply_to_tg_message_id=reply_to,
     )
 
 
@@ -250,7 +251,9 @@ async def test_b_handled_topic_suppresses_followup_but_not_new_instance(db_sessi
 
 # ---------- C: interleaving at cap=1 ----------
 
-async def test_c_cap_one_supersedes_candidate_but_protects_tracking(db_sessionmaker):
+async def test_c_cap_protects_invested_topics_only(db_sessionmaker):
+    """Eviction under the cap keys on SUBSTANCE: candidates and slotless
+    protection is earned by gathered details, not by any status label."""
     script = ScriptedModel()
     _, chat, _ = await _setup(db_sessionmaker, required=SLOT_TIME)
     sweeper = _sweeper(db_sessionmaker, script)
@@ -259,22 +262,63 @@ async def test_c_cap_one_supersedes_candidate_but_protects_tracking(db_sessionma
     script.push(detect(relation="ambiguous", summary="maybe dinner"))
     await sweeper.sweep(now=NOW)
 
-    # A new instance evicts a mere candidate…
+    # A concrete new instance evicts a mere candidate and opens protected
+    # (slot below the fire bar so it keeps gathering without firing).
     await _add(db_sessionmaker, _msg(chat.id, 2, "actually, board games friday?",
                                      at=NOW + timedelta(minutes=2)))
-    script.push(attributed(relation="new_instance", summary="board games friday"))
+    script.push(attributed(relation="new_instance", summary="board games friday",
+                           updates=[upd("time", "friday-ish", 0.65)]))
     await sweeper.sweep(now=NOW + timedelta(minutes=3))
     eps = await _episodes(db_sessionmaker)
-    assert [e.status for e in eps] == ["closed", "tracking"]
+    assert [e.status for e in eps] == ["closed", "candidate"]
     assert eps[0].close_reason == "superseded"
 
-    # …but an in-progress tracking episode is protected: the second new
-    # instance is not tracked (documented cap=1 limitation).
+    # An invested topic is protected: a further VAGUE new instance
+    # is not tracked (documented cap=1 limitation).
     await _add(db_sessionmaker, _msg(chat.id, 3, "and a picnic sunday!",
                                      at=NOW + timedelta(minutes=5)))
     script.push(attributed(relation="new_instance", summary="picnic sunday"))
     await sweeper.sweep(now=NOW + timedelta(minutes=6))
     assert len(await _episodes(db_sessionmaker)) == 2  # nothing new opened
+    async with db_sessionmaker() as s:
+        cursor = (await s.execute(select(IntentCursor))).scalar_one()
+        assert cursor.last_stage == "cap_full"
+
+
+async def test_c2_vague_topic_never_squats_the_cap(db_sessionmaker):
+    """The Washington case: a slotless topic (vague 'let's hike somewhere
+    else') must never block the next concrete topic under the cap."""
+    script = ScriptedModel()
+    _, chat, _ = await _setup(db_sessionmaker, required=SLOT_TIME)
+    sweeper = _sweeper(db_sessionmaker, script)
+
+    # Vague but clearly on-intent → slotless candidate (would-be squatter).
+    await _add(db_sessionmaker, _msg(chat.id, 1, ON_TOPIC + " somewhere, sometime",
+                                     at=NOW - timedelta(minutes=2)))
+    script.push(detect(summary="dinner, nothing concrete"))
+    await sweeper.sweep(now=NOW)
+    eps = await _episodes(db_sessionmaker)
+    assert eps[0].status == "candidate" and eps[0].slots == {}
+
+    # A concrete new instance evicts the slotless squatter and FIRES.
+    await _add(db_sessionmaker, _msg(chat.id, 2, "new idea: dinner at 7 sharp",
+                                     at=NOW + timedelta(minutes=2)))
+    script.push(attributed(relation="new_instance", summary="dinner at 7",
+                           updates=[upd("time", "7pm")]))
+    await sweeper.sweep(now=NOW + timedelta(minutes=3))
+    eps = await _episodes(db_sessionmaker)
+    assert eps[0].status == "closed" and eps[0].close_reason == "superseded"
+    assert eps[1].status == "fired"
+    assert len(await _fires(db_sessionmaker)) == 1
+
+    # And a vague new instance opens as a candidate (evictable, fast-expiring).
+    await _satisfy(db_sessionmaker, "booked it")
+    await _add(db_sessionmaker, _msg(chat.id, 3, ON_TOPIC + " more often, someday",
+                                     at=NOW + timedelta(minutes=6)))
+    script.push(attributed(relation="new_instance", summary="vague repeat idea"))
+    await sweeper.sweep(now=NOW + timedelta(minutes=7))
+    eps = await _episodes(db_sessionmaker)
+    assert eps[-1].status == "candidate"
 
 
 # ---------- D: rejected-window evidence survives ----------
@@ -439,7 +483,7 @@ async def test_h_decayed_slot_blocks_convergence(db_sessionmaker):
     await sweeper.sweep(now=later)
     assert not await _fires(db_sessionmaker)
     eps = await _episodes(db_sessionmaker)
-    assert eps[0].status == "tracking"
+    assert eps[0].status == "candidate"
 
     # The group re-states the time → fresh timestamp → fires.
     await _add(db_sessionmaker, _msg(chat.id, 3, "7pm it is", at=later + timedelta(minutes=2)))
@@ -448,7 +492,7 @@ async def test_h_decayed_slot_blocks_convergence(db_sessionmaker):
     assert len(await _fires(db_sessionmaker)) == 1
 
 
-async def test_h2_tracking_episode_expires_after_idle_limit(db_sessionmaker):
+async def test_h2_stale_topic_expires_after_idle_limit(db_sessionmaker):
     script = ScriptedModel()
     _, chat, _ = await _setup(db_sessionmaker, required=SLOT_TIME)
     sweeper = _sweeper(db_sessionmaker, script)
@@ -457,7 +501,7 @@ async def test_h2_tracking_episode_expires_after_idle_limit(db_sessionmaker):
     script.push(detect(summary="dinner"))
     await sweeper.sweep(now=NOW)
 
-    # 20h idle (> 12h tracking limit): the planning pass closes the episode;
+    # 20h idle (past any leash): the planning pass closes the episode;
     # a DetectVerdict is scripted — attribution mode here would fail loudly.
     later = NOW + timedelta(hours=20)
     await _add(db_sessionmaker, _msg(chat.id, 2, ON_TOPIC + "?", at=later - timedelta(minutes=2)))
@@ -465,6 +509,64 @@ async def test_h2_tracking_episode_expires_after_idle_limit(db_sessionmaker):
     await sweeper.sweep(now=later)
     eps = await _episodes(db_sessionmaker)
     assert eps[0].status == "closed" and eps[0].close_reason == "expired"
+
+
+# ---------- replies carry their context across long pauses ----------
+
+async def test_reply_pulls_quoted_original_into_the_prompt(db_sessionmaker):
+    """A Telegram reply to a message far outside the transcript window renders
+    the quoted original inline — 'sure, that works' replying to yesterday's
+    proposal isn't judged blind."""
+    script = ScriptedModel()
+    _, chat, _ = await _setup(db_sessionmaker)
+    sweeper = _sweeper(db_sessionmaker, script)
+
+    async with db_sessionmaker() as s:
+        s.add(_msg(chat.id, 1, "wanna hike Saturday at 10?", at=NOW - timedelta(hours=3)))
+        for i in range(2, 12):  # push the proposal far beyond the 8-message context
+            s.add(_msg(chat.id, i, f"filler chatter {i}", at=NOW - timedelta(hours=2)))
+        cursor = (await s.execute(select(IntentCursor))).scalar_one()
+        cursor.last_tg_message_id = 11  # everything above is already consumed
+        await s.commit()
+
+    await _add(db_sessionmaker, _msg(chat.id, 12, ON_TOPIC + " — yes down for that!",
+                                     at=NOW - timedelta(minutes=2), reply_to=1))
+    script.push(detect(relation="unrelated"))
+    assert await sweeper.sweep(now=NOW) == 1
+    prompt = script.prompts[0]
+    assert 'this replies to Alice, earlier: "wanna hike Saturday at 10?"' in prompt
+    assert "wanna hike Saturday" not in prompt.split("↳")[0]  # truly out of context
+
+
+async def test_weak_reply_inherits_target_topicality_at_the_gate(db_sessionmaker):
+    """'cool!' alone fails the embedding gate; 'cool!' REPLYING to an on-topic
+    proposal is scored as target+reply combined and passes. The plain 'cool!'
+    control is asserted first."""
+    script = ScriptedModel()
+    _, chat, _ = await _setup(db_sessionmaker)
+    sweeper = _sweeper(db_sessionmaker, script)
+
+    async with db_sessionmaker() as s:
+        s.add(_msg(chat.id, 1, ON_TOPIC + " on Saturday!", at=NOW - timedelta(hours=1)))
+        cursor = (await s.execute(select(IntentCursor))).scalar_one()
+        cursor.last_tg_message_id = 1  # the proposal was already evaluated
+        await s.commit()
+
+    # Control: a bare "cool!" (no reply link) dies at the gate — no LLM call.
+    await _add(db_sessionmaker, _msg(chat.id, 2, "cool!", at=NOW - timedelta(minutes=5)))
+    assert await sweeper.sweep(now=NOW - timedelta(minutes=4)) == 0
+    async with db_sessionmaker() as s:
+        assert (await s.execute(select(IntentCursor))).scalar_one().last_stage == "prefilter_skip"
+
+    # The same weak text AS A REPLY to the proposal passes and is classified.
+    await _add(db_sessionmaker, _msg(chat.id, 3, "cool!", at=NOW - timedelta(minutes=2), reply_to=1))
+    script.push(detect(relation="unrelated"))
+    assert await sweeper.sweep(now=NOW) == 1
+    assert len(script.prompts) == 1
+    # The target sits 2 messages back — VISIBLE in the numbered transcript —
+    # so the reply gets a pure pointer, never a duplicated quote.
+    assert "(replying to [m1])" in script.prompts[0]
+    assert "this replies to" not in script.prompts[0]
 
 
 # ---------- I: parallel dispatch ----------
@@ -555,7 +657,7 @@ async def test_j2_cancelled_confirmation_reverts_episode(db_sessionmaker):
         await s.commit()
     async with db_sessionmaker() as s:
         ep = (await s.execute(select(IntentEpisode))).scalar_one()
-        assert ep.status == "tracking" and ep.fired_at is None  # can re-converge
+        assert ep.status == "candidate" and ep.fired_at is None  # can re-converge
 
 
 # ---------- classifier failure semantics (carried over) ----------

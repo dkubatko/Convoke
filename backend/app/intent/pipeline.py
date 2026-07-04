@@ -85,6 +85,10 @@ class EvalJob:
     transcript_window: list[Message]  # same span, bot messages interleaved
     context: list[Message]  # lead-up before the window, bot messages included
     score: float | None  # prefilter score, when it ran
+    # Resolved reply targets for the window: the transcript renders a short
+    # pointer when the target is visible, or the full quoted original when it
+    # is not — a reply after a long pause carries its context, unduplicated.
+    quoted: dict[int, Message] = field(default_factory=dict)
 
     @property
     def key(self) -> Key:
@@ -283,7 +287,7 @@ class IntentSweeper:
                         IntentEpisode.workflow_id.in_(wf_by_id),
                         IntentEpisode.chat_id == chat_id,
                         IntentEpisode.status.in_(
-                            ("candidate", "tracking", "converged", "fired", "satisfied")
+                            ("candidate", "converged", "fired", "satisfied")
                         ),
                     )
                 )
@@ -299,10 +303,11 @@ class IntentSweeper:
                 as_utc(ep.opened_at),
                 as_utc(ep.last_activity_at),
                 ep.unrelated_streak,
+                bool(ep.slots),
                 now,
                 candidate_ttl=timedelta(minutes=s.intent_candidate_ttl_minutes),
                 candidate_unrelated_k=s.intent_candidate_unrelated_k,
-                tracking_idle=timedelta(hours=s.intent_tracking_idle_hours),
+                invested_idle=timedelta(hours=s.intent_tracking_idle_hours),
                 max_age=timedelta(days=s.intent_episode_max_age_days),
                 dedup_window=timedelta(hours=wf.dedup_window_hours or 24),
             )
@@ -368,6 +373,37 @@ class IntentSweeper:
             return None  # window still open
         window = unevaluated[-max_win:]
 
+        # Replies inherit their target's topicality: resolve replied-to
+        # messages once — combined with the reply for prefilter scoring
+        # ("cool!" replying to "let's hike in Sunnyvale" must score like the
+        # proposal), and quoted in the transcript when outside it.
+        by_id = {m.tg_message_id: m for m in thread_msgs}
+        reply_targets: dict[int, Message] = {}
+        missing_ids = set()
+        for m in thread_msgs:
+            rid = m.reply_to_tg_message_id
+            if not rid:
+                continue
+            if rid in by_id:
+                reply_targets[rid] = by_id[rid]
+            else:
+                missing_ids.add(rid)
+        if missing_ids:
+            fetched = (
+                await session.execute(
+                    select(Message).where(
+                        Message.chat_id == chat_id, Message.tg_message_id.in_(missing_ids)
+                    )
+                )
+            ).scalars()
+            reply_targets.update({m.tg_message_id: m for m in fetched})
+
+        def gate_text(m: Message) -> str:
+            target = reply_targets.get(m.reply_to_tg_message_id or 0)
+            if target is not None and target.text:
+                return f"{target.text}\n{m.text or ''}"
+            return m.text or ""
+
         # Stickiness (bypassing the prefilter) exists so an ACTIVE negotiation
         # never loses a weak-looking follow-up ("yes, 7 works"). A satisfied
         # episode is memory, not activity: the embedding gate resumes — weak
@@ -383,7 +419,7 @@ class IntentSweeper:
             if positives:
                 self._mark(cursor, now, "evaluating_prefilter")
                 await session.commit()
-                vecs = await self.embedder.embed_passages([m.text or "" for m in window])
+                vecs = await self.embedder.embed_passages([gate_text(m) for m in window])
                 score = max(dot(v, p) for v in vecs for p in positives)
                 if score < (wf.threshold or 0.8):
                     cursor.last_tg_message_id = window[-1].tg_message_id
@@ -414,6 +450,7 @@ class IntentSweeper:
             transcript_window=transcript_window,
             context=context,
             score=score,
+            quoted=reply_targets,
         )
 
     def _cooldown_active(
@@ -479,10 +516,12 @@ class IntentSweeper:
             await session.commit()
 
             if episodes:
-                prompt = build_attribution_prompt(wf, episodes, job.context, job.transcript_window)
+                prompt = build_attribution_prompt(
+                    wf, episodes, job.context, job.transcript_window, job.quoted
+                )
                 verdict = await self._model_call(session, prompt, AttributionVerdict)
             else:
-                prompt = build_detect_prompt(wf, job.context, job.transcript_window)
+                prompt = build_detect_prompt(wf, job.context, job.transcript_window, job.quoted)
                 verdict = await self._model_call(session, prompt, DetectVerdict)
             if verdict is None:
                 # A FAILED call must not consume the window or spend the
@@ -527,12 +566,16 @@ class IntentSweeper:
     ) -> str:
         if verdict.relation == "unrelated":
             return "no_match"
+        # One pre-fire state: everything opens as `candidate`; its leash and
+        # cap protection derive from gathered slots, not from a status label.
+        # The ambiguous/clear distinction survives only as a fire gate: an
+        # "ambiguous" maybe must never fire a no-slot workflow on the spot.
         episode = open_episode(
             session,
             job.workflow.id,
             job.chat_id,
             job.thread_key,
-            status="candidate" if verdict.relation == "ambiguous" else "tracking",
+            status="candidate",
             anchor_tg_message_id=job.window[0].tg_message_id,
             summary=verdict.topic_summary,
             confidence=verdict.confidence,
@@ -541,9 +584,10 @@ class IntentSweeper:
         episode.slots = apply_slot_updates(
             {}, verdict.slot_updates, now, job.window[-1].tg_message_id
         )
-        if episode.status == "candidate":
+        if verdict.relation == "ambiguous":
             return "candidate"
-        return await self._maybe_fire(session, job, episode, verdict.confidence, now)
+        stage = await self._maybe_fire(session, job, episode, verdict.confidence, now)
+        return stage if episode.slots or stage != "accumulating" else "candidate"
 
     async def _apply_attribution(
         self,
@@ -555,7 +599,7 @@ class IntentSweeper:
     ) -> str:
         if verdict.relation == "unrelated":
             for ep in episodes:
-                if ep.status == "candidate":
+                if ep.status == "candidate" and not ep.slots:
                     ep.unrelated_streak += 1
                     if ep.unrelated_streak >= self.settings.intent_candidate_unrelated_k:
                         close_episode(ep, "expired", now)
@@ -563,15 +607,15 @@ class IntentSweeper:
 
         if verdict.relation == "new_instance":
             if not make_room(episodes, self.settings.intent_max_open_episodes, now):
-                # Cap full of in-progress topics: the new occurrence is not
-                # tracked (see outstanding-issues: multi-episode).
+                # Cap full of invested (slot-bearing/parked) topics: the new
+                # occurrence is not tracked (see outstanding-issues).
                 return "cap_full"
             episode = open_episode(
                 session,
                 job.workflow.id,
                 job.chat_id,
                 job.thread_key,
-                status="tracking",
+                status="candidate",
                 anchor_tg_message_id=job.window[0].tg_message_id,
                 summary=verdict.topic_summary,
                 confidence=verdict.confidence,
@@ -580,7 +624,8 @@ class IntentSweeper:
             episode.slots = apply_slot_updates(
                 {}, verdict.slot_updates, now, job.window[-1].tg_message_id
             )
-            return await self._maybe_fire(session, job, episode, verdict.confidence, now)
+            stage = await self._maybe_fire(session, job, episode, verdict.confidence, now)
+            return stage if episode.slots or stage != "accumulating" else "candidate"
 
         # continues_episode
         episode = self._resolve_ref(episodes, verdict.episode_ref)
@@ -596,19 +641,14 @@ class IntentSweeper:
         if verdict.topic_concluded:
             close_episode(episode, "abandoned", now)
             return "concluded"
-        if episode.status == "candidate" and (
-            verdict.slot_updates or verdict.confidence >= MIN_FIRE_CONFIDENCE
-        ):
-            episode.status = "tracking"
         episode.slots = apply_slot_updates(
             dict(episode.slots or {}), verdict.slot_updates, now, job.window[-1].tg_message_id
         )
         touch(episode, now, summary=verdict.topic_summary or None, confidence=verdict.confidence)
-        if episode.status == "candidate":
-            return "candidate"
         if episode.status == "converged":
             return "parked"  # still waiting out the cooldown; slots refreshed
-        return await self._maybe_fire(session, job, episode, verdict.confidence, now)
+        stage = await self._maybe_fire(session, job, episode, verdict.confidence, now)
+        return stage if episode.slots or stage != "accumulating" else "candidate"
 
     @staticmethod
     def _resolve_ref(episodes: list[IntentEpisode], ref: int | None) -> IntentEpisode:

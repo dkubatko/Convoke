@@ -127,3 +127,20 @@ async def test_forum_cursor_does_not_skip_active_thread(db_sessionmaker):
     async with db_sessionmaker() as s:
         state = await s.get(ChunkState, chat_id)
         assert state.last_tg_message_id == 3
+
+
+def test_render_segment_quotes_out_of_segment_reply_targets():
+    """A reply whose target is outside the segment gets the quoted original
+    appended; a reply to an in-segment (visible) message gets nothing extra."""
+    from app.memory.chunker import Segment, render_segment
+
+    old = msg(1, 0, text="wanna hike Saturday at 10?")
+    a = msg(10, 60, text="cool!")
+    a.reply_to_tg_message_id = 1  # target NOT in this segment
+    b = msg(11, 61, text="same!")
+    b.reply_to_tg_message_id = 10  # target IS in this segment
+    seg = Segment(thread_id=None, messages=[a, b], tg_id_start=10, tg_id_end=11)
+
+    text = render_segment(seg, {1: old, 10: a})
+    assert '↳ (replies to Alice: "wanna hike Saturday at 10?")' in text
+    assert text.count("↳") == 1  # the in-segment reply is NOT expanded

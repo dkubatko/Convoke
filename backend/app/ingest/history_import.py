@@ -42,6 +42,7 @@ class ExportMessage:
     text: str
     sent_at: datetime
     thread_id: int | None = None
+    reply_to_tg_message_id: int | None = None
 
 
 @dataclass
@@ -88,12 +89,14 @@ def parse_export_message(item: dict) -> ExportMessage | None:
         sent_at = datetime.fromisoformat(item["date"]).replace(tzinfo=timezone.utc)
     else:
         return None
+    reply_to = item.get("reply_to_message_id")
     return ExportMessage(
         tg_message_id=msg_id,
         sender_name=str(item.get("from") or ""),
         sender_id=parse_sender_id(item.get("from_id")),
         text=text,
         sent_at=sent_at,
+        reply_to_tg_message_id=int(reply_to) if isinstance(reply_to, int) else None,
     )
 
 
@@ -288,6 +291,7 @@ async def _run_import(
             Message(
                 chat_id=chat.id,
                 tg_message_id=m.tg_message_id,
+                reply_to_tg_message_id=m.reply_to_tg_message_id,
                 sender_id=m.sender_id,
                 sender_name=m.sender_name,
                 text=m.text,

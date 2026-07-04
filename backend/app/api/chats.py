@@ -18,6 +18,11 @@ from app.models import AgentRun, Chat, ImportJob, MemoryGap, Message, Note
 router = APIRouter(dependencies=[Depends(require_operator)])
 
 
+class ReplyPreview(BaseModel):
+    sender_name: str
+    text: str
+
+
 class MessageOut(BaseModel):
     id: int
     tg_message_id: int
@@ -25,6 +30,8 @@ class MessageOut(BaseModel):
     text: str
     sent_at: datetime
     source: str
+    # The quoted original when this message is a Telegram reply.
+    reply_to: ReplyPreview | None = None
 
     model_config = {"from_attributes": True}
 
@@ -59,7 +66,7 @@ async def _chat_or_404(session: AsyncSession, chat_id: int) -> Chat:
 @router.get("/chats/{chat_id}/messages", response_model=list[MessageOut])
 async def recent_messages(
     chat_id: int, limit: int = 50, session: AsyncSession = Depends(get_session)
-) -> list[Message]:
+) -> list[MessageOut]:
     await _chat_or_404(session, chat_id)
     rows = (
         (
@@ -73,7 +80,41 @@ async def recent_messages(
         .scalars()
         .all()
     )
-    return list(rows)  # newest first
+    # Resolve replied-to previews (usually within `rows`; one extra query
+    # covers replies to older messages).
+    by_id = {m.tg_message_id: m for m in rows}
+    missing = {
+        m.reply_to_tg_message_id
+        for m in rows
+        if m.reply_to_tg_message_id and m.reply_to_tg_message_id not in by_id
+    }
+    if missing:
+        fetched = (
+            await session.execute(
+                select(Message).where(
+                    Message.chat_id == chat_id, Message.tg_message_id.in_(missing)
+                )
+            )
+        ).scalars()
+        by_id.update({m.tg_message_id: m for m in fetched})
+
+    def preview(m: Message) -> ReplyPreview | None:
+        target = by_id.get(m.reply_to_tg_message_id or 0)
+        if target is None:
+            return None
+        text = (target.text or "").replace("\n", " ")
+        return ReplyPreview(
+            sender_name=target.sender_name or "Unknown",
+            text=text[:140] + ("…" if len(text) > 140 else ""),
+        )
+
+    return [
+        MessageOut(
+            id=m.id, tg_message_id=m.tg_message_id, sender_name=m.sender_name,
+            text=m.text, sent_at=m.sent_at, source=m.source, reply_to=preview(m),
+        )
+        for m in rows
+    ]  # newest first
 
 
 @router.get("/chats/{chat_id}/search", response_model=list[SearchHitOut])

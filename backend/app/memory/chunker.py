@@ -28,8 +28,25 @@ def render_message(m: Message) -> str:
     return f"{m.sender_name or 'Unknown'} [{ts}]: {m.text}"
 
 
-def render_segment(seg: Segment) -> str:
-    return "\n".join(render_message(m) for m in seg.messages)
+def render_segment(seg: Segment, reply_targets: dict[int, Message] | None = None) -> str:
+    """Render a segment; a reply whose target is OUTSIDE the segment gets the
+    quoted original appended (in-segment targets are visible lines already —
+    never duplicated). This bakes reply context into the chunk text, so both
+    its embedding and search_chat_history hits carry it."""
+    present = {m.tg_message_id for m in seg.messages}
+    lines: list[str] = []
+    for m in seg.messages:
+        line = render_message(m)
+        rid = m.reply_to_tg_message_id
+        if rid and rid not in present:
+            target = (reply_targets or {}).get(rid)
+            if target is not None and target.text:
+                q = target.text.replace("\n", " ")
+                if len(q) > 120:
+                    q = q[:120] + "…"
+                line += f'\n  ↳ (replies to {target.sender_name or "Unknown"}: "{q}")'
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def segment_messages(
@@ -128,6 +145,24 @@ async def chunk_chat(
     if new_cursor <= state.last_tg_message_id:
         return 0
 
+    # Resolve reply targets that live outside the fetched batch (one query);
+    # in-batch targets are already at hand.
+    by_id = {m.tg_message_id: m for m in messages}
+    missing = {
+        m.reply_to_tg_message_id
+        for m in messages
+        if m.reply_to_tg_message_id and m.reply_to_tg_message_id not in by_id
+    }
+    if missing:
+        fetched = (
+            await session.execute(
+                select(Message).where(
+                    Message.chat_id == chat_id, Message.tg_message_id.in_(missing)
+                )
+            )
+        ).scalars()
+        by_id.update({m.tg_message_id: m for m in fetched})
+
     persisted = 0
     for seg in segments:
         if seg.tg_id_end > new_cursor:
@@ -138,7 +173,7 @@ async def chunk_chat(
                 thread_id=seg.thread_id,
                 msg_tg_id_start=seg.tg_id_start,
                 msg_tg_id_end=seg.tg_id_end,
-                text=render_segment(seg),
+                text=render_segment(seg, by_id),
             )
         )
         persisted += 1

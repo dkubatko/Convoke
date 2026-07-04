@@ -98,30 +98,34 @@ def pre_fire_episodes(episodes: list[IntentEpisode]) -> list[IntentEpisode]:
 
 
 def make_room(episodes: list[IntentEpisode], cap: int, now: datetime) -> bool:
-    """Make room for one more pre-fire episode under the cap by superseding
-    the oldest candidate(s). Returns False when full of non-candidates —
-    the new instance is not tracked (cap=1 keeps attribution easy until the
-    small model is validated; see outstanding-issues)."""
+    """Make room for one more pre-fire episode under the cap.
+
+    Protection is earned by SUBSTANCE: a candidate with no gathered slots is
+    evictable (oldest first) — a vague topic must never squat the cap against
+    a concrete one. Slot-bearing candidates and parked (converged) episodes
+    are immovable; when the cap is full of those, the new instance is not
+    tracked (cap=1 keeps attribution easy until the small model is validated;
+    see outstanding-issues)."""
     active = pre_fire_episodes(episodes)
     while len(active) >= cap:
-        candidates = [e for e in active if e.status == "candidate"]
-        if not candidates:
+        evictable = [e for e in active if e.status == "candidate" and not e.slots]
+        if not evictable:
             return False
-        close_episode(candidates[0], "superseded", now)
-        active.remove(candidates[0])
+        close_episode(evictable[0], "superseded", now)
+        active.remove(evictable[0])
     return True
 
 
 async def revert_fired(session: AsyncSession, episode_id: int | None, now: datetime) -> None:
     """A fire that didn't happen (cancelled, errored, confirm timed out): the
-    topic is still live — back to `tracking` so it can re-converge. fired_at
+    topic is still live — back to `candidate` so it can re-converge. fired_at
     is cleared so the aborted fire doesn't start a cooldown."""
     if episode_id is None:
         return
     episode = await session.get(IntentEpisode, episode_id)
     if episode is None or episode.status != "fired":
         return
-    episode.status = "tracking"
+    episode.status = "candidate"
     episode.fired_at = None
     episode.parked_at_tg_message_id = None
     episode.last_activity_at = now
@@ -133,14 +137,14 @@ async def finish_run_episode(
     """The feedback loop: when a workflow AgentRun ends, the linked episode
     becomes `satisfied` carrying WHAT WAS DONE (shown to the classifier so
     continuations of a handled topic are suppressed). A failed run reverts to
-    `tracking` instead — the topic can re-converge on later activity."""
+    `candidate` instead — the topic can re-converge on later activity."""
     episode = (
         await session.execute(select(IntentEpisode).where(IntentEpisode.agent_run_id == run_id))
     ).scalar_one_or_none()
     if episode is None or episode.status != "fired":
         return
     if response_text is None:
-        episode.status = "tracking"
+        episode.status = "candidate"
         episode.fired_at = None
     else:
         episode.status = "satisfied"

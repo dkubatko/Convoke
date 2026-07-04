@@ -28,6 +28,7 @@ export interface Message {
   text: string
   sent_at: string
   source: string
+  reply_to: { sender_name: string; text: string } | null
 }
 
 export interface SearchHit {
@@ -139,7 +140,7 @@ export interface CursorInfo {
 export interface EpisodeInfo {
   id: number
   thread_key: number
-  status: string // candidate | tracking | converged | fired | satisfied | closed
+  status: string // candidate | converged | fired | satisfied | closed
   summary: string | null
   slots: Record<string, { value: string; confidence: number }>
   confidence: number | null

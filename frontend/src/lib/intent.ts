@@ -7,19 +7,20 @@ import { CursorInfo, EpisodeInfo, SlotSpec } from './types'
 
 export type Tone = 'ok' | 'warn' | 'err' | 'accent' | 'idle'
 
-const OPEN = ['candidate', 'tracking', 'converged', 'fired', 'satisfied']
+const OPEN = ['candidate', 'converged', 'fired', 'satisfied']
 
 export function openEpisodes(episodes: EpisodeInfo[]): EpisodeInfo[] {
   return episodes.filter((e) => OPEN.includes(e.status))
 }
 
-/** Badge for one episode's lifecycle state. */
+/** Badge for one episode's lifecycle state. A candidate's presentation, like
+    its behavior, derives from gathered substance. */
 export function episodeBadge(e: EpisodeInfo): { label: string; tone: Tone; live?: boolean } {
   switch (e.status) {
     case 'candidate':
-      return { label: 'possible topic', tone: 'idle' }
-    case 'tracking':
-      return { label: 'following', tone: 'accent', live: true }
+      return Object.keys(e.slots ?? {}).length > 0
+        ? { label: 'following', tone: 'accent', live: true }
+        : { label: 'possible topic', tone: 'idle' }
     case 'converged':
       return { label: 'ready — rate-limited', tone: 'warn', live: true }
     case 'fired':
@@ -61,7 +62,7 @@ export function statusChip(
   if (open.some((e) => e.status === 'fired')) return { label: 'acting now', tone: 'accent', live: true }
   if (open.some((e) => e.status === 'converged'))
     return { label: 'ready — waiting out rate limit', tone: 'warn', live: true }
-  if (open.some((e) => e.status === 'tracking'))
+  if (open.some((e) => e.status === 'candidate' && Object.keys(e.slots ?? {}).length > 0))
     return { label: 'following a topic', tone: 'accent', live: true }
   if (open.some((e) => e.status === 'candidate'))
     return { label: 'watching a possible topic', tone: 'accent' }
@@ -157,10 +158,10 @@ export function funnel(
               }
             : { name: 'Classifier', status: 'skip' }
 
-  const tracking = open.find((e) => e.status === 'tracking' || e.status === 'candidate')
+  const active = open.find((e) => e.status === 'candidate')
   // Count REQUIRED names present — never raw keys, so a stray slot the model
   // invented can't display as "1/1" while convergence still waits.
-  const gathered = requiredSlots.filter((r) => r.name in (tracking?.slots ?? {})).length
+  const gathered = requiredSlots.filter((r) => r.name in (active?.slots ?? {})).length
   const need = requiredSlots.length
   // Fire-stage blocks (fingerprint duplicate, stale recheck) are amber at
   // Fire; classifier-level blocks leave Fire dashed 'held' — nothing

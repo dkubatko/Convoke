@@ -131,32 +131,37 @@ def lifecycle_close_reason(
     opened_at: datetime,
     last_activity_at: datetime,
     unrelated_streak: int,
+    has_slots: bool,
     now: datetime,
     *,
     candidate_ttl: timedelta,
     candidate_unrelated_k: int,
-    tracking_idle: timedelta,
+    invested_idle: timedelta,
     max_age: timedelta,
     dedup_window: timedelta,
 ) -> str | None:
     """Time/streak-based close for an open episode, or None to keep it.
 
-    Idle is measured from attributed activity only — unrelated chatter never
-    keeps an episode alive. `converged` (parked) and `fired` episodes have
-    in-flight work and close only via the hard age cap; their other exits are
+    A candidate's leash is derived from SUBSTANCE: with no gathered slots it
+    dies fast (short TTL, or a streak of off-topic checks); once details have
+    landed it earns the long leash and survives interruptions. Idle is
+    measured from attributed activity only — unrelated chatter never keeps an
+    episode alive. `converged` (parked) and `fired` episodes have in-flight
+    work and close only via the hard age cap; their other exits are
     event-driven (recheck, executor revert, agent completion).
     """
     if now - opened_at > max_age:
         return "expired"
     idle = now - last_activity_at
     if status == "candidate":
-        if unrelated_streak >= candidate_unrelated_k:
-            return "expired"
-        if idle > candidate_ttl:
-            return "expired"
-    elif status == "tracking":
-        if idle > tracking_idle:
-            return "expired"
+        if has_slots:
+            if idle > invested_idle:
+                return "expired"
+        else:
+            if unrelated_streak >= candidate_unrelated_k:
+                return "expired"
+            if idle > candidate_ttl:
+                return "expired"
     elif status == "satisfied":
         if idle > dedup_window:
             return "done"

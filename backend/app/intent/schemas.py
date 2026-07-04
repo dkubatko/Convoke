@@ -20,10 +20,11 @@ class SlotUpdate(BaseModel):
 class DetectVerdict(BaseModel):
     """Classifier output when NO episode of this intent is being tracked."""
 
-    relation: Literal["unrelated", "ambiguous", "active"] = Field(
+    relation: Literal["unrelated", "ambiguous", "clear"] = Field(
         description="unrelated: nothing to do with the intent. "
-        "ambiguous: plausibly about it but not clear enough yet. "
-        "active: the group is clearly engaging in this intent."
+        "ambiguous: plausibly about it — worth watching, not enough to act on. "
+        "clear: unmistakably expresses this intent, even if the group hasn't "
+        "settled any details yet."
     )
     confidence: float = Field(default=0.7, ge=0, le=1)
     topic_summary: str = Field(

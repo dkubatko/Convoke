@@ -35,7 +35,7 @@ export function EpisodeList({
 function EpisodeRow({ e, requiredSlots }: { e: EpisodeInfo; requiredSlots: SlotSpec[] }) {
   const filled = Object.entries(e.slots ?? {})
   // Missing details only matter while the topic is still being gathered.
-  const gathering = ['candidate', 'tracking', 'converged'].includes(e.status)
+  const gathering = ['candidate', 'converged'].includes(e.status)
   const missing = gathering
     ? requiredSlots.filter((r) => !(r.name in (e.slots ?? {})))
     : []

@@ -144,41 +144,44 @@ def test_fingerprint_differs_on_values():
 LIFECYCLE = dict(
     candidate_ttl=timedelta(minutes=20),
     candidate_unrelated_k=3,
-    tracking_idle=timedelta(hours=12),
+    invested_idle=timedelta(hours=12),
     max_age=timedelta(days=7),
     dedup_window=timedelta(hours=24),
 )
 
 
-def _reason(status, *, opened_h=1.0, idle_m=5.0, streak=0, now=NOW):
+def _reason(status, *, opened_h=1.0, idle_m=5.0, streak=0, has_slots=False, now=NOW):
     return lifecycle_close_reason(
         status,
         now - timedelta(hours=opened_h),
         now - timedelta(minutes=idle_m),
         streak,
+        has_slots,
         now,
         **LIFECYCLE,
     )
 
 
-def test_candidate_expires_fast():
+def test_vague_candidate_expires_fast():
     assert _reason("candidate", idle_m=5) is None
     assert _reason("candidate", idle_m=25) == "expired"
 
 
-def test_candidate_closes_on_unrelated_streak():
+def test_vague_candidate_closes_on_unrelated_streak():
     assert _reason("candidate", streak=2) is None
     assert _reason("candidate", streak=3) == "expired"
 
 
-def test_tracking_survives_candidate_ttl_but_not_idle_limit():
-    assert _reason("tracking", idle_m=25) is None  # would have killed a candidate
-    assert _reason("tracking", idle_m=11 * 60) is None
-    assert _reason("tracking", idle_m=13 * 60) == "expired"
+def test_invested_candidate_earns_the_long_leash():
+    """Gathered substance — not a status label — buys survival: the same
+    candidate that dies at 25 min empty survives for hours with a slot."""
+    assert _reason("candidate", idle_m=25, has_slots=True) is None
+    assert _reason("candidate", idle_m=11 * 60, has_slots=True) is None
+    assert _reason("candidate", idle_m=13 * 60, has_slots=True) == "expired"
 
 
-def test_tracking_unrelated_streak_does_not_close():
-    assert _reason("tracking", streak=10) is None  # streak only closes candidates
+def test_invested_candidate_ignores_unrelated_streak():
+    assert _reason("candidate", streak=10, has_slots=True) is None
 
 
 def test_satisfied_closes_after_dedup_window():
@@ -193,5 +196,5 @@ def test_parked_and_fired_close_only_via_hard_cap():
 
 
 def test_hard_age_cap_applies_to_all():
-    for status in ("candidate", "tracking", "converged", "fired", "satisfied"):
-        assert _reason(status, opened_h=24 * 8, idle_m=1) == "expired"
+    for status in ("candidate", "converged", "fired", "satisfied"):
+        assert _reason(status, opened_h=24 * 8, idle_m=1, has_slots=True) == "expired"

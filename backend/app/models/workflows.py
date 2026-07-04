@@ -23,13 +23,16 @@ EXAMPLES_STATUSES = ("pending", "ready", "fallback")
 FIRE_STATUSES = ("pending", "confirm_wait", "confirmed", "done", "cancelled", "error")
 LIVE_FIRE_STATUSES = ("pending", "confirm_wait", "confirmed")
 
-# Episode lifecycle. "Open" states keep the thread sticky (prefilter bypassed,
-# classifier sees every window); only the pre-fire states count against the
-# open-episode cap — a fired/satisfied episode must never block a genuinely
-# new occurrence from opening.
-EPISODE_STATUSES = ("candidate", "tracking", "converged", "fired", "satisfied", "closed")
-OPEN_EPISODE_STATUSES = ("candidate", "tracking", "converged", "fired", "satisfied")
-PRE_FIRE_EPISODE_STATUSES = ("candidate", "tracking", "converged")
+# Episode lifecycle. One pre-fire state: `candidate` — its leash (idle
+# lifetime, eviction protection) is derived from gathered SUBSTANCE (slots),
+# not from a status label. `converged` is a parked candidate waiting out a
+# rate limit. Active states keep the thread sticky (prefilter bypassed);
+# satisfied is prefilter-gated dedup memory. Only pre-fire states count
+# against the open-episode cap — a fired/satisfied episode must never block
+# a genuinely new occurrence from opening.
+EPISODE_STATUSES = ("candidate", "converged", "fired", "satisfied", "closed")
+OPEN_EPISODE_STATUSES = ("candidate", "converged", "fired", "satisfied")
+PRE_FIRE_EPISODE_STATUSES = ("candidate", "converged")
 EPISODE_CLOSE_REASONS = ("expired", "abandoned", "duplicate", "stale", "done", "superseded")
 
 

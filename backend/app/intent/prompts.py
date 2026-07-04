@@ -22,16 +22,19 @@ You watch a group chat for this intent:
 Details (slots) to extract as the conversation converges:
 {slots_desc}
 
-Conversation, oldest first — lines before the marker are earlier context;
-lines tagged [bot] are your own assistant's messages:
+Conversation, oldest first, lines numbered [m1], [m2], … — lines before the
+marker are earlier context; lines tagged [bot] are your own assistant's
+messages; a reply points to its target as (replying to [mN]), or quotes it
+when the original isn't shown:
 {transcript}
 
-Classify how the NEW messages relate to the intent:
+Classify the NEW messages against the intent:
 - "unrelated": nothing to do with it.
-- "ambiguous": plausibly about it, but not clear enough yet.
-- "active": the group is clearly engaging in it.
+- "ambiguous": plausibly about it — worth watching, but not enough to act on.
+- "clear": unmistakably expresses this intent, even if the group hasn't
+  settled any details yet.
 
-If ambiguous or active, return topic_summary: 1-2 sentences naming this
+If ambiguous or clear, return topic_summary: 1-2 sentences naming this
 specific occurrence (who/what/when), not the intent in general.
 
 Extract slot updates ONLY for values the group actually converged on, not
@@ -50,15 +53,20 @@ Details (slots) to extract as the conversation converges:
 Topics of this intent currently being tracked in this chat:
 {episodes}
 
-Conversation, oldest first — lines before the marker are earlier context;
-lines tagged [bot] are your own assistant's messages:
+Conversation, oldest first, lines numbered [m1], [m2], … — lines before the
+marker are earlier context; lines tagged [bot] are your own assistant's
+messages; a reply points to its target as (replying to [mN]), or quotes it
+when the original isn't shown:
 {transcript}
 
 Classify how the NEW messages relate to the tracked topics:
 - "continues_episode": they continue one of the topics above. For a topic
-  still in progress this includes confirming, refining, or adding details.
-  For a topic marked ALREADY HANDLED, count ONLY acknowledgments, thanks, or
-  restatements that add nothing new. Set episode_ref to that topic's number.
+  still in progress this includes confirming, refining, or adding details —
+  in particular, when an in-progress topic is missing details and the new
+  messages could be supplying them, that is continues_episode, not a new
+  instance. For a topic marked ALREADY HANDLED, count ONLY acknowledgments,
+  thanks, or restatements that add nothing new. Set episode_ref to that
+  topic's number.
 - "new_instance": they start a separate occurrence of the intent — a
   different subject, occasion, or timeframe — OR they bring new or changed
   substance to an already-handled topic. When unsure between the two for a
@@ -103,26 +111,54 @@ def slots_desc(workflow: Workflow) -> str:
     )
 
 
-def render_transcript(context: list[Message], window: list[Message]) -> str:
-    lines = [_render_line(m) for m in context]
-    lines.append("--- new messages to classify ---")
-    lines.extend(_render_line(m) for m in window)
+def render_transcript(
+    context: list[Message], window: list[Message], targets: dict[int, Message] | None = None
+) -> str:
+    # Lines are numbered [m1]… so a reply to a VISIBLE message is a pure
+    # pointer — "(replying to [m3])" — never duplicated content. Replies to
+    # anything off-screen get the full quoted original instead.
+    msgs = [*context, *window]
+    idx = {m.tg_message_id: i + 1 for i, m in enumerate(msgs)}
+    lines: list[str] = []
+    for i, m in enumerate(msgs):
+        if i == len(context):
+            lines.append("--- new messages to classify ---")
+        lines.append(_render_line(m, idx, targets))
     return "\n".join(lines)
 
 
-def _render_line(m: Message) -> str:
+def _render_line(
+    m: Message,
+    idx: dict[int, int] | None = None,
+    targets: dict[int, Message] | None = None,
+) -> str:
+    num = (idx or {}).get(m.tg_message_id)
+    prefix = f"[m{num}] " if num else ""
     if m.source == "self":
         ts = m.sent_at.strftime("%Y-%m-%d %H:%M")
-        return f"[bot] [{ts}]: {m.text}"
-    return render_message(m)
+        line = f"{prefix}[bot] [{ts}]: {m.text}"
+    else:
+        line = prefix + render_message(m)
+    rid = m.reply_to_tg_message_id
+    if not rid:
+        return line
+    j = (idx or {}).get(rid)
+    if j is not None:
+        return f"{line} (replying to [m{j}])"
+    target = (targets or {}).get(rid)
+    if target is None:
+        return line
+    q = (target.text or "").replace("\n", " ")
+    if len(q) > 140:
+        q = q[:140] + "…"
+    return f'{line}\n  ↳ (this replies to {target.sender_name or "Unknown"}, earlier: "{q}")'
 
 
 def render_episodes(episodes: list[IntentEpisode]) -> str:
     lines = []
     for i, ep in enumerate(episodes, start=1):
         state = {
-            "candidate": "possibly starting",
-            "tracking": "in progress",
+            "candidate": "in progress" if ep.slots else "possibly starting",
             "converged": "ready to act (waiting out a rate limit)",
             "fired": "being acted on right now",
             "satisfied": "ALREADY HANDLED",
@@ -137,11 +173,16 @@ def render_episodes(episodes: list[IntentEpisode]) -> str:
     return "\n".join(lines)
 
 
-def build_detect_prompt(workflow: Workflow, context: list[Message], window: list[Message]) -> str:
+def build_detect_prompt(
+    workflow: Workflow,
+    context: list[Message],
+    window: list[Message],
+    quoted: dict[int, Message] | None = None,
+) -> str:
     return DETECT_PROMPT.format(
         trigger_prompt=workflow.trigger_prompt,
         slots_desc=slots_desc(workflow),
-        transcript=render_transcript(context, window),
+        transcript=render_transcript(context, window, quoted),
     )
 
 
@@ -150,12 +191,13 @@ def build_attribution_prompt(
     episodes: list[IntentEpisode],
     context: list[Message],
     window: list[Message],
+    quoted: dict[int, Message] | None = None,
 ) -> str:
     return ATTRIBUTION_PROMPT.format(
         trigger_prompt=workflow.trigger_prompt,
         slots_desc=slots_desc(workflow),
         episodes=render_episodes(episodes),
-        transcript=render_transcript(context, window),
+        transcript=render_transcript(context, window, quoted),
     )
 
 
