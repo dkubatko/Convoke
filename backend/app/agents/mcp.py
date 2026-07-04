@@ -94,9 +94,11 @@ def build_toolset(server: McpServer, extra_headers: dict | None = None) -> MCPTo
     else:
         raise ValueError(f"Unknown MCP transport {server.transport!r}")
     toolset = MCPToolset(transport, id=f"mcp_{server.id}")
-    # sanitize BEFORE prefixing: aggregator tool names may contain characters
-    # the model API rejects (Smithery: 'server:tool')
-    return SanitizedToolset(toolset).prefixed(_safe_prefix(server.name))
+    # sanitize AFTER prefixing so the model-safety pass covers the FINAL name:
+    # aggregator names may contain rejected characters (Smithery:
+    # 'server:tool'), and prefix+name may exceed the 64-char limit
+    # OpenAI-compatible APIs enforce on function names (a 400 mid-run).
+    return SanitizedToolset(toolset.prefixed(_safe_prefix(server.name)))
 
 
 def _safe_prefix(name: str) -> str:
@@ -104,10 +106,19 @@ def _safe_prefix(name: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in name.lower())[:24] or "mcp"
 
 
+MAX_TOOL_NAME_LEN = 64  # OpenAI-compatible hard limit on function names
+
+
 def sanitize_tool_name(name: str) -> str:
-    """OpenAI-compatible tool names must match ^[a-zA-Z0-9_-]+$; aggregators
-    like Smithery expose namespaced names ('server:tool') that violate it."""
-    return "".join(ch if (ch.isascii() and (ch.isalnum() or ch in "_-")) else "_" for ch in name) or "tool"
+    """OpenAI-compatible tool names must match ^[a-zA-Z0-9_-]+$ and stay
+    within 64 chars. Aggregators like Smithery expose namespaced names
+    ('server:tool') that violate the charset, and long names + a server
+    prefix can exceed the length."""
+    safe = (
+        "".join(ch if (ch.isascii() and (ch.isalnum() or ch in "_-")) else "_" for ch in name)
+        or "tool"
+    )
+    return safe[:MAX_TOOL_NAME_LEN]
 
 
 @dataclass
@@ -122,8 +133,13 @@ class SanitizedToolset(WrapperToolset):
         self._to_original.clear()
         for name, tool in (await super().get_tools(ctx)).items():
             safe = sanitize_tool_name(name)
+            # De-collide (truncation can merge two long names) while never
+            # exceeding the cap: swap the tail for a numeric suffix.
+            n = 2
             while safe in out and self._to_original.get(safe) != name:
-                safe += "_"
+                suffix = f"_{n}"
+                safe = sanitize_tool_name(name)[: MAX_TOOL_NAME_LEN - len(suffix)] + suffix
+                n += 1
             self._to_original[safe] = name
             out[safe] = replace(tool, toolset=self, tool_def=replace(tool.tool_def, name=safe))
         return out

@@ -49,6 +49,39 @@ def test_sanitize_tool_name():
     )
     assert sanitize_tool_name("ok_name-123") == "ok_name-123"
     assert sanitize_tool_name("") == "tool"
+    # OpenAI rejects function names over 64 chars with a 400 — mid-run, when
+    # the tool-call transcript is replayed (the DeepWiki incident).
+    assert len(sanitize_tool_name("deepwiki_" + "x" * 80)) == 64
+
+
+def test_sanitized_toolset_caps_length_and_decollides():
+    import asyncio
+    from dataclasses import dataclass
+
+    from app.agents.mcp import MAX_TOOL_NAME_LEN, SanitizedToolset
+
+    @dataclass
+    class FakeToolDef:
+        name: str
+
+    @dataclass
+    class FakeTool:
+        toolset: object
+        tool_def: FakeToolDef
+
+    long_a = "deepwiki_" + "a" * 70 + "_one"
+    long_b = "deepwiki_" + "a" * 70 + "_two"  # same first 64 chars after truncation
+
+    class FakeInner:
+        async def get_tools(self, ctx):
+            return {n: FakeTool(toolset=self, tool_def=FakeToolDef(name=n)) for n in (long_a, long_b)}
+
+    ts = SanitizedToolset(FakeInner())
+    tools = asyncio.run(ts.get_tools(None))
+    names = list(tools)
+    assert all(len(n) <= MAX_TOOL_NAME_LEN for n in names)
+    assert len(set(names)) == 2  # truncation collision resolved
+    assert set(ts._to_original.values()) == {long_a, long_b}  # calls route back
 
 
 async def test_agent_calls_tool_with_illegal_name(db_sessionmaker, monkeypatch):
