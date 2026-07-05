@@ -127,6 +127,13 @@ TUNABLES: list[Tunable] = [
         "How long an in-chat confirmation prompt waits for an answer before it's cancelled.",
         "minutes", 1, 1440, "global", "workflows",
     ),
+    Tunable(
+        "intent_media_grace_seconds", "Media description grace",
+        "When a conversation window contains a photo/voice/video still being described, the "
+        "detector waits up to this long for the description before evaluating — so intent is "
+        "judged on what the media shows, not a placeholder.",
+        "seconds", 0, 900, "global", "workflows",
+    ),
 ]
 
 _BY_KEY = {t.key: t for t in TUNABLES}

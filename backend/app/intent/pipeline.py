@@ -50,6 +50,7 @@ from app.intent.prompts import (
     build_recheck_prompt,
 )
 from app.intent.schemas import AttributionVerdict, DetectVerdict, RecheckVerdict
+from app.media.render import message_body
 from app.intent.state import (
     MIN_FIRE_CONFIDENCE,
     apply_slot_updates,
@@ -373,6 +374,19 @@ class IntentSweeper:
             return None  # window still open
         window = unevaluated[-max_win:]
 
+        # Media in the window still being described: hold the window briefly
+        # so the classifier judges the description, not a pending placeholder.
+        # Past the grace it evaluates anyway — attribution/recheck refine later.
+        grace = self.settings.intent_media_grace_seconds
+        for m in window:
+            att = m.attachment
+            if (
+                att is not None
+                and att.status == "pending"
+                and (now - as_utc(m.sent_at)).total_seconds() < grace
+            ):
+                return None
+
         # Replies inherit their target's topicality: resolve replied-to
         # messages once — combined with the reply for prefilter scoring
         # ("cool!" replying to "let's hike in Sunnyvale" must score like the
@@ -400,9 +414,10 @@ class IntentSweeper:
 
         def gate_text(m: Message) -> str:
             target = reply_targets.get(m.reply_to_tg_message_id or 0)
-            if target is not None and target.text:
-                return f"{target.text}\n{m.text or ''}"
-            return m.text or ""
+            body = message_body(m)
+            if target is not None and message_body(target):
+                return f"{message_body(target)}\n{body}"
+            return body
 
         # Stickiness (bypassing the prefilter) exists so an ACTIVE negotiation
         # never loses a weak-looking follow-up ("yes, 7 works"). A satisfied

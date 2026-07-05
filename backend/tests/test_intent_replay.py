@@ -26,6 +26,7 @@ from app.models import (
     IntentCursor,
     IntentEpisode,
     Message,
+    MessageAttachment,
     PendingFire,
     Workflow,
     WorkflowAssignment,
@@ -682,3 +683,82 @@ async def test_classifier_error_keeps_cursor_and_throttle_budget(db_sessionmaker
     async with db_sessionmaker() as s:
         cursor = (await s.execute(select(IntentCursor))).scalar_one()
         assert cursor.last_tg_message_id == 1
+
+
+# ---------- media: descriptions drive intent; pending media holds the window ----------
+
+def _media_msg(chat_id, tg_id, at, status="described", description=None, kind="photo"):
+    m = _msg(chat_id, tg_id, "", at)
+    m.attachment = MessageAttachment(
+        chat_id=chat_id, tg_message_id=tg_id, kind=kind, file_id="f",
+        file_unique_id=f"u{tg_id}", status=status, description=description,
+    )
+    return m
+
+
+async def test_media_described_photo_fires_workflow(db_sessionmaker):
+    """A photo whose description reads like the trigger passes the embedding
+    prefilter and the classifier sees the annotated line — the movie-tickets
+    case: intent from an image, no text typed."""
+    script = ScriptedModel()
+    _, chat, _ = await _setup(db_sessionmaker)
+    sweeper = _sweeper(db_sessionmaker, script)
+
+    await _add(
+        db_sessionmaker,
+        _media_msg(chat.id, 1, at=NOW - timedelta(minutes=2),
+                   description="two movie tickets for Dune — let's schedule dinner before, 7pm Friday"),
+    )
+    script.push(detect(summary="movie + dinner Friday"))
+    assert await sweeper.sweep(now=NOW) == 1
+    assert len(await _fires(db_sessionmaker)) == 1
+    assert "[photo: two movie tickets" in script.prompts[0]  # annotation reached the classifier
+
+
+async def test_media_pending_description_holds_window_within_grace(db_sessionmaker):
+    """While a photo is still being described (and young), the window stays
+    open — no LLM call, cursor not advanced. Once described, it evaluates on
+    the description."""
+    script = ScriptedModel()
+    _, chat, _ = await _setup(db_sessionmaker)
+    sweeper = _sweeper(db_sessionmaker, script)
+
+    await _add(db_sessionmaker,
+               _media_msg(chat.id, 1, at=NOW - timedelta(seconds=60), status="pending"))
+    # Inside the 120s grace: held — an LLM call here would fail (nothing scripted).
+    assert await sweeper.sweep(now=NOW) == 0
+    async with db_sessionmaker() as s:
+        assert (await s.execute(select(IntentCursor))).scalar_one().last_tg_message_id == 0
+
+    # Description lands (the media loop's job) → next sweep evaluates it.
+    async with db_sessionmaker() as s:
+        att = (await s.execute(select(MessageAttachment))).scalar_one()
+        att.status = "described"
+        att.description = "let's schedule dinner — restaurant menu photo"
+        await s.commit()
+    script.push(detect(summary="dinner"))
+    assert await sweeper.sweep(now=NOW + timedelta(seconds=30)) == 1
+    assert "restaurant menu photo" in script.prompts[0]
+
+
+async def test_media_grace_expiry_releases_window(db_sessionmaker):
+    """A description that never lands can't stall intent forever: past the
+    grace the window is released into the normal pipeline. The bare pending
+    placeholder scores nothing against the trigger, so the prefilter
+    suppresses it for FREE (no verdict scripted — an LLM call would fail) and
+    the cursor moves on."""
+    script = ScriptedModel()
+    _, chat, _ = await _setup(db_sessionmaker)
+    sweeper = _sweeper(db_sessionmaker, script, intent_media_grace_seconds=120)
+
+    await _add(db_sessionmaker,
+               _media_msg(chat.id, 1, at=NOW - timedelta(seconds=60), status="pending"))
+    assert await sweeper.sweep(now=NOW) == 0  # held: young + pending
+    async with db_sessionmaker() as s:
+        assert (await s.execute(select(IntentCursor))).scalar_one().last_tg_message_id == 0
+
+    assert await sweeper.sweep(now=NOW + timedelta(seconds=300)) == 0  # grace expired
+    async with db_sessionmaker() as s:
+        # Window consumed (prefilter skip) — the sweeper is not stuck on it.
+        assert (await s.execute(select(IntentCursor))).scalar_one().last_tg_message_id == 1
+    assert script.prompts == []  # suppressed without spending the model
