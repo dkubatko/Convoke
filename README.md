@@ -32,6 +32,11 @@ models; nothing leaves your machine unless you point it there.
 - 🧠 **Memory cortex** — every message is stored, chunked into conversation segments, and
   embedded locally (`multilingual-e5-small`, pgvector). The agent searches full history
   semantically, keeps distilled notes, and always sees recent messages verbatim.
+- 📷 **Media understanding** — photos, voice notes, videos, and stickers become searchable
+  text at ingest: a vision model describes images (visible text quoted verbatim), a
+  whisper-compatible endpoint transcribes audio, video falls back to thumbnail + sampled
+  frames + transcript. Bytes are never stored — only the descriptions. A photo of movie
+  tickets can trigger a "schedule an event" workflow by itself.
 - 💬 **Answers on mention / reply** — @mention the bot or reply to it; it responds with
   full memory and the chat's tools. Powered by [Pydantic AI](https://ai.pydantic.dev).
 - ⚡ **Intent workflows** — plain-text triggers evaluated continuously and *cheaply*:
@@ -41,10 +46,13 @@ models; nothing leaves your machine unless you point it there.
 - 🔌 **MCP tools** — register streamable-HTTP or stdio [MCP](https://modelcontextprotocol.io)
   servers, enable them per chat; OAuth-protected servers connect with a one-time browser
   sign-in (discovery, PKCE, automatic token refresh).
-- 🎛️ **Bring your own models** — any OpenAI-compatible endpoint (Ollama, LM Studio,
-  OpenRouter, OpenAI…), split by role: a cheap `intent` classifier and a strong `agent` model.
+- 🎛️ **Bring your own models** — a library of OpenAI-compatible endpoints (Ollama, LM
+  Studio, OpenRouter, OpenAI…) with auto-detected capabilities, assigned per role:
+  `agent`, a cheap `intent` classifier, `vision`, `transcription`, and optional
+  video-native.
 - 🕰️ **History import** — bots can't read messages sent before they joined, so Convoke
-  ingests a Telegram Desktop export, validated against live history before it's trusted.
+  ingests a Telegram Desktop export (bare JSON or the full ZIP with media), validated
+  against live history before it's trusted.
 
 ## Quick start
 
@@ -56,9 +64,10 @@ open http://localhost:8080
 
 Sign in with `CONVOKE_OPERATOR_PASSWORD`, then:
 
-1. **Models** — point the `agent` role (and optionally `intent`) at an OpenAI-compatible
-   endpoint. From Docker, a service on your host is `http://host.docker.internal:11434/v1`
-   (Ollama example).
+1. **Models** — connect an OpenAI-compatible endpoint to the library (capabilities are
+   probed on test), then assign it to the `agent` role — and optionally `intent`,
+   `vision`, and `transcription` for media understanding. From Docker, a service on
+   your host is `http://host.docker.internal:11434/v1` (Ollama example).
 2. **Bots** — create a bot with [@BotFather](https://t.me/BotFather), paste its token.
    **Important:** run `/setprivacy` → **Disable**, or the bot only sees mentions and its
    memory stays empty. Convoke warns you until this is right.
