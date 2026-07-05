@@ -33,6 +33,16 @@ class Settings(BaseSettings):
 
     imports_dir: str = "/data/imports"
 
+    # Media understanding. Bytes are downloaded transiently for description
+    # and deleted — only text (descriptions/transcripts) persists.
+    media_max_download_bytes: int = 20 * 2**20  # Bot API getFile ceiling
+    media_describe_batch: int = 4  # attachments processed per tick
+    media_description_max_chars: int = 400  # keep chunk vectors text-dominated
+    # Hold an intent window open this long while media in it is still being
+    # described, so the classifier sees descriptions, not placeholders.
+    intent_media_grace_seconds: int = 120
+    video_sample_frames: int = 3
+
     # Agent context budget in characters (~4 chars per token).
     context_char_budget: int = 24000
     agent_concurrency: int = 4

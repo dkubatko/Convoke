@@ -17,6 +17,7 @@ from app.core.db import (
 from app.agents.loop import AgentLoop
 from app.intent.executor import FireExecutor
 from app.intent.pipeline import IntentSweeper
+from app.media.loop import MediaLoop
 from app.memory.loop import MemoryLoop
 from app.memory.runtime import get_embedder
 from app.scheduler.loop import ScheduleLoop
@@ -81,6 +82,7 @@ async def main() -> None:
             tg.create_task(Gateway(sessionmaker).run(), name="gateway")
             tg.create_task(InboxConsumer(sessionmaker).run(), name="inbox-consumer")
             tg.create_task(MemoryLoop(sessionmaker, embedder).run(), name="memory-loop")
+            tg.create_task(MediaLoop(sessionmaker).run(), name="media-loop")
             tg.create_task(AgentLoop(sessionmaker, embedder, limiter).run(), name="agent-loop")
             tg.create_task(sweep_forever(), name="intent-sweeper")
             tg.create_task(ScheduleLoop(sessionmaker).run(), name="schedule-loop")
