@@ -11,6 +11,7 @@ classifier can read the dialogue ("the bot already confirmed 8pm; the user is
 thanking it") — bot messages are never window/prefilter input, context only.
 """
 
+from app.media.render import message_body
 from app.memory.chunker import render_message
 from app.models import IntentEpisode, Message, Workflow
 from app.intent.state import render_slots
@@ -148,7 +149,7 @@ def _render_line(
     target = (targets or {}).get(rid)
     if target is None:
         return line
-    q = (target.text or "").replace("\n", " ")
+    q = message_body(target).replace("\n", " ")
     if len(q) > 140:
         q = q[:140] + "…"
     return f'{line}\n  ↳ (this replies to {target.sender_name or "Unknown"}, earlier: "{q}")'

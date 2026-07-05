@@ -6,7 +6,7 @@ from aiogram.types import Message as TgMessage
 from aiogram.types import Update
 from sqlalchemy import select
 
-from app.models import AuthNonce, Bot, Chat, Message
+from app.models import AgentRun, AuthNonce, Bot, Chat, Message, MessageAttachment
 from app.telegram.handlers import handle_update
 
 CHAT_ID = -1001234567890
@@ -229,6 +229,146 @@ async def test_group_migration_rewrites_chat_id(db_sessionmaker, bot_row):
         assert chat.status == "authorized"
         msgs = (await s.execute(select(Message).where(Message.source == "live"))).scalars().all()
         assert any(m.text == "before migration" for m in msgs)  # memory followed
+
+
+# --- media capture ---
+
+PHOTO = [
+    {"file_id": "ph-small", "file_unique_id": "u-small", "width": 90, "height": 51, "file_size": 1000},
+    {"file_id": "ph-big", "file_unique_id": "u-big", "width": 800, "height": 450, "file_size": 50000},
+]
+VOICE = {"file_id": "vc-1", "file_unique_id": "u-vc-1", "duration": 12, "mime_type": "audio/ogg", "file_size": 9000}
+
+
+def media_update(update_id: int, message_id: int, *, caption=None, sender=None, reply_to=None, **media) -> Update:
+    payload = {
+        "message_id": message_id,
+        "date": 1_780_000_100,
+        "chat": GROUP,
+        "from": sender or ADMIN,
+        **media,
+    }
+    if caption is not None:
+        payload["caption"] = caption
+    if reply_to is not None:
+        payload["reply_to_message"] = reply_to
+    return upd(update_id, message=payload)
+
+
+async def authorize(db_sessionmaker, fake, bot_row):
+    await run_update(db_sessionmaker, fake, bot_row, join_update())
+    async with db_sessionmaker() as s:
+        nonce = (await s.execute(select(AuthNonce))).scalar_one()
+    await run_update(db_sessionmaker, fake, bot_row, callback_update(2, nonce.nonce))
+
+
+async def test_bare_photo_creates_message_and_attachment(db_sessionmaker, bot_row):
+    fake = FakeBot(member_status="administrator")
+    await authorize(db_sessionmaker, fake, bot_row)
+    await run_update(db_sessionmaker, fake, bot_row, media_update(3, 20, photo=PHOTO))
+
+    async with db_sessionmaker() as s:
+        row = (await s.execute(select(Message).where(Message.tg_message_id == 20))).scalar_one()
+        assert row.text == ""
+        att = (await s.execute(select(MessageAttachment))).scalar_one()
+        assert att.kind == "photo"
+        assert att.file_id == "ph-big"  # largest rendition
+        assert att.width == 800
+        assert att.status == "pending"
+        assert att.chat_id == row.chat_id
+        assert att.tg_message_id == 20
+
+
+async def test_captioned_photo_keeps_caption_and_attachment(db_sessionmaker, bot_row):
+    fake = FakeBot(member_status="administrator")
+    await authorize(db_sessionmaker, fake, bot_row)
+    await run_update(
+        db_sessionmaker, fake, bot_row, media_update(3, 20, caption="picnic!", photo=PHOTO)
+    )
+
+    async with db_sessionmaker() as s:
+        row = (await s.execute(select(Message).where(Message.tg_message_id == 20))).scalar_one()
+        assert row.text == "picnic!"
+        assert row.attachment is not None and row.attachment.kind == "photo"
+
+
+async def test_media_replay_is_idempotent(db_sessionmaker, bot_row):
+    fake = FakeBot(member_status="administrator")
+    await authorize(db_sessionmaker, fake, bot_row)
+    update = media_update(3, 20, photo=PHOTO)
+    await run_update(db_sessionmaker, fake, bot_row, update)
+    await run_update(db_sessionmaker, fake, bot_row, update)  # crash-replay
+
+    async with db_sessionmaker() as s:
+        atts = (await s.execute(select(MessageAttachment))).scalars().all()
+        assert len(atts) == 1
+
+
+async def test_voice_message_captured(db_sessionmaker, bot_row):
+    fake = FakeBot(member_status="administrator")
+    await authorize(db_sessionmaker, fake, bot_row)
+    await run_update(db_sessionmaker, fake, bot_row, media_update(3, 20, voice=VOICE))
+
+    async with db_sessionmaker() as s:
+        att = (await s.execute(select(MessageAttachment))).scalar_one()
+        assert att.kind == "voice"
+        assert att.duration_s == 12
+        assert att.mime == "audio/ogg"
+
+
+async def test_non_image_document_still_dropped(db_sessionmaker, bot_row):
+    fake = FakeBot(member_status="administrator")
+    await authorize(db_sessionmaker, fake, bot_row)
+    doc = {"file_id": "doc-1", "file_unique_id": "u-doc-1", "mime_type": "application/pdf", "file_name": "x.pdf"}
+    await run_update(db_sessionmaker, fake, bot_row, media_update(3, 20, document=doc))
+
+    async with db_sessionmaker() as s:
+        rows = (await s.execute(select(Message).where(Message.source == "live"))).scalars().all()
+        assert rows == []
+
+
+async def test_caption_edit_updates_text_keeps_attachment(db_sessionmaker, bot_row):
+    fake = FakeBot(member_status="administrator")
+    await authorize(db_sessionmaker, fake, bot_row)
+    await run_update(db_sessionmaker, fake, bot_row, media_update(3, 20, caption="picnic!", photo=PHOTO))
+
+    edited = upd(
+        4,
+        edited_message={
+            "message_id": 20,
+            "date": 1_780_000_100,
+            "edit_date": 1_780_000_200,
+            "chat": GROUP,
+            "from": ADMIN,
+            "photo": PHOTO,
+            "caption": "picnic at the park!",
+        },
+    )
+    await run_update(db_sessionmaker, fake, bot_row, edited)
+
+    async with db_sessionmaker() as s:
+        row = (await s.execute(select(Message).where(Message.tg_message_id == 20))).scalar_one()
+        assert row.text == "picnic at the park!"
+        att = (await s.execute(select(MessageAttachment))).scalar_one()
+        assert att.status == "pending"  # untouched by the edit
+
+
+async def test_bare_photo_reply_to_bot_triggers_agent_run(db_sessionmaker, bot_row):
+    fake = FakeBot(member_status="administrator")
+    await authorize(db_sessionmaker, fake, bot_row)
+    bot_msg = {
+        "message_id": fake.sent[0].message_id,
+        "date": 1_780_000_050,
+        "chat": GROUP,
+        "from": BOT_USER,
+        "text": "the auth prompt",
+    }
+    await run_update(db_sessionmaker, fake, bot_row, media_update(3, 20, photo=PHOTO, reply_to=bot_msg))
+
+    async with db_sessionmaker() as s:
+        run = (await s.execute(select(AgentRun))).scalar_one()
+        assert run.trigger == "reply"
+        assert run.request_text == "[photo — description pending]"
 
 
 async def test_edited_message_updates_text(db_sessionmaker, bot_row):

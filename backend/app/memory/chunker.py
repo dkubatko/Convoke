@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.media.render import message_body
 from app.models import Chunk, ChunkState, Message
 
 
@@ -25,7 +26,7 @@ class Segment:
 
 def render_message(m: Message) -> str:
     ts = m.sent_at.strftime("%Y-%m-%d %H:%M")
-    return f"{m.sender_name or 'Unknown'} [{ts}]: {m.text}"
+    return f"{m.sender_name or 'Unknown'} [{ts}]: {message_body(m)}"
 
 
 def render_segment(seg: Segment, reply_targets: dict[int, Message] | None = None) -> str:
@@ -40,8 +41,8 @@ def render_segment(seg: Segment, reply_targets: dict[int, Message] | None = None
         rid = m.reply_to_tg_message_id
         if rid and rid not in present:
             target = (reply_targets or {}).get(rid)
-            if target is not None and target.text:
-                q = target.text.replace("\n", " ")
+            if target is not None and message_body(target):
+                q = message_body(target).replace("\n", " ")
                 if len(q) > 120:
                     q = q[:120] + "…"
                 line += f'\n  ↳ (replies to {target.sender_name or "Unknown"}: "{q}")'

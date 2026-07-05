@@ -10,9 +10,10 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy import Integer
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import JSON
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
@@ -20,6 +21,8 @@ from app.models.base import Base
 BOT_STATUSES = ("active", "disabled", "error")
 CHAT_STATUSES = ("pending_auth", "authorized", "left")
 MESSAGE_SOURCES = ("live", "import", "self")
+ATTACHMENT_KINDS = ("photo", "video", "voice", "video_note", "sticker", "image_document", "audio")
+ATTACHMENT_STATUSES = ("pending", "described", "failed", "skipped")
 
 JSONVariant = JSON().with_variant(JSONB(), "postgresql")
 
@@ -116,6 +119,59 @@ class Message(Base):
     import_job_id: Mapped[int | None] = mapped_column(
         ForeignKey("import_jobs.id", ondelete="SET NULL"), nullable=True
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # Loaded eagerly (selectin) so every renderer can annotate media without
+    # signature changes; the vast majority of messages have no attachment.
+    attachment: Mapped["MessageAttachment | None"] = relationship(
+        lazy="selectin", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class MessageAttachment(Base):
+    """The media item carried by a message (Telegram: at most one per message;
+    albums arrive as one message per item, linked by media_group_id).
+
+    Bytes are never persisted — the understanding worker downloads them
+    transiently and stores only text (description/transcript). file_id lets
+    live media be re-fetched from Telegram for future re-description;
+    import-sourced media has file_id=NULL (describe-then-discard)."""
+
+    __tablename__ = "message_attachments"
+    __table_args__ = (
+        Index("ix_attachments_chat_msg", "chat_id", "tg_message_id"),
+        Index("ix_attachments_pending", "id", postgresql_where="status = 'pending'"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), unique=True
+    )
+    # Denormalized so the worker scans and view-by-tg-id lookups skip a join.
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    tg_message_id: Mapped[int] = mapped_column(BigInteger)
+    kind: Mapped[str] = mapped_column(Text)  # ATTACHMENT_KINDS
+    file_id: Mapped[str | None] = mapped_column(Text, nullable=True)  # NULL: import-sourced
+    # Import-sourced media: file location relative to imports_dir, held only
+    # until described, then deleted (describe-then-discard).
+    import_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_unique_id: Mapped[str] = mapped_column(Text)
+    mime: Mapped[str | None] = mapped_column(Text, nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    thumb_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_group_id: Mapped[str | None] = mapped_column(Text, nullable=True)  # album id, opaque
+    sticker_emoji: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)  # vision output
+    transcript: Mapped[str | None] = mapped_column(Text, nullable=True)  # transcription output
+    status: Mapped[str] = mapped_column(Text, default="pending")  # ATTACHMENT_STATUSES
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    described_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
