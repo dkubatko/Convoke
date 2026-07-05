@@ -7,7 +7,7 @@ from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 
 from aiogram import Bot as AiogramBot
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from pydantic_ai import Agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -19,6 +19,7 @@ from app.agents.tools import AGENT_TOOLS
 from app.intent.episodes import finish_run_episode
 from app.memory.embeddings import Embedder
 from app.models import AgentRun, Bot, Chat
+from app.telegram.format import to_telegram_html
 from app.telegram.limiter import SendLimiter
 from app.telegram.sender import send_and_persist
 
@@ -32,7 +33,11 @@ You are {bot_name} (@{bot_username}), an assistant participating in the Telegram
 group chat "{chat_title}". {invocation_line}
 
 - Answer directly and conversationally; this is a group chat, keep it brief.
-- Write plain text only: no markdown, no HTML tags, no code fences.
+- Format for readability with Telegram HTML where it helps: <b>bold</b>, \
+<i>italic</i>, <code>inline code</code>, <pre>code block</pre>, \
+<a href="https://…">link</a>, <blockquote>quote</blockquote>. Nothing else — \
+no markdown (no **, no #, no ``` fences), no other tags; write lists as plain \
+lines starting with •.
 - The chat's full history is your memory: use search_chat_history for anything \
 older than the recent messages shown, recall for stored notes, and remember to \
 persist durable facts (decisions, preferences, recurring context) worth keeping.
@@ -208,14 +213,21 @@ async def execute_run(
 
 
 async def _send(session, bot, chat, text: str, reply_to: int | None = None, thread_id: int | None = None):
-    # Agent output is untrusted for HTML parse mode — escape it (renders as
-    # the original characters, but can never break parsing).
+    # Agent output is untrusted for HTML parse mode — rebuild it so the
+    # whitelisted formatting tags pass through balanced and everything else
+    # renders literally. If Telegram still rejects the markup, fall back to
+    # fully escaped plain text: the reply must always land.
+    formatted = to_telegram_html(text)
     try:
         return await send_and_persist(
-            session, bot, chat, html.escape(text), reply_to_message_id=reply_to, thread_id=thread_id
+            session, bot, chat, formatted, reply_to_message_id=reply_to, thread_id=thread_id
         )
     except TelegramRetryAfter as e:
         await asyncio.sleep(e.retry_after)
+        return await send_and_persist(
+            session, bot, chat, formatted, reply_to_message_id=reply_to, thread_id=thread_id
+        )
+    except TelegramBadRequest:
         return await send_and_persist(
             session, bot, chat, html.escape(text), reply_to_message_id=reply_to, thread_id=thread_id
         )

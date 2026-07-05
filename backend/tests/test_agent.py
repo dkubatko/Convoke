@@ -263,3 +263,33 @@ async def test_past_workflow_actions_tool(db_sessionmaker, bot_row):
     deps.workflow_id = None
     out = await past_workflow_actions(SimpleNamespace(deps=deps))
     assert "not triggered by a workflow" in out
+
+
+async def test_agent_reply_formatting_reaches_telegram(db_sessionmaker, bot_row, monkeypatch):
+    """Whitelisted HTML passes through to the send; anything else renders
+    literally — the reply can never 400 on Telegram's HTML parser."""
+    from pydantic_ai.models.test import TestModel
+
+    import app.agents.runtime as runtime
+
+    monkeypatch.setattr(
+        runtime, "build_model",
+        lambda provider: TestModel(
+            call_tools=[],
+            custom_output_text='<b>Dune</b> scores <i>8.0</i><div>raw</div><b>unclosed',
+        ),
+    )
+    fake = AgentFakeBot()
+    await authorize_chat(db_sessionmaker, fake, bot_row)
+    await run_update(db_sessionmaker, fake, bot_row, message_update(3, 20, "@convoke_bot rate dune"))
+    async with db_sessionmaker() as s:
+        await add_agent_model(s)
+        await s.commit()
+        run_id = (await s.execute(select(AgentRun.id))).scalar_one()
+
+    await execute_run(db_sessionmaker, FakeEmbedder(), SendLimiter(), fake, run_id)
+
+    sent = fake.sent[-1].text
+    assert "<b>Dune</b>" in sent and "<i>8.0</i>" in sent
+    assert "&lt;div&gt;" in sent  # disallowed tag renders literally
+    assert sent.endswith("</b>")  # unclosed tag repaired
