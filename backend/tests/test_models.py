@@ -135,3 +135,16 @@ async def test_probe_transcription_unreachable_fails():
     ok, detail = await probe_transcription("http://127.0.0.1:9/v1", "whisper", None)
     assert not ok
     assert detail
+
+
+async def test_evict_model_forces_fresh_client():
+    from app.agents.models import build_model, evict_model
+    from app.models import ConnectedModel
+
+    provider = ConnectedModel(
+        name="m", base_url="http://unused", model_name="test", api_key_encrypted=None
+    )
+    first = build_model(provider)
+    assert build_model(provider) is first  # cached
+    evict_model(provider)
+    assert build_model(provider) is not first  # poisoned client replaced

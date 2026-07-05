@@ -59,6 +59,17 @@ def build_model(provider: ConnectedModel) -> OpenAIChatModel:
     return cached
 
 
+def evict_model(provider: ConnectedModel) -> None:
+    """Drop the cached client for this endpoint after a failed model call.
+    A poisoned connection pool (seen live: every vision call failing with
+    'Connection error' while other endpoints on the same host worked)
+    otherwise survives every retry until the worker restarts. The evicted
+    client is left to the GC — a rare, bounded leak, same trade-off as the
+    cache-size clear above."""
+    api_key = decrypt(provider.api_key_encrypted) if provider.api_key_encrypted else "unused"
+    _model_cache.pop((provider.base_url, provider.model_name, api_key), None)
+
+
 async def probe_endpoint(base_url: str, model_name: str, api_key: str | None) -> tuple[bool, str]:
     """Fire one tiny completion at an endpoint to prove it's real before the
     operator saves it. Returns (ok, human-readable detail)."""

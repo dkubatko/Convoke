@@ -30,7 +30,7 @@ from pydantic_ai import Agent
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.models import ProviderNotConfigured, build_model, get_provider
+from app.agents.models import ProviderNotConfigured, build_model, evict_model, get_provider
 from app.core.config import get_settings
 from app.core.runtime_settings import effective_settings, load_chat_overrides
 from app.intent.episodes import (
@@ -826,5 +826,6 @@ class IntentSweeper:
             result = await agent.run(prompt)
         except Exception:  # noqa: BLE001 — classifier failures must not stop the sweep
             log.exception("intent classification failed")
+            evict_model(provider)  # a poisoned pooled client must not survive the retry
             return None
         return result.output

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.context import assemble_context
 from app.agents.deps import AgentDeps
 from app.agents.mcp import toolsets_for_chat
-from app.agents.models import ProviderNotConfigured, build_model, get_provider
+from app.agents.models import ProviderNotConfigured, build_model, evict_model, get_provider
 from app.agents.tools import AGENT_TOOLS
 from app.intent.episodes import finish_run_episode
 from app.memory.embeddings import Embedder
@@ -194,6 +194,7 @@ async def execute_run(
             await session.commit()
     except Exception as e:  # noqa: BLE001 — any failure ends the run cleanly
         log.exception("agent run %s failed", run_id)
+        evict_model(provider)  # a poisoned pooled client must not survive the retry
         async with sessionmaker() as session:
             run = await session.get(AgentRun, run_id)
             if run is not None and run.status == "running":

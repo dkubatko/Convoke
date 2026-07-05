@@ -21,7 +21,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.models import ProviderNotConfigured, get_provider
+from app.agents.models import ProviderNotConfigured, evict_model, get_provider
 from app.core.config import get_settings
 from app.core.crypto import decrypt
 from app.core.runtime_settings import effective_settings
@@ -167,6 +167,11 @@ class MediaLoop:
                 if att is None:
                     continue  # message deleted mid-flight
                 if isinstance(result, BaseException):
+                    # A failed call may have poisoned the cached client's
+                    # connection pool — evict so the retry gets a fresh one.
+                    for p in (vision, transcription, video):
+                        if p is not None:
+                            evict_model(p)
                     att.attempts += 1
                     att.last_attempt_at = now
                     att.error = f"{type(result).__name__}: {str(result)[:300]}"
