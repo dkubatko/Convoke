@@ -10,6 +10,8 @@ cryptography Telegram doesn't offer.
 
 import asyncio
 import logging
+import shutil
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -19,12 +21,23 @@ import ijson
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models import Chat, Chunk, ChunkState, ImportJob, Message
+from app.core.config import get_settings
+from app.models import Chat, Chunk, ChunkState, ImportJob, Message, MessageAttachment
 
 log = logging.getLogger("convoke.import")
 
 INSERT_BATCH = 500
 MIN_LIVE_FOR_OVERLAP_CHECK = 20
+
+# Telegram export media_type → attachment kind ("photo" arrives as a separate key).
+_EXPORT_MEDIA_KINDS = {
+    "video_file": "video",
+    "animation": "video",
+    "video_message": "video_note",
+    "voice_message": "voice",
+    "audio_file": "audio",
+    "sticker": "sticker",
+}
 
 
 @dataclass
@@ -32,6 +45,17 @@ class ExportMeta:
     name: str | None = None
     type: str | None = None
     chat_id: int | None = None
+
+
+@dataclass
+class ExportMedia:
+    kind: str
+    path: str | None  # relative to the export root; None = not included in export
+    mime: str | None = None
+    duration_s: int | None = None
+    width: int | None = None
+    height: int | None = None
+    sticker_emoji: str | None = None
 
 
 @dataclass
@@ -43,6 +67,7 @@ class ExportMessage:
     sent_at: datetime
     thread_id: int | None = None
     reply_to_tg_message_id: int | None = None
+    media: ExportMedia | None = None
 
 
 @dataclass
@@ -73,11 +98,50 @@ def parse_sender_id(from_id) -> int | None:
     return int(digits) if digits else None
 
 
+def _export_file_path(raw) -> str | None:
+    """Export values are relative paths — or a '(File not included. …)'
+    placeholder when media wasn't exported."""
+    if isinstance(raw, str) and raw and not raw.startswith("("):
+        return raw
+    return None
+
+
+def parse_export_media(item: dict) -> ExportMedia | None:
+    duration = item.get("duration_seconds")
+    duration = int(duration) if isinstance(duration, (int, float, str)) and str(duration).isdigit() else None
+    if "photo" in item:
+        return ExportMedia(
+            kind="photo",
+            path=_export_file_path(item.get("photo")),
+            width=item.get("width"),
+            height=item.get("height"),
+        )
+    if "file" in item:
+        media_type = item.get("media_type")
+        mime = item.get("mime_type")
+        kind = _EXPORT_MEDIA_KINDS.get(media_type)
+        if kind is None:
+            if not (mime or "").startswith("image/"):
+                return None  # generic documents stay out of scope
+            kind = "image_document"
+        return ExportMedia(
+            kind=kind,
+            path=_export_file_path(item.get("file")),
+            mime=mime,
+            duration_s=duration,
+            width=item.get("width"),
+            height=item.get("height"),
+            sticker_emoji=item.get("sticker_emoji"),
+        )
+    return None
+
+
 def parse_export_message(item: dict) -> ExportMessage | None:
     if item.get("type") != "message":
         return None
     text = flatten_text(item.get("text", ""))
-    if not text.strip():
+    media = parse_export_media(item)
+    if not text.strip() and media is None:
         return None
     try:
         msg_id = int(item["id"])
@@ -97,6 +161,7 @@ def parse_export_message(item: dict) -> ExportMessage | None:
         text=text,
         sent_at=sent_at,
         reply_to_tg_message_id=int(reply_to) if isinstance(reply_to, int) else None,
+        media=media,
     )
 
 
@@ -220,11 +285,33 @@ def validate_export(
     return result
 
 
+def job_media_dir(job_id: int) -> Path:
+    return Path(get_settings().imports_dir) / f"job_{job_id}_media"
+
+
+def extract_export_zip(path: Path, job_id: int) -> tuple[Path, Path]:
+    """Extract a Telegram export ZIP into the job's media dir; returns
+    (result.json path, export root the media paths are relative to).
+    ZipFile.extract sanitizes absolute/traversal member names."""
+    root = job_media_dir(job_id)
+    with zipfile.ZipFile(path) as z:
+        z.extractall(root)
+    candidates = sorted(root.rglob("result.json"), key=lambda p: len(p.parts))
+    if not candidates:
+        raise ValueError("ZIP contains no result.json — not a Telegram export")
+    return candidates[0], candidates[0].parent
+
+
 async def run_import(
     sessionmaker: async_sessionmaker[AsyncSession], job_id: int, path: Path
 ) -> None:
+    ok = False
     try:
-        await _run_import(sessionmaker, job_id, path)
+        if await asyncio.to_thread(zipfile.is_zipfile, path):
+            json_path, media_root = await asyncio.to_thread(extract_export_zip, path, job_id)
+        else:
+            json_path, media_root = path, None
+        ok = await _run_import(sessionmaker, job_id, json_path, media_root)
     except Exception as e:  # noqa: BLE001 — job must record its own failure
         log.exception("import job %s failed", job_id)
         async with sessionmaker() as session:
@@ -236,11 +323,16 @@ async def run_import(
                 await session.commit()
     finally:
         path.unlink(missing_ok=True)
+        if not ok:  # rejected/failed: nothing references the extracted media
+            await asyncio.to_thread(shutil.rmtree, job_media_dir(job_id), True)
 
 
 async def _run_import(
-    sessionmaker: async_sessionmaker[AsyncSession], job_id: int, path: Path
-) -> None:
+    sessionmaker: async_sessionmaker[AsyncSession],
+    job_id: int,
+    path: Path,
+    media_root: Path | None,
+) -> bool:
     async with sessionmaker() as session:
         job = await session.get(ImportJob, job_id)
         chat = await session.get(Chat, job.chat_id)
@@ -256,7 +348,7 @@ async def _run_import(
             job.status = "rejected"
             job.finished_at = datetime.now(timezone.utc)
             await session.commit()
-            return
+            return False
         job.status = "ingesting"
         await session.commit()
 
@@ -272,6 +364,7 @@ async def _run_import(
 
     total = ingested = 0
     batch: list[Message] = []
+    referenced_files: set[Path] = set()
 
     async def flush(batch: list[Message]) -> None:
         async with sessionmaker() as session:
@@ -287,25 +380,33 @@ async def _run_import(
             continue
         existing_ids.add(m.tg_message_id)
         ingested += 1
-        batch.append(
-            Message(
-                chat_id=chat.id,
-                tg_message_id=m.tg_message_id,
-                reply_to_tg_message_id=m.reply_to_tg_message_id,
-                sender_id=m.sender_id,
-                sender_name=m.sender_name,
-                text=m.text,
-                sent_at=m.sent_at,
-                source="import",
-                import_job_id=job_id,
-            )
+        row = Message(
+            chat_id=chat.id,
+            tg_message_id=m.tg_message_id,
+            reply_to_tg_message_id=m.reply_to_tg_message_id,
+            sender_id=m.sender_id,
+            sender_name=m.sender_name,
+            text=m.text,
+            sent_at=m.sent_at,
+            source="import",
+            import_job_id=job_id,
         )
+        if m.media is not None:
+            row.attachment = _import_attachment(
+                m.media, chat.id, m.tg_message_id, job_id, media_root, referenced_files
+            )
+        batch.append(row)
         if len(batch) >= INSERT_BATCH:
             await flush(batch)
             batch = []
             await asyncio.sleep(0)  # keep the event loop responsive
     if batch:
         await flush(batch)
+
+    # The extracted export also holds files nothing references (result.json,
+    # not-imported media, contact photos…) — keep only what attachments need.
+    if media_root is not None:
+        await asyncio.to_thread(_prune_unreferenced, job_media_dir(job_id), referenced_files)
 
     # Imported history predates the chunk cursor — rebuild memory for the chat.
     async with sessionmaker() as session:
@@ -335,6 +436,54 @@ async def _run_import(
         job_row.finished_at = datetime.now(timezone.utc)
         await session.commit()
     log.info("import job %s done: %d/%d messages ingested", job_id, ingested, total)
+    return True
+
+
+def _import_attachment(
+    media: ExportMedia,
+    chat_id: int,
+    tg_message_id: int,
+    job_id: int,
+    media_root: Path | None,
+    referenced_files: set[Path],
+) -> MessageAttachment:
+    """Import media has no Telegram file_id: bytes live under the job's media
+    dir (path stored relative to imports_dir) until described, then deleted.
+    Media the export didn't include is `skipped` — nothing to describe, ever."""
+    att = MessageAttachment(
+        chat_id=chat_id,
+        tg_message_id=tg_message_id,
+        kind=media.kind,
+        file_unique_id=f"import:{job_id}:{tg_message_id}",
+        mime=media.mime,
+        duration_s=media.duration_s,
+        width=media.width,
+        height=media.height,
+        sticker_emoji=media.sticker_emoji,
+    )
+    file = (media_root / media.path).resolve() if media_root and media.path else None
+    if file is not None and file.is_file():
+        imports_dir = Path(get_settings().imports_dir).resolve()
+        att.import_path = str(file.relative_to(imports_dir))
+        att.size_bytes = file.stat().st_size
+        referenced_files.add(file)
+    else:
+        att.status = "skipped"
+        att.error = "media not included in the export"
+    return att
+
+
+def _prune_unreferenced(root: Path, referenced: set[Path]) -> None:
+    if not root.is_dir():
+        return
+    for p in sorted(root.rglob("*"), reverse=True):  # deepest first: files, then their dirs
+        if p.is_file() and p.resolve() not in referenced:
+            p.unlink(missing_ok=True)
+        elif p.is_dir():
+            try:
+                p.rmdir()  # only succeeds when emptied
+            except OSError:
+                pass
 
 
 async def reset_chat_memory(session: AsyncSession, chat_id: int) -> None:
@@ -345,12 +494,24 @@ async def reset_chat_memory(session: AsyncSession, chat_id: int) -> None:
 
 async def delete_import(session: AsyncSession, job: ImportJob) -> int:
     """Surgically remove everything a (possibly poisoned) import brought in."""
+    # Explicit (not FK-cascade) so sqlite tests without the FK pragma agree
+    # with Postgres.
+    await session.execute(
+        delete(MessageAttachment).where(
+            MessageAttachment.message_id.in_(
+                select(Message.id).where(
+                    Message.import_job_id == job.id, Message.chat_id == job.chat_id
+                )
+            )
+        )
+    )
     result = await session.execute(
         delete(Message).where(
             Message.import_job_id == job.id, Message.chat_id == job.chat_id
         )
     )
     await reset_chat_memory(session, job.chat_id)
+    await asyncio.to_thread(shutil.rmtree, job_media_dir(job.id), True)
     job.status = "rejected"
     job.detail = (job.detail or "") + " [deleted by operator]"
     return result.rowcount or 0

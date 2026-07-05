@@ -188,3 +188,155 @@ async def test_rejected_import_ingests_nothing(db_sessionmaker, tmp_path):
             (await s.execute(select(Message).where(Message.source == "import"))).scalars().all()
         )
         assert count == 0
+
+
+# ---------- media (ZIP export) ----------
+
+import zipfile
+
+from app.core.config import get_settings
+from app.ingest.history_import import delete_import, job_media_dir, parse_export_message
+from app.models import MessageAttachment
+
+
+def export_media_msg(mid: int, *, caption="", photo=None, file=None, media_type=None,
+                     mime=None, duration=None, unixtime=1_750_000_000) -> dict:
+    item = {
+        "id": mid, "type": "message", "date": "2026-06-15T12:00:00",
+        "date_unixtime": str(unixtime + mid), "from": "Alice", "from_id": "user42",
+        "text": caption,
+    }
+    if photo is not None:
+        item["photo"] = photo
+    if file is not None:
+        item["file"] = file
+        if media_type:
+            item["media_type"] = media_type
+        if mime:
+            item["mime_type"] = mime
+        if duration:
+            item["duration_seconds"] = duration
+    return item
+
+
+def write_export_zip(tmp_path: Path, payload: dict, media: dict[str, bytes]) -> Path:
+    p = tmp_path / "export.zip"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("ChatExport/result.json", json.dumps(payload))
+        for rel, data in media.items():
+            z.writestr(f"ChatExport/{rel}", data)
+    return p
+
+
+def test_parse_export_message_media_only():
+    m = parse_export_message(export_media_msg(1, photo="photos/p1.jpg"))
+    assert m is not None and m.text == "" and m.media.kind == "photo"
+    v = parse_export_message(export_media_msg(2, file="video_files/v.mp4",
+                                              media_type="voice_message", mime="audio/ogg",
+                                              duration=12))
+    assert v.media.kind == "voice" and v.media.duration_s == 12
+    not_included = parse_export_message(
+        export_media_msg(3, photo="(File not included. Change data exporting settings to download.)")
+    )
+    assert not_included.media.path is None
+    doc = parse_export_message(export_media_msg(4, file="files/report.pdf", mime="application/pdf"))
+    assert doc is None  # non-image document with no text → still dropped
+
+
+async def test_zip_import_creates_pending_attachments(db_sessionmaker, tmp_path, monkeypatch):
+    get_settings().imports_dir = str(tmp_path / "imports")
+    chat = await make_chat(db_sessionmaker, with_live=0)
+    payload = export_payload(messages=[
+        export_msg(1, "hello text"),
+        export_media_msg(2, caption="picnic!", photo="photos/p1.jpg"),
+        export_media_msg(3, photo="(File not included. Change data exporting settings to download.)"),
+    ])
+    p = write_export_zip(tmp_path, payload, {"photos/p1.jpg": b"jpegbytes"})
+
+    async with db_sessionmaker() as s:
+        job = ImportJob(chat_id=chat.id, filename="export.zip")
+        s.add(job)
+        await s.commit()
+        job_id = job.id
+
+    await run_import(db_sessionmaker, job_id, p)
+
+    async with db_sessionmaker() as s:
+        job = await s.get(ImportJob, job_id)
+        assert job.status == "done", job.detail
+        atts = (await s.execute(select(MessageAttachment))).scalars().all()
+        by_tg = {a.tg_message_id: a for a in atts}
+        assert by_tg[2].status == "pending"
+        assert by_tg[2].file_id is None
+        assert by_tg[2].import_path is not None
+        assert by_tg[2].size_bytes == len(b"jpegbytes")
+        assert by_tg[3].status == "skipped"
+        assert "not included" in by_tg[3].error
+        caption_msg = (
+            await s.execute(select(Message).where(Message.tg_message_id == 2))
+        ).scalar_one()
+        assert caption_msg.text == "picnic!"
+    # referenced file kept (relative to imports_dir), result.json pruned
+    kept = Path(get_settings().imports_dir) / by_tg[2].import_path
+    assert kept.read_bytes() == b"jpegbytes"
+    assert not list(job_media_dir(job_id).rglob("result.json"))
+
+
+async def test_media_loop_describes_import_file_then_discards(db_sessionmaker, tmp_path):
+    get_settings().imports_dir = str(tmp_path / "imports")
+    from tests.test_media_loop import FakeDescriber, make_loop
+
+    chat = await make_chat(db_sessionmaker, with_live=0)
+    media_file = Path(get_settings().imports_dir) / "job_9_media/photos/p1.jpg"
+    media_file.parent.mkdir(parents=True, exist_ok=True)
+    media_file.write_bytes(b"localjpeg")
+    async with db_sessionmaker() as s:
+        msg = Message(chat_id=chat.id, tg_message_id=7, sender_name="A", text="",
+                      sent_at=datetime(2026, 6, 15, tzinfo=timezone.utc), source="import")
+        msg.attachment = MessageAttachment(
+            chat_id=chat.id, tg_message_id=7, kind="photo", file_id=None,
+            import_path="job_9_media/photos/p1.jpg", file_unique_id="import:9:7",
+            status="pending",
+        )
+        s.add(msg)
+        from app.models import ConnectedModel, ModelRoleAssignment
+        m = ConnectedModel(name="v", base_url="http://unused", model_name="m",
+                           capabilities={"vision": True})
+        s.add(m)
+        await s.flush()
+        s.add(ModelRoleAssignment(role="vision", model_id=m.id))
+        # the loop resolves the bot even for import media — give the chat one
+        bot_id = chat.bot_id
+        await s.commit()
+
+    loop, _ = make_loop(db_sessionmaker, bot_id, FakeDescriber())
+    await loop._tick()
+
+    async with db_sessionmaker() as s:
+        att = (await s.execute(select(MessageAttachment))).scalar_one()
+        assert att.status == "described"
+        assert att.description == "described(localjpeg)"
+    assert not media_file.exists()  # describe-then-discard
+
+
+async def test_delete_import_removes_attachments_and_media_dir(db_sessionmaker, tmp_path):
+    get_settings().imports_dir = str(tmp_path / "imports")
+    chat = await make_chat(db_sessionmaker, with_live=0)
+    payload = export_payload(messages=[export_media_msg(2, photo="photos/p1.jpg")])
+    p = write_export_zip(tmp_path, payload, {"photos/p1.jpg": b"jpegbytes"})
+
+    async with db_sessionmaker() as s:
+        job = ImportJob(chat_id=chat.id, filename="export.zip")
+        s.add(job)
+        await s.commit()
+        job_id = job.id
+    await run_import(db_sessionmaker, job_id, p)
+    assert job_media_dir(job_id).is_dir()
+
+    async with db_sessionmaker() as s:
+        job = await s.get(ImportJob, job_id)
+        removed = await delete_import(s, job)
+        await s.commit()
+        assert removed == 1
+        assert (await s.execute(select(MessageAttachment))).scalars().all() == []
+    assert not job_media_dir(job_id).exists()
