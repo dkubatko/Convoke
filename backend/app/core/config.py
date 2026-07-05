@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     # Media understanding. Bytes are downloaded transiently for description
     # and deleted — only text (descriptions/transcripts) persists.
     media_max_download_bytes: int = 20 * 2**20  # Bot API getFile ceiling
-    media_describe_batch: int = 4  # attachments processed per tick
+    media_describe_concurrency: int = 4  # parallel describe/transcribe calls per tick
     media_description_max_chars: int = 400  # keep chunk vectors text-dominated
     # Hold an intent window open this long while media in it is still being
     # described, so the classifier sees descriptions, not placeholders.

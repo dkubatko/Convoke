@@ -4,10 +4,17 @@ Bytes are downloaded from Telegram into memory, described/transcribed, and
 dropped — nothing is persisted except the text. When a description lands
 after the covering chunk already closed, the chunk is marked stale and the
 memory loop re-renders + re-embeds it (the same machinery message edits use).
+
+Each tick is three phases: plan (one session: pick due work, mark skips,
+snapshot plain work items), understand (no session: up to
+media_describe_concurrency downloads + model calls in parallel), apply (a
+fresh session: persist text / retry bookkeeping). Ingestion never waits on
+any of this — the inbox consumer only writes rows.
 """
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.models import ProviderNotConfigured, get_provider
 from app.core.config import get_settings
 from app.core.crypto import decrypt
+from app.core.runtime_settings import effective_settings
 from app.media.describe import Describer
 from app.memory.store import mark_chunks_stale
 from app.models import Bot, Chat, ConnectedModel, Message, MessageAttachment
@@ -35,6 +43,32 @@ VIDEO_KINDS = ("video", "video_note")
 _AUDIO_FILENAMES = {"audio/ogg": "voice.ogg", "audio/mpeg": "audio.mp3", "audio/mp4": "audio.m4a"}
 
 
+@dataclass
+class Understood:
+    description: str | None = None
+    transcript: str | None = None
+
+
+@dataclass
+class _Work:
+    """A session-free snapshot of one attachment to understand — the parallel
+    phase must never touch ORM state."""
+
+    att_id: int
+    chat_id: int
+    tg_message_id: int
+    kind: str
+    file_id: str | None
+    import_path: str | None
+    mime: str | None
+    size_bytes: int | None
+    duration_s: int | None
+    thumb_file_id: str | None
+    caption: str
+    bot_id: int
+    token_encrypted: str
+
+
 class MediaLoop:
     def __init__(
         self,
@@ -45,7 +79,8 @@ class MediaLoop:
         self.sessionmaker = sessionmaker
         self.bots = bots or BotCache()
         self.describer = describer or Describer()
-        self.settings = get_settings()
+        self._base = get_settings()
+        self.settings = self._base
 
     async def run(self) -> None:
         try:
@@ -60,7 +95,12 @@ class MediaLoop:
 
     async def _tick(self) -> None:
         now = datetime.now(timezone.utc)
+
+        # Phase 1 — plan: pick due attachments, persist skips, snapshot work.
+        work: list[_Work] = []
         async with self.sessionmaker() as session:
+            self.settings = await effective_settings(session, self._base)
+            concurrency = max(1, self.settings.media_describe_concurrency)
             rows = (
                 await session.execute(
                     select(MessageAttachment, Bot)
@@ -68,7 +108,7 @@ class MediaLoop:
                     .join(Bot, Bot.id == Chat.bot_id)
                     .where(MessageAttachment.status == "pending")
                     .order_by(MessageAttachment.id)
-                    .limit(self.settings.media_describe_batch * 4)
+                    .limit(concurrency * 4)
                 )
             ).all()
             due = [(att, bot) for att, bot in rows if self._due(att, now)]
@@ -77,9 +117,75 @@ class MediaLoop:
             vision = await self._resolve(session, "vision")
             transcription = await self._resolve(session, "transcription")
             video = await self._resolve(session, "video")
-            for att, bot_row in due[: self.settings.media_describe_batch]:
-                await self._process_one(session, att, bot_row, vision, transcription, video, now)
-                await session.commit()  # one attachment per transaction
+            for att, bot_row in due[:concurrency]:
+                skip_reason = self._skip_reason(att, vision, transcription)
+                if skip_reason:
+                    att.status = "skipped"
+                    att.error = skip_reason
+                    continue
+                work.append(
+                    _Work(
+                        att_id=att.id,
+                        chat_id=att.chat_id,
+                        tg_message_id=att.tg_message_id,
+                        kind=att.kind,
+                        file_id=att.file_id,
+                        import_path=att.import_path,
+                        mime=att.mime,
+                        size_bytes=att.size_bytes,
+                        duration_s=att.duration_s,
+                        thumb_file_id=att.thumb_file_id,
+                        caption=await self._caption(session, att),
+                        bot_id=bot_row.id,
+                        token_encrypted=bot_row.token_encrypted,
+                    )
+                )
+            await session.commit()
+        if not work:
+            return
+
+        # Phase 2 — understand: parallel downloads + model calls, no session.
+        results = await asyncio.gather(
+            *(self._understand(w, vision, transcription, video) for w in work),
+            return_exceptions=True,
+        )
+
+        # Phase 3 — apply: persist outcomes in a fresh session.
+        async with self.sessionmaker() as session:
+            atts = {
+                a.id: a
+                for a in (
+                    await session.execute(
+                        select(MessageAttachment).where(
+                            MessageAttachment.id.in_([w.att_id for w in work])
+                        )
+                    )
+                ).scalars()
+            }
+            for w, result in zip(work, results):
+                att = atts.get(w.att_id)
+                if att is None:
+                    continue  # message deleted mid-flight
+                if isinstance(result, BaseException):
+                    att.attempts += 1
+                    att.last_attempt_at = now
+                    att.error = f"{type(result).__name__}: {str(result)[:300]}"
+                    if att.attempts >= MAX_ATTEMPTS:
+                        att.status = "failed"
+                    log.warning(
+                        "attachment %d (%s) attempt %d failed: %s",
+                        att.id, att.kind, att.attempts, att.error,
+                    )
+                    continue
+                att.description = result.description
+                att.transcript = result.transcript
+                att.status = "described"
+                att.error = None
+                att.described_at = now
+                self._discard_import_bytes(att)
+                await mark_chunks_stale(session, att.chat_id, att.tg_message_id)
+                log.info("described attachment %d (%s) in chat %d", att.id, att.kind, att.chat_id)
+            await session.commit()
 
     @staticmethod
     def _due(att: MessageAttachment, now: datetime) -> bool:
@@ -97,104 +203,74 @@ class MediaLoop:
         except ProviderNotConfigured:
             return None
 
-    async def _process_one(
+    async def _understand(
         self,
-        session: AsyncSession,
-        att: MessageAttachment,
-        bot_row: Bot,
+        w: _Work,
         vision: ConnectedModel | None,
         transcription: ConnectedModel | None,
         video: ConnectedModel | None,
-        now: datetime,
-    ) -> None:
-        try:
-            skip_reason = self._skip_reason(att, vision, transcription)
-            if skip_reason:
-                att.status = "skipped"
-                att.error = skip_reason
-                return
-            # Import media reads local bytes — no Telegram client involved.
-            bot = (
-                self.bots.get(bot_row.id, bot_row.token_encrypted, decrypt(bot_row.token_encrypted))
-                if att.file_id is not None
-                else None
+    ) -> Understood:
+        if w.kind in IMAGE_KINDS:
+            data = await self._load_bytes(w)
+            description = await self.describer.describe_image(
+                vision, data, w.mime or _image_mime(w.kind), w.caption
             )
-            caption = await self._caption(session, att)
-            if att.kind in IMAGE_KINDS:
-                data = await self._load_bytes(bot, att)
-                att.description = await self.describer.describe_image(
-                    vision, data, att.mime or _image_mime(att.kind), caption
-                )
-            elif att.kind in AUDIO_KINDS:
-                data = await self._load_bytes(bot, att)
-                mime = att.mime or "audio/ogg"
-                att.transcript = await self.describer.transcribe(
-                    transcription, data, _AUDIO_FILENAMES.get(mime, "audio.ogg"), mime
-                )
-            else:
-                await self._process_video(bot, att, caption, vision, transcription, video)
-            att.status = "described"
-            att.error = None
-            att.described_at = now
-            self._discard_import_bytes(att)
-            await mark_chunks_stale(session, att.chat_id, att.tg_message_id)
-            log.info("described attachment %d (%s) in chat %d", att.id, att.kind, att.chat_id)
-        except Exception as e:  # noqa: BLE001 — bookkeep and retry with backoff
-            att.attempts += 1
-            att.last_attempt_at = now
-            att.error = f"{type(e).__name__}: {str(e)[:300]}"
-            if att.attempts >= MAX_ATTEMPTS:
-                att.status = "failed"
-            log.warning(
-                "attachment %d (%s) attempt %d failed: %s", att.id, att.kind, att.attempts, att.error
+            return Understood(description=description)
+        if w.kind in AUDIO_KINDS:
+            data = await self._load_bytes(w)
+            mime = w.mime or "audio/ogg"
+            transcript = await self.describer.transcribe(
+                transcription, data, _AUDIO_FILENAMES.get(mime, "audio.ogg"), mime
             )
+            return Understood(transcript=transcript)
+        return await self._understand_video(w, vision, transcription, video)
 
-    async def _process_video(
+    async def _understand_video(
         self,
-        bot,
-        att: MessageAttachment,
-        caption: str,
+        w: _Work,
         vision: ConnectedModel | None,
         transcription: ConnectedModel | None,
         video: ConnectedModel | None,
-    ) -> None:
+    ) -> Understood:
         """video / video_note. Native path when a video-capable model is
         assigned; otherwise thumbnail + ffmpeg-sampled frames + audio
         transcript (each part best-effort). >20MB can never be downloaded —
         thumbnail-only, annotated as such."""
-        size_ok = (att.size_bytes or 0) <= self.settings.media_max_download_bytes
-        data = await self._load_bytes(bot, att) if size_ok else None
-        mime = att.mime or "video/mp4"
+        out = Understood()
+        size_ok = (w.size_bytes or 0) <= self.settings.media_max_download_bytes
+        data = await self._load_bytes(w) if size_ok else None
+        mime = w.mime or "video/mp4"
 
         if transcription is not None and data:
-            att.transcript = await self.describer.transcribe(
+            out.transcript = await self.describer.transcribe(
                 transcription, data, "video.mp4", mime
             )
 
         if video is not None and data:
-            att.description = await self.describer.describe_video_native(
-                video, data, mime, caption
+            out.description = await self.describer.describe_video_native(
+                video, data, mime, w.caption
             )
         elif vision is not None:
             frames: list[bytes] = []
-            if att.thumb_file_id:
-                frames.append(await self._download(bot, att.thumb_file_id))
+            if w.thumb_file_id:
+                frames.append(await self._download(self._bot(w), w.thumb_file_id))
             if data:
                 frames.extend(
                     await self.describer.sample_frames(
-                        data, self.settings.video_sample_frames, att.duration_s
+                        data, self.settings.video_sample_frames, w.duration_s
                     )
                 )
             if frames:
-                att.description = await self.describer.describe_frames(
-                    vision, frames, caption, att.transcript
+                out.description = await self.describer.describe_frames(
+                    vision, frames, w.caption, out.transcript
                 )
                 if not data:
-                    att.description = (
-                        f"{att.description} (large video — described from thumbnail only)"
+                    out.description = (
+                        f"{out.description} (large video — described from thumbnail only)"
                     )
-        if not att.description and not att.transcript:
+        if not out.description and not out.transcript:
             raise RuntimeError("no thumbnail to describe and file too large to transcribe")
+        return out
 
     def _skip_reason(
         self,
@@ -223,12 +299,15 @@ class MediaLoop:
         msg = await session.get(Message, att.message_id)
         return msg.text if msg else ""
 
-    async def _load_bytes(self, bot, att: MessageAttachment) -> bytes:
+    def _bot(self, w: _Work):
+        return self.bots.get(w.bot_id, w.token_encrypted, decrypt(w.token_encrypted))
+
+    async def _load_bytes(self, w: _Work) -> bytes:
         """Live media downloads from Telegram by file_id; import media reads
         the transient local copy under imports_dir."""
-        if att.file_id is not None:
-            return await self._download(bot, att.file_id)
-        path = Path(self.settings.imports_dir) / att.import_path
+        if w.file_id is not None:
+            return await self._download(self._bot(w), w.file_id)
+        path = Path(self.settings.imports_dir) / w.import_path
         return await asyncio.to_thread(path.read_bytes)
 
     def _discard_import_bytes(self, att: MessageAttachment) -> None:

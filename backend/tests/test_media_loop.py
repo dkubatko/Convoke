@@ -224,3 +224,43 @@ async def test_failure_backs_off_then_caps_at_failed(db_sessionmaker):
         att = await get_att(db_sessionmaker)
         assert att.attempts == expected
     assert att.status == "failed"
+
+
+async def test_backlog_drains_in_parallel(db_sessionmaker):
+    """Model calls for a tick's batch run concurrently (media_describe_concurrency),
+    so a burst of photos doesn't serialize on model latency."""
+    import asyncio
+
+    bot_id, _ = await seed(db_sessionmaker)  # tg 20
+    async with db_sessionmaker() as s:
+        chat_id = (await s.execute(select(Chat.id))).scalar_one()
+        for tg in (21, 22):
+            m = Message(chat_id=chat_id, tg_message_id=tg, sender_name="A", text="", sent_at=T0)
+            m.attachment = MessageAttachment(
+                chat_id=chat_id, tg_message_id=tg, kind="photo",
+                file_id=f"f-{tg}", file_unique_id=f"u-{tg}", status="pending",
+            )
+            s.add(m)
+        await s.commit()
+
+    class SlowDescriber(FakeDescriber):
+        def __init__(self):
+            super().__init__()
+            self.in_flight = 0
+            self.peak = 0
+
+        async def describe_image(self, provider, data, mime, caption=""):
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+            await asyncio.sleep(0.05)
+            self.in_flight -= 1
+            return await super().describe_image(provider, data, mime, caption)
+
+    describer = SlowDescriber()
+    loop, _ = make_loop(db_sessionmaker, bot_id, describer)
+    await loop._tick()
+
+    assert describer.peak == 3  # all three photos in flight together
+    async with db_sessionmaker() as s:
+        statuses = (await s.execute(select(MessageAttachment.status))).scalars().all()
+        assert statuses == ["described"] * 3

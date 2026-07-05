@@ -128,6 +128,13 @@ TUNABLES: list[Tunable] = [
         "minutes", 1, 1440, "global", "workflows",
     ),
     Tunable(
+        "media_describe_concurrency", "Parallel media descriptions",
+        "How many photos/voice notes/videos are described or transcribed at the same time. "
+        "Higher drains a backlog (e.g. after a media-heavy import) faster; keep modest for "
+        "local vision/whisper models.",
+        "workers", 1, 16, "global", "models",
+    ),
+    Tunable(
         "intent_media_grace_seconds", "Media description grace",
         "When a conversation window contains a photo/voice/video still being described, the "
         "detector waits up to this long for the description before evaluating — so intent is "
