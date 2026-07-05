@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -11,9 +11,10 @@ from app.core.db import get_session, get_sessionmaker
 from app.core.tasks import spawn
 from app.core.security import require_operator
 from app.ingest.history_import import delete_import, run_import
+from app.media.render import message_body
 from app.memory.runtime import get_embedder
 from app.memory.store import search_chat_history
-from app.models import AgentRun, Chat, ImportJob, MemoryGap, Message, Note
+from app.models import AgentRun, Chat, ImportJob, MemoryGap, Message, MessageAttachment, Note
 
 router = APIRouter(dependencies=[Depends(require_operator)])
 
@@ -21,6 +22,17 @@ router = APIRouter(dependencies=[Depends(require_operator)])
 class ReplyPreview(BaseModel):
     sender_name: str
     text: str
+
+
+class AttachmentOut(BaseModel):
+    kind: str
+    status: str
+    description: str | None
+    transcript: str | None
+    error: str | None
+    duration_s: int | None
+
+    model_config = {"from_attributes": True}
 
 
 class MessageOut(BaseModel):
@@ -32,6 +44,7 @@ class MessageOut(BaseModel):
     source: str
     # The quoted original when this message is a Telegram reply.
     reply_to: ReplyPreview | None = None
+    attachment: AttachmentOut | None = None
 
     model_config = {"from_attributes": True}
 
@@ -102,7 +115,7 @@ async def recent_messages(
         target = by_id.get(m.reply_to_tg_message_id or 0)
         if target is None:
             return None
-        text = (target.text or "").replace("\n", " ")
+        text = message_body(target).replace("\n", " ")
         return ReplyPreview(
             sender_name=target.sender_name or "Unknown",
             text=text[:140] + ("…" if len(text) > 140 else ""),
@@ -112,9 +125,34 @@ async def recent_messages(
         MessageOut(
             id=m.id, tg_message_id=m.tg_message_id, sender_name=m.sender_name,
             text=m.text, sent_at=m.sent_at, source=m.source, reply_to=preview(m),
+            attachment=AttachmentOut.model_validate(m.attachment) if m.attachment else None,
         )
         for m in rows
     ]  # newest first
+
+
+class MediaStatusOut(BaseModel):
+    pending: int = 0
+    described: int = 0
+    failed: int = 0
+    skipped: int = 0
+
+
+@router.get("/chats/{chat_id}/media-status", response_model=MediaStatusOut)
+async def media_status(
+    chat_id: int, session: AsyncSession = Depends(get_session)
+) -> MediaStatusOut:
+    """How much of this chat's media has been turned into text — the
+    description backlog after a burst of photos or a media-heavy import."""
+    await _chat_or_404(session, chat_id)
+    rows = (
+        await session.execute(
+            select(MessageAttachment.status, func.count())
+            .where(MessageAttachment.chat_id == chat_id)
+            .group_by(MessageAttachment.status)
+        )
+    ).all()
+    return MediaStatusOut(**{status_: n for status_, n in rows})
 
 
 @router.get("/chats/{chat_id}/search", response_model=list[SearchHitOut])
@@ -150,7 +188,9 @@ async def start_import(
 
     imports_dir = Path(get_settings().imports_dir)
     imports_dir.mkdir(parents=True, exist_ok=True)
-    dest = imports_dir / f"job_{job.id}.json"
+    # A bare result.json or a full export ZIP (with media) — sniffed, not
+    # extension-matched, by run_import.
+    dest = imports_dir / f"job_{job.id}.upload"
     with dest.open("wb") as out:
         while chunk := await file.read(1 << 20):
             out.write(chunk)

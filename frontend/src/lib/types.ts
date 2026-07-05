@@ -21,6 +21,22 @@ export interface Chat {
   authorized_at: string | null
 }
 
+export interface MediaStatus {
+  pending: number
+  described: number
+  failed: number
+  skipped: number
+}
+
+export interface MessageAttachment {
+  kind: string
+  status: string // pending | described | failed | skipped
+  description: string | null
+  transcript: string | null
+  error: string | null
+  duration_s: number | null
+}
+
 export interface Message {
   id: number
   tg_message_id: number
@@ -29,6 +45,7 @@ export interface Message {
   sent_at: string
   source: string
   reply_to: { sender_name: string; text: string } | null
+  attachment: MessageAttachment | null
 }
 
 export interface SearchHit {

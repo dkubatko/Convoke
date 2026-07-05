@@ -8,7 +8,9 @@ import {
   Gap,
   ImportJob,
   McpServer,
+  MediaStatus,
   Message,
+  MessageAttachment,
   Run,
   SearchHit,
 } from '../lib/types'
@@ -93,6 +95,11 @@ function MemoryTab({ chatId }: { chatId: number }) {
   const confirm = useConfirm()
   const messages = useQuery<Message[]>(
     () => api.get(`/api/chats/${chatId}/messages?limit=25`),
+    [chatId],
+    { pollMs: 10000 },
+  )
+  const mediaStatus = useQuery<MediaStatus>(
+    () => api.get(`/api/chats/${chatId}/media-status`),
     [chatId],
     { pollMs: 10000 },
   )
@@ -186,6 +193,37 @@ function MemoryTab({ chatId }: { chatId: number }) {
         )}
       </Card>
 
+      {mediaStatus.data &&
+        mediaStatus.data.pending +
+          mediaStatus.data.described +
+          mediaStatus.data.failed +
+          mediaStatus.data.skipped >
+          0 && (
+          <Card>
+            <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+              <b style={{ fontSize: 13 }}>Media memory</b>
+              <span className="pill pill--accent">{mediaStatus.data.described} described</span>
+              {mediaStatus.data.pending > 0 && (
+                <span className="pill pill--idle pill--live">
+                  <span className="lamp" aria-hidden />
+                  {mediaStatus.data.pending} pending
+                </span>
+              )}
+              {mediaStatus.data.failed > 0 && (
+                <span className="pill pill--err">{mediaStatus.data.failed} failed</span>
+              )}
+              {mediaStatus.data.skipped > 0 && (
+                <span
+                  className="pill pill--warn"
+                  title="Assign vision/transcription models on the Models page to process these"
+                >
+                  {mediaStatus.data.skipped} skipped
+                </span>
+              )}
+            </div>
+          </Card>
+        )}
+
       <Card title="Latest messages" pad={false}>
         {messages.loading ? (
           <TableSkeleton rows={5} />
@@ -220,6 +258,7 @@ function MemoryTab({ chatId }: { chatId: number }) {
                         ↪ <b>{m.reply_to.sender_name}</b>: {m.reply_to.text}
                       </div>
                     )}
+                    {m.attachment && <AttachmentLine att={m.attachment} />}
                     {m.text}
                   </td>
                 </tr>
@@ -262,6 +301,25 @@ function MemoryTab({ chatId }: { chatId: number }) {
 }
 
 /* ---------------- Workflows ---------------- */
+
+function AttachmentLine({ att }: { att: MessageAttachment }) {
+  const dur = att.duration_s ? ` ${Math.floor(att.duration_s / 60)}:${String(att.duration_s % 60).padStart(2, '0')}` : ''
+  const label = `${att.kind.replace('_', ' ')}${dur}`
+  const tone =
+    att.status === 'described' ? 'accent' : att.status === 'failed' ? 'err' : att.status === 'skipped' ? 'warn' : 'idle'
+  const body =
+    att.status === 'described'
+      ? [att.description, att.transcript && `“${att.transcript}”`].filter(Boolean).join(' — ')
+      : att.status === 'pending'
+        ? 'description pending…'
+        : att.error ?? att.status
+  return (
+    <div style={{ marginBottom: 4 }}>
+      <span className={`pill pill--${tone}`}>{label}</span>{' '}
+      <span className="muted" style={{ fontSize: 12.5 }}>{body}</span>
+    </div>
+  )
+}
 
 function WorkflowsTab({ chatId }: { chatId: number }) {
   const toast = useToast()
