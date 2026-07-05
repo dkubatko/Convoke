@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.agents.runtime import execute_run, split_reply
 from app.core.crypto import encrypt
 from app.memory.embeddings import FakeEmbedder
-from app.models import AgentRun, Bot, Chat, Message, ModelProvider, Note
+from app.models import AgentRun, Bot, Chat, ConnectedModel, Message, ModelRoleAssignment, Note
 from app.telegram.limiter import SendLimiter
 
 from tests.test_handlers import (
@@ -42,6 +42,15 @@ async def bot_row(db_sessionmaker):
         s.add(row)
         await s.commit()
         return row
+
+
+async def add_agent_model(s, name: str = "agent-model"):
+    m = ConnectedModel(
+        name=name, base_url="http://unused", model_name="test", capabilities={"chat": True}
+    )
+    s.add(m)
+    await s.flush()
+    s.add(ModelRoleAssignment(role="agent", model_id=m.id))
 
 
 async def authorize_chat(db_sessionmaker, fake, bot_row):
@@ -127,7 +136,7 @@ async def test_execute_run_with_test_model(db_sessionmaker, bot_row, monkeypatch
         db_sessionmaker, fake, bot_row, message_update(3, 20, "@convoke_bot remember I like tea")
     )
     async with db_sessionmaker() as s:
-        s.add(ModelProvider(role="agent", base_url="http://unused", model_name="test"))
+        await add_agent_model(s)
         await s.commit()
         run_id = (await s.execute(select(AgentRun.id))).scalar_one()
 
@@ -184,7 +193,7 @@ async def test_workflow_run_can_decline_with_no_action(db_sessionmaker, bot_row,
     fake = AgentFakeBot()
     chat = await authorize_chat(db_sessionmaker, fake, bot_row)
     async with db_sessionmaker() as s:
-        s.add(ModelProvider(role="agent", base_url="http://unused", model_name="test"))
+        await add_agent_model(s)
         wf = Workflow(name="events", type="intent", action_prompt="create the event",
                       trigger_prompt="t", required_slots=[], threshold=0.5)
         s.add(wf)

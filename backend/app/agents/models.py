@@ -1,7 +1,7 @@
 import asyncio
 
 import httpx
-from pydantic_ai import Agent
+from pydantic_ai import Agent, BinaryContent
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -9,24 +9,30 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import decrypt
-from app.models import ModelProvider
+from app.media.assets import TEST_PNG, TEST_WAV
+from app.models import ConnectedModel, ModelRoleAssignment
 
 TEST_TIMEOUT_S = 20
 
 
 class ProviderNotConfigured(RuntimeError):
     def __init__(self, role: str):
-        super().__init__(f"No model provider configured for role '{role}'")
+        super().__init__(f"No model assigned to role '{role}'")
         self.role = role
 
 
-async def get_provider(session: AsyncSession, role: str) -> ModelProvider:
-    provider = (
-        await session.execute(select(ModelProvider).where(ModelProvider.role == role))
+async def get_provider(session: AsyncSession, role: str) -> ConnectedModel:
+    """Resolve a role to its assigned connected model."""
+    model = (
+        await session.execute(
+            select(ConnectedModel)
+            .join(ModelRoleAssignment, ModelRoleAssignment.model_id == ConnectedModel.id)
+            .where(ModelRoleAssignment.role == role)
+        )
     ).scalar_one_or_none()
-    if provider is None:
+    if model is None:
         raise ProviderNotConfigured(role)
-    return provider
+    return model
 
 
 # Each OpenAIProvider owns an AsyncOpenAI/httpx client. The intent sweeper
@@ -36,7 +42,7 @@ async def get_provider(session: AsyncSession, role: str) -> ModelProvider:
 _model_cache: dict[tuple[str, str, str], OpenAIChatModel] = {}
 
 
-def build_model(provider: ModelProvider) -> OpenAIChatModel:
+def build_model(provider: ConnectedModel) -> OpenAIChatModel:
     """Any OpenAI-compatible endpoint: Ollama, LM Studio, OpenRouter, OpenAI…"""
     api_key = decrypt(provider.api_key_encrypted) if provider.api_key_encrypted else "unused"
     key = (provider.base_url, provider.model_name, api_key)
@@ -95,3 +101,65 @@ async def probe_endpoint(base_url: str, model_name: str, api_key: str | None) ->
         return False, f"{type(e).__name__}: {str(e)[:200]}"
     reply = (result.output or "").strip()
     return True, f"Model replied: {reply[:60] or '(empty)'}"
+
+
+async def probe_vision(base_url: str, model_name: str, api_key: str | None) -> tuple[bool, str]:
+    """Send a tiny in-code PNG; a model that accepts image parts is
+    vision-capable (we assert HTTP acceptance, not that it *sees* well)."""
+    model = OpenAIChatModel(
+        model_name,
+        provider=OpenAIProvider(base_url=base_url, api_key=api_key or "unused"),
+    )
+    agent = Agent(model, model_settings={"max_tokens": 16})
+    try:
+        result = await asyncio.wait_for(
+            agent.run(
+                [
+                    "What color is this square? Reply with one word.",
+                    BinaryContent(TEST_PNG, media_type="image/png"),
+                ]
+            ),
+            TEST_TIMEOUT_S,
+        )
+    except TimeoutError:
+        return False, f"No response within {TEST_TIMEOUT_S}s."
+    except Exception as e:  # noqa: BLE001 — a rejection of image parts lands here
+        return False, f"Endpoint rejected image input: {str(e)[:150]}"
+    reply = (result.output or "").strip()
+    return True, f"Model replied: {reply[:60] or '(empty)'}"
+
+
+async def probe_transcription(base_url: str, model_name: str, api_key: str | None) -> tuple[bool, str]:
+    """POST a 0.2s silent WAV to the OpenAI-compatible transcription endpoint
+    (OpenAI, faster-whisper-server, speaches…)."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=TEST_TIMEOUT_S) as client:
+            resp = await client.post(
+                f"{base_url.rstrip('/')}/audio/transcriptions",
+                headers=headers,
+                data={"model": model_name, "response_format": "json"},
+                files={"file": ("probe.wav", TEST_WAV, "audio/wav")},
+            )
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        return False, f"Couldn't reach {base_url}."
+    except Exception as e:  # noqa: BLE001 — surface as a failed probe
+        return False, f"{type(e).__name__}: {str(e)[:150]}"
+    if resp.status_code == 200:
+        return True, "Transcription endpoint responded."
+    return False, f"HTTP {resp.status_code}: {resp.text[:150]}"
+
+
+async def probe_capabilities(
+    base_url: str, model_name: str, api_key: str | None
+) -> dict[str, tuple[bool, str]]:
+    """Run the chat, vision, and transcription probes concurrently. A model is
+    worth saving if any passes (a whisper server fails the chat probe by
+    design). Video capability is operator-declared — probing video content
+    parts is unreliable across gateways."""
+    chat, vision, transcription = await asyncio.gather(
+        probe_endpoint(base_url, model_name, api_key),
+        probe_vision(base_url, model_name, api_key),
+        probe_transcription(base_url, model_name, api_key),
+    )
+    return {"chat": chat, "vision": vision, "transcription": transcription}

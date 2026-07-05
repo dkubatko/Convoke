@@ -71,12 +71,36 @@ export interface Gap {
   gap_end: string
 }
 
-export interface Provider {
-  role: string
+export interface ConnectedModel {
+  id: number
+  name: string
   base_url: string
   model_name: string
   has_api_key: boolean
+  capabilities: Record<string, boolean>
+  last_tested_at: string | null
+  last_test_detail: string | null
+  assigned_roles: string[]
   updated_at: string
+}
+
+export interface RoleAssignment {
+  role: string
+  model_id: number | null
+  model_name: string | null
+  required_capability: string
+  capability_ok: boolean
+}
+
+export interface CapabilityProbe {
+  ok: boolean
+  detail: string
+}
+
+export interface ModelTestResult {
+  chat: CapabilityProbe
+  vision: CapabilityProbe
+  transcription: CapabilityProbe
 }
 
 export interface McpServer {

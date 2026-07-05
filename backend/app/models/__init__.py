@@ -1,4 +1,4 @@
-from app.models.agents import AgentRun, ModelProvider, Note
+from app.models.agents import AgentRun, ConnectedModel, ModelRoleAssignment, Note
 from app.models.base import Base
 from app.models.mcp import ChatMcpServer, McpServer
 from app.models.memory import Chunk, ChunkState, ImportJob
@@ -37,10 +37,11 @@ __all__ = [
     "IntentCursor",
     "IntentEpisode",
     "McpServer",
+    "ConnectedModel",
     "MemoryGap",
     "Message",
     "MessageAttachment",
-    "ModelProvider",
+    "ModelRoleAssignment",
     "Note",
     "ChatSetting",
     "PendingFire",

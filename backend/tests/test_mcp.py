@@ -95,7 +95,7 @@ async def test_agent_calls_tool_with_illegal_name(db_sessionmaker, monkeypatch):
     from app.agents.mcp import SanitizedToolset
     from app.agents.runtime import execute_run
     from app.memory.embeddings import FakeEmbedder
-    from app.models import AgentRun, ModelProvider
+    from app.models import AgentRun
     from app.telegram.limiter import SendLimiter
     from tests.test_agent import AgentFakeBot
 
@@ -127,7 +127,9 @@ async def test_agent_calls_tool_with_illegal_name(db_sessionmaker, monkeypatch):
         await s.flush()
         chat = Chat(bot_id=bot.id, tg_chat_id=-100, type="supergroup", status="authorized")
         s.add(chat)
-        s.add(ModelProvider(role="agent", base_url="http://unused", model_name="t"))
+        from tests.test_agent import add_agent_model
+
+        await add_agent_model(s)
         await s.flush()
         run = AgentRun(chat_id=chat.id, trigger="mention", request_text="weather?")
         s.add(run)
@@ -159,7 +161,7 @@ async def test_agent_run_calls_mcp_tool(db_sessionmaker, monkeypatch):
     import app.agents.runtime as runtime
     from app.agents.runtime import execute_run
     from app.memory.embeddings import FakeEmbedder
-    from app.models import AgentRun, ModelProvider
+    from app.models import AgentRun
     from app.telegram.limiter import SendLimiter
     from tests.test_agent import AgentFakeBot
 
@@ -181,7 +183,9 @@ async def test_agent_run_calls_mcp_tool(db_sessionmaker, monkeypatch):
         await s.flush()
         chat = Chat(bot_id=bot.id, tg_chat_id=-100, type="supergroup", status="authorized")
         s.add(chat)
-        s.add(ModelProvider(role="agent", base_url="http://unused", model_name="t"))
+        from tests.test_agent import add_agent_model
+
+        await add_agent_model(s)
         await s.flush()
         run = AgentRun(chat_id=chat.id, trigger="mention", request_text="make an event")
         s.add(run)

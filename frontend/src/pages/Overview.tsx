@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import { timeAgo, truncate } from '../lib/format'
-import { Bot, Chat, GlobalRun, Provider, Workflow } from '../lib/types'
+import { Bot, Chat, GlobalRun, RoleAssignment, Workflow } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { Card, CardSkeleton, EmptyState, ErrorNote, PageHead, StatusPill, TableSkeleton } from '../components/ui'
 
@@ -9,15 +9,15 @@ export default function Overview() {
   const bots = useQuery<Bot[]>(() => api.get('/api/bots'), [], { pollMs: 15000 })
   const chats = useQuery<Chat[]>(() => api.get('/api/chats'), [], { pollMs: 15000 })
   const workflows = useQuery<Workflow[]>(() => api.get('/api/workflows'), [], { pollMs: 15000 })
-  const providers = useQuery<Provider[]>(() => api.get('/api/providers'), [])
+  const roles = useQuery<RoleAssignment[]>(() => api.get('/api/model-roles'), [])
   const runs = useQuery<GlobalRun[]>(() => api.get('/api/runs?limit=12'), [], { pollMs: 10000 })
 
   const loading =
-    bots.loading || chats.loading || providers.loading || workflows.loading || runs.loading
+    bots.loading || chats.loading || roles.loading || workflows.loading || runs.loading
   const authorized = chats.data?.filter((c) => c.status === 'authorized') ?? []
   const steps = [
     {
-      done: (providers.data ?? []).some((p) => p.role === 'agent'),
+      done: (roles.data ?? []).some((r) => r.role === 'agent' && r.model_id != null),
       label: 'Point the agent role at a model',
       hint: 'Any OpenAI-compatible endpoint works — Ollama, LM Studio, OpenRouter.',
       to: '/models',
