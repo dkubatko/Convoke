@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.memory.chunker import render_message
+from app.memory.chunker import render_message, render_thread, resolve_reply_targets
 from app.memory.embeddings import Embedder
 from app.memory.store import search_chat_history
 from app.models import Chat, MemoryGap, Message, Note
@@ -114,8 +114,11 @@ async def assemble_context(
             "## Possibly relevant older conversations\n" + "\n\n---\n\n".join(hits_text)
         )
     if recent:
+        # Reply linkage must be explicit here — the triggering message is
+        # often itself a reply ("what does the message I replied to say?"),
+        # and its target may be far older than the window.
+        targets = await resolve_reply_targets(session, chat.id, recent)
         sections.append(
-            "## Recent messages (most recent last)\n"
-            + "\n".join(render_message(m) for m in recent)
+            "## Recent messages (most recent last)\n" + render_thread(recent, targets)
         )
     return "\n\n".join(sections)

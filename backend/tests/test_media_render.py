@@ -64,23 +64,22 @@ def test_failed_and_skipped_states():
 def test_render_message_carries_annotation():
     m = media_msg(status="described", description="two friends on a picnic blanket")
     assert render_message(m) == (
-        "Alice [2026-07-01 12:00]: [photo: two friends on a picnic blanket]"
+        "Alice [2026-07-01 12:00] #1: [photo: two friends on a picnic blanket]"
     )
 
 
-def test_render_segment_annotates_media_and_quoted_media_reply():
-    from app.memory.chunker import Segment, render_segment
+def test_render_thread_annotates_media_and_quoted_media_reply():
+    from app.memory.chunker import render_thread
 
     photo = media_msg(status="described", description="movie tickets for Dune")
     reply = Message(chat_id=1, tg_message_id=2, sender_name="Bob", text="I'm in!",
                     sent_at=T0, reply_to_tg_message_id=1)
-    seg = Segment(thread_id=None, messages=[reply], tg_id_start=2, tg_id_end=2)
-    out = render_segment(seg, reply_targets={1: photo})
-    assert '↳ (replies to Alice: "[photo: movie tickets for Dune]")' in out
+    out = render_thread([reply], reply_targets={1: photo})
+    assert '↳ replies to [#1] [2026-07-01 12:00] Alice: "[photo: movie tickets for Dune]"' in out
 
-    seg_with_media = Segment(thread_id=None, messages=[photo, reply], tg_id_start=1, tg_id_end=2)
-    out = render_segment(seg_with_media)
+    out = render_thread([photo, reply])
     assert "[photo: movie tickets for Dune]" in out.splitlines()[0]
+    assert "(replying to #1)" in out
 
 
 def test_gate_texts_components():

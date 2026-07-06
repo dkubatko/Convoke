@@ -122,13 +122,20 @@ def test_split_reply_splits_on_newlines():
 
 
 async def test_execute_run_with_test_model(db_sessionmaker, bot_row, monkeypatch):
-    """Full run: pending run → TestModel (calls every tool) → reply sent,
-    persisted as self, run marked done."""
+    """Full run: pending run → TestModel calls the remember tool → reply sent,
+    persisted as self, note written, run marked done.
+
+    Pinned to the remember tool rather than bare TestModel() (which calls every
+    tool at once): pydantic-ai executes a turn's tool calls concurrently, each
+    on its own session. Under Postgres those are independent connections and
+    run fine, but the in-memory sqlite test DB is a single shared connection,
+    so five concurrent tool sessions race and remember's commit is
+    intermittently lost. The read-only tools add nothing this test asserts."""
     from pydantic_ai.models.test import TestModel
 
     import app.agents.runtime as runtime
 
-    monkeypatch.setattr(runtime, "build_model", lambda provider: TestModel())
+    monkeypatch.setattr(runtime, "build_model", lambda provider: TestModel(call_tools=["remember"]))
 
     fake = AgentFakeBot()
     chat = await authorize_chat(db_sessionmaker, fake, bot_row)
@@ -293,3 +300,58 @@ async def test_agent_reply_formatting_reaches_telegram(db_sessionmaker, bot_row,
     assert "<b>Dune</b>" in sent and "<i>8.0</i>" in sent
     assert "&lt;div&gt;" in sent  # disallowed tag renders literally
     assert sent.endswith("</b>")  # unclosed tag repaired
+
+
+async def test_context_annotates_reply_to_off_window_target(db_sessionmaker, bot_row):
+    """The recent window quotes a reply target too old to be shown, and marks
+    replies to visible messages with a pointer instead of a duplicate."""
+    from app.agents.context import assemble_context
+
+    fake = AgentFakeBot()
+    chat = await authorize_chat(db_sessionmaker, fake, bot_row)
+    t0 = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+    async with db_sessionmaker() as s:
+        s.add(Message(chat_id=chat.id, tg_message_id=1, sender_name="Alice",
+                      text="hike Saturday at 10", sent_at=t0))
+        # Enough filler that #1 falls outside the 80-message recent window.
+        for i in range(10, 95):
+            s.add(Message(chat_id=chat.id, tg_message_id=i, sender_name="Bob",
+                          text=f"filler {i}", sent_at=t0 + timedelta(minutes=i)))
+        s.add(Message(chat_id=chat.id, tg_message_id=95, sender_name="Cara",
+                      text="count me in!", sent_at=t0 + timedelta(minutes=95),
+                      reply_to_tg_message_id=1))
+        s.add(Message(chat_id=chat.id, tg_message_id=96, sender_name="Dan",
+                      text="same", sent_at=t0 + timedelta(minutes=96),
+                      reply_to_tg_message_id=95))
+        await s.commit()
+
+    async with db_sessionmaker() as s:
+        chat_row = await s.get(Chat, chat.id)
+        ctx = await assemble_context(s, FakeEmbedder(), chat_row, "hike")
+    assert '↳ replies to [#1] [2026-07-01 12:00] Alice: "hike Saturday at 10"' in ctx
+    assert "(replying to #95)" in ctx  # visible target: pointer, not a quote
+
+
+async def test_get_messages_tool_fetches_by_id(db_sessionmaker, bot_row):
+    from types import SimpleNamespace
+
+    from app.agents.deps import AgentDeps
+    from app.agents.tools import get_messages
+
+    fake = AgentFakeBot()
+    chat = await authorize_chat(db_sessionmaker, fake, bot_row)
+    t0 = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+    async with db_sessionmaker() as s:
+        s.add(Message(chat_id=chat.id, tg_message_id=10, sender_name="Alice",
+                      text="the original plan", sent_at=t0))
+        s.add(Message(chat_id=chat.id, tg_message_id=11, sender_name="Bob",
+                      text="works for me", sent_at=t0 + timedelta(minutes=1),
+                      reply_to_tg_message_id=10))
+        await s.commit()
+
+    deps = AgentDeps(sessionmaker=db_sessionmaker, embedder=FakeEmbedder(),
+                     chat_id=chat.id, run_id=1)
+    out = await get_messages(SimpleNamespace(deps=deps), [11, 10, 999])
+    assert "#10: the original plan" in out
+    assert "(replying to #10)" in out
+    assert "#999: not in Convoke's stored history" in out

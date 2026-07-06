@@ -11,8 +11,7 @@ classifier can read the dialogue ("the bot already confirmed 8pm; the user is
 thanking it") — bot messages are never window/prefilter input, context only.
 """
 
-from app.media.render import message_body
-from app.memory.chunker import render_message
+from app.memory.chunker import render_message, reply_annotation
 from app.models import IntentEpisode, Message, Workflow
 from app.intent.state import render_slots
 
@@ -23,10 +22,10 @@ You watch a group chat for this intent:
 Details (slots) to extract as the conversation converges:
 {slots_desc}
 
-Conversation, oldest first, lines numbered [m1], [m2], … — lines before the
-marker are earlier context; lines tagged [bot] are your own assistant's
-messages; a reply points to its target as (replying to [mN]), or quotes it
-when the original isn't shown:
+Conversation, oldest first. Each line is "Sender [time] #id: text"; lines
+before the marker are earlier context; lines tagged [bot] are your own
+assistant's messages; a reply points to its target as (replying to #id), or
+quotes the original when it isn't shown:
 {transcript}
 
 Classify the NEW messages against the intent:
@@ -54,10 +53,10 @@ Details (slots) to extract as the conversation converges:
 Topics of this intent currently being tracked in this chat:
 {episodes}
 
-Conversation, oldest first, lines numbered [m1], [m2], … — lines before the
-marker are earlier context; lines tagged [bot] are your own assistant's
-messages; a reply points to its target as (replying to [mN]), or quotes it
-when the original isn't shown:
+Conversation, oldest first. Each line is "Sender [time] #id: text"; lines
+before the marker are earlier context; lines tagged [bot] are your own
+assistant's messages; a reply points to its target as (replying to #id), or
+quotes the original when it isn't shown:
 {transcript}
 
 Classify how the NEW messages relate to the tracked topics:
@@ -115,44 +114,26 @@ def slots_desc(workflow: Workflow) -> str:
 def render_transcript(
     context: list[Message], window: list[Message], targets: dict[int, Message] | None = None
 ) -> str:
-    # Lines are numbered [m1]… so a reply to a VISIBLE message is a pure
-    # pointer — "(replying to [m3])" — never duplicated content. Replies to
-    # anything off-screen get the full quoted original instead.
+    # Same #id transcript the agent reads; the marker splits earlier context
+    # from the messages to classify, and reply_annotation adds the shared
+    # (replying to #id) pointer / quoted original.
     msgs = [*context, *window]
-    idx = {m.tg_message_id: i + 1 for i, m in enumerate(msgs)}
+    present = {m.tg_message_id for m in msgs}
+    targets = targets or {}
     lines: list[str] = []
     for i, m in enumerate(msgs):
         if i == len(context):
             lines.append("--- new messages to classify ---")
-        lines.append(_render_line(m, idx, targets))
+        lines.append(_render_line(m) + reply_annotation(m, present, targets))
     return "\n".join(lines)
 
 
-def _render_line(
-    m: Message,
-    idx: dict[int, int] | None = None,
-    targets: dict[int, Message] | None = None,
-) -> str:
-    num = (idx or {}).get(m.tg_message_id)
-    prefix = f"[m{num}] " if num else ""
-    if m.source == "self":
-        ts = m.sent_at.strftime("%Y-%m-%d %H:%M")
-        line = f"{prefix}[bot] [{ts}]: {m.text}"
-    else:
-        line = prefix + render_message(m)
-    rid = m.reply_to_tg_message_id
-    if not rid:
-        return line
-    j = (idx or {}).get(rid)
-    if j is not None:
-        return f"{line} (replying to [m{j}])"
-    target = (targets or {}).get(rid)
-    if target is None:
-        return line
-    q = message_body(target).replace("\n", " ")
-    if len(q) > 140:
-        q = q[:140] + "…"
-    return f'{line}\n  ↳ (this replies to {target.sender_name or "Unknown"}, earlier: "{q}")'
+def _render_line(m: Message) -> str:
+    """One classifier transcript line — the shared #id line, with the bot's
+    own messages tagged [bot] (they are dialogue context, never window or
+    prefilter input)."""
+    base = render_message(m)
+    return f"[bot] {base}" if m.source == "self" else base
 
 
 def render_episodes(episodes: list[IntentEpisode]) -> str:

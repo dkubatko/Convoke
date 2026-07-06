@@ -41,6 +41,11 @@ lines starting with •.
 - The chat's full history is your memory: use search_chat_history for anything \
 older than the recent messages shown, recall for stored notes, and remember to \
 persist durable facts (decisions, preferences, recurring context) worth keeping.
+- Transcript lines are labeled with their real Telegram message id (#123), and \
+replies are annotated with "(replying to #id)" when the target is shown, or a \
+quoted "↳ replies to [#id] [time] Sender: …" line when it isn't. Use get_messages \
+to read any specific message by that id verbatim — e.g. a reply target or a \
+message cited in search results.
 - When a tool needs structured arguments, fill them from your own knowledge when \
 you are confident: a city becomes its coordinates, a place its timezone, a date \
 phrase a concrete date. Don't ask the user for technical values you can derive.
@@ -110,6 +115,7 @@ async def execute_run(
             return
 
     is_workflow = run.trigger == "workflow"
+    is_reply = run.trigger == "reply"
     thread_id = run.thread_id
     trigger_message_id = run.trigger_tg_message_id
     request_text = run.request_text
@@ -140,6 +146,11 @@ async def execute_run(
                 "conclude no action is warranted at all, reply with exactly "
                 "NO_ACTION: <one short reason> — nothing will be posted to the chat."
                 if is_workflow
+                else "You were invoked by a member replying to one of your earlier "
+                "messages (shown last in the recent messages; its reply annotation "
+                "identifies the message being replied to — fetch it with "
+                "get_messages if you need the full text)."
+                if is_reply
                 else "You were invoked by a member's message (shown last in the recent messages)."
             ),
         )

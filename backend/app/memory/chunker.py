@@ -25,29 +25,83 @@ class Segment:
 
 
 def render_message(m: Message) -> str:
+    """One transcript line: 'Sender [ts] #id: body'. The #id is the real
+    Telegram message id — every reader (agent context, chunks, search hits,
+    the intent classifier) uses it identically: agents pass it to
+    get_messages, and reply annotations point at it."""
     ts = m.sent_at.strftime("%Y-%m-%d %H:%M")
-    return f"{m.sender_name or 'Unknown'} [{ts}]: {message_body(m)}"
+    return f"{m.sender_name or 'Unknown'} [{ts}] #{m.tg_message_id}: {message_body(m)}"
 
 
-def render_segment(seg: Segment, reply_targets: dict[int, Message] | None = None) -> str:
-    """Render a segment; a reply whose target is OUTSIDE the segment gets the
-    quoted original appended (in-segment targets are visible lines already —
-    never duplicated). This bakes reply context into the chunk text, so both
-    its embedding and search_chat_history hits carry it."""
-    present = {m.tg_message_id for m in seg.messages}
-    lines: list[str] = []
-    for m in seg.messages:
-        line = render_message(m)
+def reply_quote(target: Message, limit: int = 120) -> str:
+    """The quoted-original line for a reply whose target isn't visible in the
+    same transcript — rendered in the same 'Sender [ts] #id: body' shape as a
+    normal line so it reads uniformly. Single source of the ↳ format."""
+    ts = target.sent_at.strftime("%Y-%m-%d %H:%M")
+    q = message_body(target).replace("\n", " ")
+    if len(q) > limit:
+        q = q[:limit] + "…"
+    return (
+        f'  ↳ replies to [#{target.tg_message_id}] [{ts}] '
+        f'{target.sender_name or "Unknown"}: "{q}"'
+    )
+
+
+def reply_annotation(m: Message, present: set[int], targets: dict[int, Message]) -> str:
+    """The reply-linkage suffix for one transcript line — the single source of
+    reply rendering, shared by every transcript (agent context, chunks, search
+    hits, the intent classifier): a pure pointer when the target is visible in
+    the same transcript, the quoted original when it is off-screen, the bare
+    id when Convoke never stored it. Empty when the message is not a reply."""
+    rid = m.reply_to_tg_message_id
+    if not rid:
+        return ""
+    if rid in present:
+        return f" (replying to #{rid})"
+    target = targets.get(rid)
+    if target is not None and message_body(target):
+        return "\n" + reply_quote(target)
+    return f" (replying to #{rid} — message not stored)"
+
+
+def render_thread(
+    messages: list[Message], reply_targets: dict[int, Message] | None = None
+) -> str:
+    """Render messages as a transcript with reply linkage always explicit.
+    Chunks embed this text, so both their embeddings and search_chat_history
+    hits carry the linkage."""
+    present = {m.tg_message_id for m in messages}
+    targets = reply_targets or {}
+    return "\n".join(render_message(m) + reply_annotation(m, present, targets) for m in messages)
+
+
+async def resolve_reply_targets(
+    session: AsyncSession, chat_id: int, messages: list[Message]
+) -> dict[int, Message]:
+    """Reply targets for `messages`, keyed by tg_message_id: in-batch targets
+    come for free, the rest are fetched in one query. Shared by chunking,
+    agent context, tools, and the API."""
+    by_id = {m.tg_message_id: m for m in messages}
+    targets: dict[int, Message] = {}
+    missing: set[int] = set()
+    for m in messages:
         rid = m.reply_to_tg_message_id
-        if rid and rid not in present:
-            target = (reply_targets or {}).get(rid)
-            if target is not None and message_body(target):
-                q = message_body(target).replace("\n", " ")
-                if len(q) > 120:
-                    q = q[:120] + "…"
-                line += f'\n  ↳ (replies to {target.sender_name or "Unknown"}: "{q}")'
-        lines.append(line)
-    return "\n".join(lines)
+        if not rid:
+            continue
+        if rid in by_id:
+            targets[rid] = by_id[rid]
+        else:
+            missing.add(rid)
+    if missing:
+        fetched = (
+            await session.execute(
+                select(Message).where(
+                    Message.chat_id == chat_id, Message.tg_message_id.in_(missing)
+                )
+            )
+        ).scalars()
+        targets.update({m.tg_message_id: m for m in fetched})
+    return targets
 
 
 def segment_messages(
@@ -146,23 +200,7 @@ async def chunk_chat(
     if new_cursor <= state.last_tg_message_id:
         return 0
 
-    # Resolve reply targets that live outside the fetched batch (one query);
-    # in-batch targets are already at hand.
-    by_id = {m.tg_message_id: m for m in messages}
-    missing = {
-        m.reply_to_tg_message_id
-        for m in messages
-        if m.reply_to_tg_message_id and m.reply_to_tg_message_id not in by_id
-    }
-    if missing:
-        fetched = (
-            await session.execute(
-                select(Message).where(
-                    Message.chat_id == chat_id, Message.tg_message_id.in_(missing)
-                )
-            )
-        ).scalars()
-        by_id.update({m.tg_message_id: m for m in fetched})
+    targets = await resolve_reply_targets(session, chat_id, list(messages))
 
     persisted = 0
     for seg in segments:
@@ -174,7 +212,7 @@ async def chunk_chat(
                 thread_id=seg.thread_id,
                 msg_tg_id_start=seg.tg_id_start,
                 msg_tg_id_end=seg.tg_id_end,
-                text=render_segment(seg, by_id),
+                text=render_thread(seg.messages, targets),
             )
         )
         persisted += 1

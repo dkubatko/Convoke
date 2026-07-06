@@ -6,11 +6,13 @@ from pydantic_ai import RunContext
 from sqlalchemy import select
 
 from app.agents.deps import AgentDeps
+from app.memory.chunker import render_thread, resolve_reply_targets
 from app.memory.store import search_chat_history as store_search
-from app.models import IntentEpisode, Note
+from app.models import IntentEpisode, Message, Note
 
 MAX_NOTES_RETURNED = 8
 MAX_PAST_ACTIONS = 6
+MAX_MESSAGES_FETCHED = 30
 
 
 async def search_chat_history(ctx: RunContext[AgentDeps], query: str) -> str:
@@ -22,6 +24,39 @@ async def search_chat_history(ctx: RunContext[AgentDeps], query: str) -> str:
     if not hits:
         return "No matching history found."
     return "\n\n---\n\n".join(h.rendered for h in hits)
+
+
+async def get_messages(ctx: RunContext[AgentDeps], message_ids: list[int]) -> str:
+    """Fetch specific messages from this chat by id — the #id labels shown in
+    transcripts and in "(replying to #id)" annotations. Use it to read a reply
+    target or any cited message verbatim (up to 30 ids per call)."""
+    ids = list(dict.fromkeys(message_ids))[:MAX_MESSAGES_FETCHED]
+    if not ids:
+        return "No message ids given."
+    async with ctx.deps.sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(Message)
+                    .where(
+                        Message.chat_id == ctx.deps.chat_id,
+                        Message.tg_message_id.in_(ids),
+                    )
+                    .order_by(Message.tg_message_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        targets = await resolve_reply_targets(session, ctx.deps.chat_id, list(rows))
+        out: list[str] = []
+        if rows:
+            out.append(render_thread(list(rows), targets))
+        found = {m.tg_message_id for m in rows}
+        for mid in ids:
+            if mid not in found:
+                out.append(f"#{mid}: not in Convoke's stored history for this chat.")
+    return "\n".join(out)
 
 
 async def remember(ctx: RunContext[AgentDeps], fact: str, key: str | None = None) -> str:
@@ -133,4 +168,4 @@ async def past_workflow_actions(ctx: RunContext[AgentDeps]) -> str:
     return "\n".join(lines)
 
 
-AGENT_TOOLS = [search_chat_history, remember, recall, past_workflow_actions]
+AGENT_TOOLS = [search_chat_history, get_messages, remember, recall, past_workflow_actions]

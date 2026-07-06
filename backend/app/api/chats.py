@@ -12,6 +12,7 @@ from app.core.tasks import spawn
 from app.core.security import require_operator
 from app.ingest.history_import import delete_import, run_import
 from app.media.render import message_body
+from app.memory.chunker import resolve_reply_targets
 from app.memory.runtime import ensure_embedder
 from app.memory.store import search_chat_history
 from app.models import AgentRun, Chat, ImportJob, MemoryGap, Message, MessageAttachment, Note
@@ -95,24 +96,10 @@ async def recent_messages(
     )
     # Resolve replied-to previews (usually within `rows`; one extra query
     # covers replies to older messages).
-    by_id = {m.tg_message_id: m for m in rows}
-    missing = {
-        m.reply_to_tg_message_id
-        for m in rows
-        if m.reply_to_tg_message_id and m.reply_to_tg_message_id not in by_id
-    }
-    if missing:
-        fetched = (
-            await session.execute(
-                select(Message).where(
-                    Message.chat_id == chat_id, Message.tg_message_id.in_(missing)
-                )
-            )
-        ).scalars()
-        by_id.update({m.tg_message_id: m for m in fetched})
+    targets = await resolve_reply_targets(session, chat_id, list(rows))
 
     def preview(m: Message) -> ReplyPreview | None:
-        target = by_id.get(m.reply_to_tg_message_id or 0)
+        target = targets.get(m.reply_to_tg_message_id or 0)
         if target is None:
             return None
         text = message_body(target).replace("\n", " ")

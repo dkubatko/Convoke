@@ -368,7 +368,9 @@ async def test_bare_photo_reply_to_bot_triggers_agent_run(db_sessionmaker, bot_r
     async with db_sessionmaker() as s:
         run = (await s.execute(select(AgentRun))).scalar_one()
         assert run.trigger == "reply"
-        assert run.request_text == "[photo — description pending]"
+        # The reply target's quote rides along so the run is self-contained.
+        assert run.request_text.startswith("[photo — description pending]")
+        assert "\u21b3 replies to [#" in run.request_text
 
 
 async def test_edited_message_updates_text(db_sessionmaker, bot_row):
@@ -398,3 +400,34 @@ async def test_edited_message_updates_text(db_sessionmaker, bot_row):
         ).scalar_one()
         assert row.text == "hello edited"
         assert row.edited_at is not None
+
+
+async def test_reply_backfills_unseen_target(db_sessionmaker, bot_row):
+    """Replying to a message Convoke never stored (sent before authorization
+    or during an offline gap) persists the target from Telegram's inline
+    payload, and the run's request carries the quote."""
+    fake = FakeBot(member_status="administrator")
+    await authorize(db_sessionmaker, fake, bot_row)
+    target = {
+        "message_id": 7,
+        "date": 1_779_999_000,
+        "chat": GROUP,
+        "from": {"id": 4242, "is_bot": False, "first_name": "Olga"},
+        "text": "the plan from before the bot joined",
+    }
+    update = upd(3, message={
+        "message_id": 30, "date": 1_780_000_300, "chat": GROUP, "from": ADMIN,
+        "text": "@convoke_bot what did she mean?", "reply_to_message": target,
+    })
+    await run_update(db_sessionmaker, fake, bot_row, update)
+
+    async with db_sessionmaker() as s:
+        row = (
+            await s.execute(select(Message).where(Message.tg_message_id == 7))
+        ).scalar_one()
+        assert row.text == "the plan from before the bot joined"
+        assert row.sender_name == "Olga"
+        assert row.source == "live"
+        run = (await s.execute(select(AgentRun))).scalar_one()
+        assert run.trigger == "mention"
+        assert "replies to [#7]" in run.request_text and "Olga" in run.request_text

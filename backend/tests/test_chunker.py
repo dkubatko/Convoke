@@ -129,18 +129,23 @@ async def test_forum_cursor_does_not_skip_active_thread(db_sessionmaker):
         assert state.last_tg_message_id == 3
 
 
-def test_render_segment_quotes_out_of_segment_reply_targets():
-    """A reply whose target is outside the segment gets the quoted original
-    appended; a reply to an in-segment (visible) message gets nothing extra."""
-    from app.memory.chunker import Segment, render_segment
+def test_render_thread_quotes_out_of_transcript_reply_targets():
+    """A reply whose target is off-screen gets the quoted original appended;
+    a reply to a visible message gets a pure pointer; a reply to a message
+    never stored keeps the id."""
+    from app.memory.chunker import render_thread
 
     old = msg(1, 0, text="wanna hike Saturday at 10?")
     a = msg(10, 60, text="cool!")
-    a.reply_to_tg_message_id = 1  # target NOT in this segment
+    a.reply_to_tg_message_id = 1  # target NOT in this transcript
     b = msg(11, 61, text="same!")
-    b.reply_to_tg_message_id = 10  # target IS in this segment
-    seg = Segment(thread_id=None, messages=[a, b], tg_id_start=10, tg_id_end=11)
+    b.reply_to_tg_message_id = 10  # target IS in this transcript
+    c = msg(12, 62, text="what was that about?")
+    c.reply_to_tg_message_id = 7  # target never stored
 
-    text = render_segment(seg, {1: old, 10: a})
-    assert '↳ (replies to Alice: "wanna hike Saturday at 10?")' in text
-    assert text.count("↳") == 1  # the in-segment reply is NOT expanded
+    text = render_thread([a, b, c], {1: old, 10: a})
+    assert '↳ replies to [#1] [2026-07-01 12:00] Alice: "wanna hike Saturday at 10?"' in text
+    assert text.count("↳") == 1  # the in-transcript reply is NOT expanded
+    assert "(replying to #10)" in text  # …it is a pointer instead
+    assert "(replying to #7 — message not stored)" in text
+    assert "#10:" in text  # every line carries its real Telegram id

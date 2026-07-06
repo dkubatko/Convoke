@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.memory.chunker import render_message
+from app.memory.chunker import render_thread, resolve_reply_targets
 from app.memory.embeddings import Embedder
 from app.models import Chunk, Message
 
@@ -33,7 +33,9 @@ async def render_chunk_from_raw(session: AsyncSession, chunk: Chunk) -> str:
         .scalars()
         .all()
     )
-    return "\n".join(render_message(m) for m in messages)
+    msgs = list(messages)
+    targets = await resolve_reply_targets(session, chunk.chat_id, msgs)
+    return render_thread(msgs, targets)
 
 
 async def search_chat_history(

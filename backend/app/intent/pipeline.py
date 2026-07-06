@@ -61,6 +61,7 @@ from app.intent.state import (
     normalize_slot_updates,
     render_slots,
 )
+from app.memory.chunker import resolve_reply_targets
 from app.memory.embeddings import Embedder
 from app.models import (
     Chat,
@@ -421,26 +422,7 @@ class IntentSweeper:
         # messages once — combined with the reply for prefilter scoring
         # ("cool!" replying to "let's hike in Sunnyvale" must score like the
         # proposal), and quoted in the transcript when outside it.
-        by_id = {m.tg_message_id: m for m in thread_msgs}
-        reply_targets: dict[int, Message] = {}
-        missing_ids = set()
-        for m in thread_msgs:
-            rid = m.reply_to_tg_message_id
-            if not rid:
-                continue
-            if rid in by_id:
-                reply_targets[rid] = by_id[rid]
-            else:
-                missing_ids.add(rid)
-        if missing_ids:
-            fetched = (
-                await session.execute(
-                    select(Message).where(
-                        Message.chat_id == chat_id, Message.tg_message_id.in_(missing_ids)
-                    )
-                )
-            ).scalars()
-            reply_targets.update({m.tg_message_id: m for m in fetched})
+        reply_targets = await resolve_reply_targets(session, chat_id, thread_msgs)
 
         # Stickiness (bypassing the prefilter) exists so an ACTIVE negotiation
         # never loses a weak-looking follow-up ("yes, 7 works"). A satisfied

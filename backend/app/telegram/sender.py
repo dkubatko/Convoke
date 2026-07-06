@@ -40,6 +40,11 @@ async def send_and_persist(
             chat_id=chat.id,
             tg_message_id=sent.message_id,
             thread_id=sent.message_thread_id,
+            # From `sent`, not the argument: with allow_sending_without_reply
+            # Telegram may have dropped the link (target deleted meanwhile).
+            reply_to_tg_message_id=(
+                sent.reply_to_message.message_id if sent.reply_to_message else None
+            ),
             sender_id=sent.from_user.id if sent.from_user else None,
             sender_name=sent.from_user.full_name if sent.from_user else "",
             text=sent.text or "",

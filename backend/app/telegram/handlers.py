@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.media.render import message_body
+from app.memory.chunker import reply_quote
 from app.models import AgentRun, AuthNonce, Bot, Chat, Message, MessageAttachment
 from app.telegram.sender import send_and_persist
 
@@ -243,20 +244,79 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
     if attachment is not None:
         attachment.chat_id = chat.id
         attachment.tg_message_id = msg.message_id
-        message.attachment = attachment  # cascades on session.add(message)
+    # Assign even when None: _ensure_reply_target's SELECT autoflushes this
+    # pending row, and message_body reads .attachment right after — an
+    # uninitialized selectin relationship would lazy-load, illegal in async.
+    message.attachment = attachment  # cascades on session.add(message)
     session.add(message)
+
+    reply_target = (
+        await _ensure_reply_target(session, chat, msg.reply_to_message)
+        if msg.reply_to_message is not None
+        else None
+    )
 
     trigger = _agent_trigger(msg, bot_row, text)
     if trigger is not None:
+        request_text = message_body(message)
+        # The trigger often only makes sense with its reply target ("what does
+        # the message I replied to say?") — carry the quote so the semantic
+        # query and the run log are self-contained.
+        if reply_target is not None and message_body(reply_target):
+            request_text += "\n" + reply_quote(reply_target)
         session.add(
             AgentRun(
                 chat_id=chat.id,
                 trigger=trigger,
                 trigger_tg_message_id=msg.message_id,
                 thread_id=msg.message_thread_id,
-                request_text=message_body(message),
+                request_text=request_text,
             )
         )
+
+
+async def _ensure_reply_target(
+    session: AsyncSession, chat: Chat, target: TgMessage
+) -> Message | None:
+    """The replied-to message as a stored row. Telegram inlines the full
+    original in reply_to_message, so a target Convoke never saw (sent before
+    authorization, or during an offline gap) is persisted now — reply context
+    must not depend on the bot having been online when the original arrived."""
+    row = (
+        await session.execute(
+            select(Message).where(
+                Message.chat_id == chat.id, Message.tg_message_id == target.message_id
+            )
+        )
+    ).scalar_one_or_none()
+    if row is not None:
+        return row
+    text = target.text or target.caption or ""
+    attachment = extract_attachment(target)
+    if not text and attachment is None:
+        return None  # service messages (topic created, pins…) aren't content
+    row = Message(
+        chat_id=chat.id,
+        tg_message_id=target.message_id,
+        thread_id=target.message_thread_id,
+        reply_to_tg_message_id=(
+            target.reply_to_message.message_id if target.reply_to_message else None
+        ),
+        sender_id=target.from_user.id if target.from_user else None,
+        sender_name=target.from_user.full_name if target.from_user else "",
+        text=text,
+        sent_at=target.date.astimezone(timezone.utc),
+        source="live",
+    )
+    if attachment is not None:
+        attachment.chat_id = chat.id
+        attachment.tg_message_id = target.message_id
+    # Always assign (even None): message_body reads .attachment on this still-
+    # pending row, and an uninitialized selectin relationship would lazy-load —
+    # illegal in async context.
+    row.attachment = attachment
+    session.add(row)
+    return row
 
 
 def extract_attachment(msg: TgMessage) -> MessageAttachment | None:

@@ -535,7 +535,7 @@ async def test_reply_pulls_quoted_original_into_the_prompt(db_sessionmaker):
     script.push(detect(relation="unrelated"))
     assert await sweeper.sweep(now=NOW) == 1
     prompt = script.prompts[0]
-    assert 'this replies to Alice, earlier: "wanna hike Saturday at 10?"' in prompt
+    assert 'replies to [#1] [2026-07-02 09:00] Alice: "wanna hike Saturday at 10?"' in prompt
     assert "wanna hike Saturday" not in prompt.split("↳")[0]  # truly out of context
 
 
@@ -566,8 +566,8 @@ async def test_weak_reply_inherits_target_topicality_at_the_gate(db_sessionmaker
     assert len(script.prompts) == 1
     # The target sits 2 messages back — VISIBLE in the numbered transcript —
     # so the reply gets a pure pointer, never a duplicated quote.
-    assert "(replying to [m1])" in script.prompts[0]
-    assert "this replies to" not in script.prompts[0]
+    assert "(replying to #1)" in script.prompts[0]
+    assert "↳" not in script.prompts[0]  # pure pointer, no quoted expansion
 
 
 # ---------- I: parallel dispatch ----------
