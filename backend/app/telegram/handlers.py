@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.media.render import message_body
 from app.memory.chunker import reply_quote
-from app.models import AgentRun, AuthNonce, Bot, Chat, Message, MessageAttachment
+from app.models import AgentRun, AuthNonce, Bot, Chat, ChatThread, Message, MessageAttachment
 from app.telegram.sender import send_and_persist
 
 log = logging.getLogger("convoke.telegram")
@@ -214,6 +214,10 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
     if msg.chat.title and msg.chat.title != chat.title:
         chat.title = msg.chat.title
 
+    # Forum-topic service events carry the topic name — the only channel the
+    # Bot API exposes it through. Capture before the no-content drop below.
+    await _capture_thread_title(session, chat, msg)
+
     text = msg.text or msg.caption or ""
     attachment = extract_attachment(msg)
     if not text and attachment is None:
@@ -257,7 +261,9 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
     )
 
     trigger = _agent_trigger(msg, bot_row, text)
-    if trigger is not None:
+    # An unmonitored thread is fully ignored: no proactive workflows, no memory,
+    # and no agent replies — not even to a direct @mention or reply.
+    if trigger is not None and await _thread_monitored(session, chat.id, msg.message_thread_id):
         request_text = message_body(message)
         # The trigger often only makes sense with its reply target ("what does
         # the message I replied to say?") — carry the quote so the semantic
@@ -273,6 +279,29 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
                 request_text=request_text,
             )
         )
+
+
+async def _capture_thread_title(session: AsyncSession, chat: Chat, msg: TgMessage) -> None:
+    """Record a forum topic's name from its create/edit service event — the only
+    way the Bot API surfaces it. Existing topics (created before the bot could
+    see the event) get a default name in the UI and can be renamed by hand."""
+    event = msg.forum_topic_created or msg.forum_topic_edited
+    name = getattr(event, "name", None) if event is not None else None
+    if not name:
+        return
+    thread_key = msg.message_thread_id or msg.message_id
+    row = await session.get(ChatThread, (chat.id, thread_key))
+    if row is None:
+        session.add(ChatThread(chat_id=chat.id, thread_key=thread_key, title=name))
+    else:
+        row.title = name
+
+
+async def _thread_monitored(session: AsyncSession, chat_id: int, thread_id: int | None) -> bool:
+    """A thread is monitored unless an operator turned it off (no row = default
+    on). thread_id None is the General thread (thread_key 0)."""
+    row = await session.get(ChatThread, (chat_id, thread_id or 0))
+    return row is None or row.monitored
 
 
 async def _ensure_reply_target(

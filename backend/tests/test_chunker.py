@@ -99,6 +99,31 @@ async def test_chunk_chat_advances_cursor(db_sessionmaker):
     assert n == 1
     async with db_sessionmaker() as s:
         assert len((await s.execute(select(Chunk))).scalars().all()) == 2
+
+
+async def test_chunk_chat_skips_unmonitored_thread(db_sessionmaker):
+    from app.models import ChatThread
+
+    chat_id = await _setup_chat(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        # General thread (1,2) + an UNMONITORED thread 55 (3,4).
+        for m in [msg(1, 0), msg(2, 1), msg(3, 2, thread=55), msg(4, 3, thread=55)]:
+            m.chat_id = chat_id
+            s.add(m)
+        s.add(ChatThread(chat_id=chat_id, thread_key=55, monitored=False))
+        await s.commit()
+
+    now = T0 + timedelta(minutes=200)  # everything cold
+    async with db_sessionmaker() as s:
+        n = await chunk_chat(s, chat_id, now, LULL, 24, 0)
+        await s.commit()
+    assert n == 1  # only the General-thread segment; thread 55 is ignored
+
+    async with db_sessionmaker() as s:
+        chunks = (await s.execute(select(Chunk))).scalars().all()
+        assert len(chunks) == 1 and chunks[0].thread_id is None
+        # The cursor still advanced past the unmonitored tail — not stuck at 2.
+        assert (await s.get(ChunkState, chat_id)).last_tg_message_id == 4
         n = await chunk_chat(s, chat_id, now, LULL, 24, 0)
         assert n == 0  # idempotent
 

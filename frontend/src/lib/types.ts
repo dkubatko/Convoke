@@ -255,6 +255,23 @@ export interface WorkflowDetail extends Workflow {
   chats: WorkflowChat[]
 }
 
+export interface ThreadPreviewMsg {
+  sender_name: string
+  text: string
+  sent_at: string
+}
+
+export interface ChatThread {
+  thread_key: number
+  name: string
+  title: string | null
+  default_name: string
+  monitored: boolean
+  message_count: number
+  last_activity: string | null
+  preview: ThreadPreviewMsg[]
+}
+
 export interface AppSetting {
   key: string
   label: string

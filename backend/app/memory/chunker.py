@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.media.render import message_body
 from app.models import Chunk, ChunkState, Message
+from app.threads import unmonitored_threads
 
 
 @dataclass
@@ -182,10 +183,16 @@ async def chunk_chat(
         if m.sent_at.tzinfo is None:  # sqlite in tests
             m.sent_at = m.sent_at.replace(tzinfo=timezone.utc)
 
-    segments = segment_messages(list(messages), normalized_now, lull, max_messages, overlap)
+    # Unmonitored threads are never chunked into memory — but the cursor must
+    # still advance past them, so they are dropped from segmentation and from
+    # the unclosed set below rather than left to block it forever.
+    unmonitored = await unmonitored_threads(session, chat_id)
+    chunkable = [m for m in messages if (m.thread_id or 0) not in unmonitored]
+
+    segments = segment_messages(chunkable, normalized_now, lull, max_messages, overlap)
 
     # The cursor is shared across threads, so it may only advance past
-    # messages every thread has closed — otherwise an active thread's
+    # messages every monitored thread has closed — otherwise an active thread's
     # unchunked tail would be skipped forever. Segments beyond the safe
     # point are recomputed (identically) on a later pass.
     closed_end: dict[int | None, int] = {}
@@ -193,7 +200,7 @@ async def chunk_chat(
         closed_end[seg.thread_id] = max(closed_end.get(seg.thread_id, 0), seg.tg_id_end)
     unclosed = [
         m.tg_message_id
-        for m in messages
+        for m in chunkable
         if m.tg_message_id > closed_end.get(m.thread_id, 0)
     ]
     new_cursor = min(unclosed) - 1 if unclosed else messages[-1].tg_message_id

@@ -4,6 +4,7 @@ import { api, ApiError } from '../lib/api'
 import { shortDateTime, timeAgo, truncate } from '../lib/format'
 import {
   Chat,
+  ChatThread,
   ChatWorkflow,
   Gap,
   ImportJob,
@@ -35,7 +36,7 @@ import {
 } from '../components/ui'
 import { useUrlTab } from '../hooks/useUrlTab'
 
-const TABS = ['Memory', 'Workflows', 'Import history', 'Tools', 'Agent runs', 'Settings'] as const
+const TABS = ['Memory', 'Workflows', 'Threads', 'Import history', 'Tools', 'Agent runs', 'Settings'] as const
 
 export default function ChatDetail() {
   const { chatId } = useParams()
@@ -74,6 +75,7 @@ export default function ChatDetail() {
       <TabBar tabs={TABS} active={tab} onSelect={setTab} />
       {tab === 'Memory' && <MemoryTab chatId={id} />}
       {tab === 'Workflows' && <WorkflowsTab chatId={id} />}
+      {tab === 'Threads' && <ThreadsTab chatId={id} />}
       {tab === 'Import history' && <ImportTab chatId={id} />}
       {tab === 'Tools' && <ToolsTab chatId={id} />}
       {tab === 'Agent runs' && <RunsTab chatId={id} />}
@@ -663,6 +665,138 @@ function ExpandedWorkflow({ wf, chatId }: { wf: ChatWorkflow; chatId: number }) 
         )}
         <Link to={`/workflows/${wf.id}`}>Configure this workflow →</Link>
       </p>
+    </div>
+  )
+}
+
+/* ---------------- Threads ---------------- */
+
+function ThreadsTab({ chatId }: { chatId: number }) {
+  const threads = useQuery<ChatThread[]>(() => api.get(`/api/chats/${chatId}/threads`), [chatId])
+  const toast = useToast()
+  const [expandedKeys, setExpandedKeys] = useState<number[]>([])
+  const [editing, setEditing] = useState<number | null>(null)
+  const [draft, setDraft] = useState('')
+
+  async function save(tk: number, body: { monitored?: boolean; title?: string }) {
+    try {
+      await api.put(`/api/chats/${chatId}/threads/${tk}`, body)
+      await threads.refetch()
+    } catch (e) {
+      toast('err', e instanceof ApiError ? e.message : 'Couldn’t save')
+    }
+  }
+
+  if (threads.loading) return <CardSkeleton lines={4} />
+  if (threads.error)
+    return <ErrorNote message={threads.error} onRetry={() => void threads.refetch()} />
+  const list = threads.data ?? []
+
+  return (
+    <div className="stack">
+      <p className="muted" style={{ fontSize: 12.5, margin: 0, maxWidth: 620 }}>
+        Turn a thread off and Convoke ignores it completely — no workflows, nothing added to memory,
+        and no replies, even to a direct mention. Names are yours to set, for display only.
+      </p>
+      {list.length === 0 ? (
+        <Card>
+          <EmptyState title="No threads yet" hint="Threads appear here as messages arrive." />
+        </Card>
+      ) : (
+        list.map((t) => {
+          const expanded = expandedKeys.includes(t.thread_key)
+          const editingThis = editing === t.thread_key
+          return (
+            <Card key={t.thread_key}>
+              <div className="page-head-row">
+                <div className="row" style={{ gap: 10 }}>
+                  <input
+                    type="checkbox"
+                    aria-label={`Monitor ${t.name}`}
+                    style={{ width: 'auto', cursor: 'pointer' }}
+                    checked={t.monitored}
+                    onChange={(e) => void save(t.thread_key, { monitored: e.target.checked })}
+                  />
+                  <span className="thread-name-wrap">
+                    {editingThis ? (
+                      <input
+                        className="thread-rename"
+                        autoFocus
+                        value={draft}
+                        size={Math.max(4, (draft.length || t.default_name.length))}
+                        placeholder={t.default_name}
+                        onChange={(e) => setDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            void save(t.thread_key, { title: draft })
+                            setEditing(null)
+                          }
+                          if (e.key === 'Escape') setEditing(null)
+                        }}
+                        onBlur={() => {
+                          void save(t.thread_key, { title: draft })
+                          setEditing(null)
+                        }}
+                      />
+                    ) : (
+                      <h3 className="thread-name-h3">
+                        <button
+                          type="button"
+                          className="name-edit"
+                          title="Rename (display only)"
+                          onClick={() => {
+                            setEditing(t.thread_key)
+                            setDraft(t.title ?? '')
+                          }}
+                        >
+                          {t.name}
+                        </button>
+                      </h3>
+                    )}
+                  </span>
+                  {!t.title && !editingThis && (
+                    <span className="muted" style={{ fontSize: 11.5 }}>default name</span>
+                  )}
+                  {!t.monitored && <Chip label="ignored" tone="idle" />}
+                </div>
+                <span className="row" style={{ gap: 10 }}>
+                  <span className="muted mono" style={{ fontSize: 11 }}>
+                    {t.message_count} msg{t.message_count === 1 ? '' : 's'}
+                    {t.last_activity ? ` · ${timeAgo(t.last_activity)}` : ''}
+                  </span>
+                  <button
+                    className="btn btn--quiet btn--sm"
+                    aria-expanded={expanded}
+                    onClick={() =>
+                      setExpandedKeys((ks) =>
+                        ks.includes(t.thread_key)
+                          ? ks.filter((k) => k !== t.thread_key)
+                          : [...ks, t.thread_key],
+                      )
+                    }
+                  >
+                    {expanded ? 'Hide ▾' : 'Preview ▸'}
+                  </button>
+                </span>
+              </div>
+              {expanded && (
+                <div className="thread-preview">
+                  {t.preview.length === 0 ? (
+                    <p className="muted" style={{ margin: 0, fontSize: 12.5 }}>No recent messages.</p>
+                  ) : (
+                    t.preview.map((m, i) => (
+                      <div className="thread-preview-line" key={i}>
+                        <b>{m.sender_name || 'unknown'}</b>{' '}
+                        <span className="muted">{m.text || '—'}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </Card>
+          )
+        })
+      )}
     </div>
   )
 }

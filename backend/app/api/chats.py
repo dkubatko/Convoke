@@ -15,7 +15,16 @@ from app.media.render import message_body
 from app.memory.chunker import resolve_reply_targets
 from app.memory.runtime import ensure_embedder
 from app.memory.store import search_chat_history
-from app.models import AgentRun, Chat, ImportJob, MemoryGap, Message, MessageAttachment, Note
+from app.models import (
+    AgentRun,
+    Chat,
+    ChatThread,
+    ImportJob,
+    MemoryGap,
+    Message,
+    MessageAttachment,
+    Note,
+)
 
 router = APIRouter(dependencies=[Depends(require_operator)])
 
@@ -75,6 +84,139 @@ async def _chat_or_404(session: AsyncSession, chat_id: int) -> Chat:
     if chat is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat not found")
     return chat
+
+
+# ---------- threads (per-thread monitoring) ----------
+
+
+class ThreadPreviewMsg(BaseModel):
+    sender_name: str
+    text: str
+    sent_at: datetime
+
+
+class ThreadOut(BaseModel):
+    thread_key: int  # 0 = General/main thread
+    name: str  # effective display name: title if set, else default_name
+    title: str | None  # operator/captured title (None = using the default)
+    default_name: str  # "General" or "Topic #N"
+    monitored: bool
+    message_count: int
+    last_activity: datetime | None
+    preview: list[ThreadPreviewMsg]  # most recent messages, oldest-first
+
+
+class ThreadUpdate(BaseModel):
+    monitored: bool | None = None
+    title: str | None = None  # "" or whitespace clears back to the default
+
+
+async def _list_threads(
+    session: AsyncSession, chat_id: int, preview_n: int
+) -> list[ThreadOut]:
+    # Threads are discovered from stored messages; a captured-but-empty topic
+    # (only its service message, which isn't stored) is folded in from its row.
+    tk_col = func.coalesce(Message.thread_id, 0)
+    rows = (
+        await session.execute(
+            select(
+                tk_col.label("tk"),
+                func.count().label("cnt"),
+                func.min(Message.tg_message_id).label("first"),
+                func.max(Message.sent_at).label("last"),
+            )
+            .where(Message.chat_id == chat_id)
+            .group_by(tk_col)
+        )
+    ).all()
+    meta = {
+        r.thread_key: r
+        for r in (
+            await session.execute(select(ChatThread).where(ChatThread.chat_id == chat_id))
+        ).scalars()
+    }
+    stats = {r.tk: r for r in rows}
+    keys = set(stats) | set(meta)
+    # Ordinal names for non-General threads by order of first appearance
+    # (message-less named topics sort last).
+    non_general = sorted(
+        (k for k in keys if k != 0),
+        key=lambda k: stats[k].first if k in stats else float("inf"),
+    )
+    ordinal = {k: i + 1 for i, k in enumerate(non_general)}
+
+    out: list[ThreadOut] = []
+    for tk in [0, *non_general] if 0 in keys else non_general:
+        st = stats.get(tk)
+        m = meta.get(tk)
+        default_name = "General" if tk == 0 else f"Topic #{ordinal[tk]}"
+        title = m.title if m else None
+        preview: list[ThreadPreviewMsg] = []
+        if st is not None and preview_n > 0:
+            pv = (
+                (
+                    await session.execute(
+                        select(Message)
+                        .where(
+                            Message.chat_id == chat_id,
+                            Message.thread_id.is_(None) if tk == 0 else Message.thread_id == tk,
+                        )
+                        .order_by(Message.tg_message_id.desc())
+                        .limit(preview_n)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            preview = [
+                ThreadPreviewMsg(
+                    sender_name=p.sender_name,
+                    text=(message_body(p) or "").replace("\n", " ")[:160],
+                    sent_at=p.sent_at,
+                )
+                for p in reversed(pv)
+            ]
+        out.append(
+            ThreadOut(
+                thread_key=tk,
+                name=title or default_name,
+                title=title,
+                default_name=default_name,
+                monitored=m.monitored if m else True,
+                message_count=st.cnt if st else 0,
+                last_activity=st.last if st else None,
+                preview=preview,
+            )
+        )
+    return out
+
+
+@router.get("/chats/{chat_id}/threads", response_model=list[ThreadOut])
+async def list_threads(
+    chat_id: int, preview: int = 5, session: AsyncSession = Depends(get_session)
+) -> list[ThreadOut]:
+    await _chat_or_404(session, chat_id)
+    return await _list_threads(session, chat_id, max(0, min(preview, 20)))
+
+
+@router.put("/chats/{chat_id}/threads/{thread_key}", response_model=list[ThreadOut])
+async def update_thread(
+    chat_id: int,
+    thread_key: int,
+    body: ThreadUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> list[ThreadOut]:
+    await _chat_or_404(session, chat_id)
+    row = await session.get(ChatThread, (chat_id, thread_key))
+    if row is None:
+        row = ChatThread(chat_id=chat_id, thread_key=thread_key)
+        session.add(row)
+    if body.monitored is not None:
+        row.monitored = body.monitored
+    if body.title is not None:
+        row.title = body.title.strip() or None  # blank clears back to the default
+    await session.commit()
+    return await _list_threads(session, chat_id, 5)
 
 
 @router.get("/chats/{chat_id}/messages", response_model=list[MessageOut])

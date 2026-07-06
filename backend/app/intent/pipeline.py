@@ -63,8 +63,10 @@ from app.intent.state import (
 )
 from app.memory.chunker import resolve_reply_targets
 from app.memory.embeddings import Embedder
+from app.threads import unmonitored_threads
 from app.models import (
     Chat,
+    ChatThread,
     IntentCursor,
     IntentEpisode,
     Message,
@@ -279,12 +281,18 @@ class IntentSweeper:
             )
             lull = chat_ov.get("intent_lull_seconds", self.settings.intent_lull_seconds)
 
+            # Unmonitored threads are fully ignored — the detector never looks at
+            # them (existing episodes there are left to age out on their own).
+            unmonitored = await unmonitored_threads(session, chat_id)
+
             jobs: list[EvalJob | RecheckJob] = []
             for wf in workflows:
                 thread_keys = set(by_thread) | {
                     key[2] for key in episodes_by_key if key[0] == wf.id
                 }
                 for thread_key in thread_keys:
+                    if thread_key in unmonitored:
+                        continue
                     if (wf.id, chat_id, thread_key) in self._in_flight:
                         continue
                     job = await self._plan_key(

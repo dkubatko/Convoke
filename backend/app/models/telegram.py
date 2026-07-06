@@ -73,6 +73,32 @@ class Chat(Base):
     )
 
 
+class ChatThread(Base):
+    """A thread (forum topic or reply-thread) the bot has learned about in a
+    chat. thread_key = message.thread_id or 0 (0 = the General/main thread).
+
+    Rows exist only for threads with a captured/assigned title OR a non-default
+    monitored flag — a thread with no row is monitored and unnamed, so the
+    default (all threads monitored) needs no rows. `title` is captured from
+    forum-topic service events or assigned by an operator; the Bot API cannot
+    read existing topic names, so pre-existing topics are named by hand."""
+
+    __tablename__ = "chat_threads"
+
+    chat_id: Mapped[int] = mapped_column(
+        ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True
+    )
+    thread_key: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    monitored: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class InboxUpdate(Base):
     """Transactional inbox: raw Telegram updates, persisted before the
     getUpdates offset is advanced. Downstream consumers are crash-safe."""

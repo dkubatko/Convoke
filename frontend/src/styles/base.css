@@ -785,6 +785,51 @@ td.mono {
   background: var(--accent);
   border-color: var(--accent);
 }
+/* Threads: inline rename that reads as the h3 until clicked. The fixed-height
+   slot keeps the row from reflowing when the text swaps to an input. */
+.thread-name-wrap {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+}
+.thread-name-h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.name-edit {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.name-edit:hover {
+  color: var(--accent);
+}
+.thread-rename {
+  height: 22px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  font-size: 15px;
+  font-weight: 600;
+  max-width: 260px;
+}
+.thread-preview {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.thread-preview-line {
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .setting-desc {
   grid-column: 1 / -1;
   grid-row: 2;

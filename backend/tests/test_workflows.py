@@ -249,6 +249,31 @@ async def test_prefilter_skip_consumes_window(db_sessionmaker):
         assert cursor.last_score is not None
 
 
+async def test_sweeper_skips_unmonitored_thread(db_sessionmaker):
+    from app.models import ChatThread
+
+    _, chat, wf_id = await _intent_setup(db_sessionmaker)
+    model = _RecordingModel()
+    sweeper = _sweeper(db_sessionmaker, model)
+    async with db_sessionmaker() as s:
+        # A matching message in thread 55, with a real (seeded) cursor so it is
+        # genuine work — but the thread is turned off.
+        s.add(IntentCursor(workflow_id=wf_id, chat_id=chat.id, thread_key=55,
+                           last_tg_message_id=0))
+        s.add(_msg(chat.id, 1, "let's schedule dinner", minutes_ago=6, thread=55))
+        s.add(ChatThread(chat_id=chat.id, thread_key=55, monitored=False))
+        await s.commit()
+    assert await sweeper.sweep() == 0
+    assert not model.prompts  # the unmonitored thread was never evaluated
+
+    async with db_sessionmaker() as s:  # re-enable → the same window now runs
+        t = await s.get(ChatThread, (chat.id, 55))
+        t.monitored = True
+        await s.commit()
+    assert await sweeper.sweep() == 1
+    assert model.prompts
+
+
 async def test_sweeper_waits_for_lull(db_sessionmaker):
     _, chat, _ = await _intent_setup(db_sessionmaker)
     model = _RecordingModel()
