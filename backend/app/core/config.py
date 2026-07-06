@@ -21,10 +21,9 @@ class Settings(BaseSettings):
     # built from this. Override when hosting beyond localhost.
     public_url: str = "http://localhost:8080"
 
-    # Memory / embeddings. Changing the model implies changing the dim, which
-    # means a migration + full re-embed — treat as a deployment-time choice.
-    embedding_model: str = "intfloat/multilingual-e5-small"
-    embedding_dim: int = 384
+    # Memory / embeddings. The model itself is operator-configurable at
+    # runtime (embedding_state table, Models page); migration 020 seeds the
+    # default. Only the batch size is env config.
     embedding_batch_size: int = 64
     # A conversation segment closes after this much silence (or at max size).
     chunk_lull_seconds: int = 30 * 60

@@ -120,6 +120,22 @@ export interface ModelTestResult {
   transcription: CapabilityProbe
 }
 
+export interface EmbeddingsInfo {
+  current: {
+    model_id: string
+    dim: number
+    status: string // ready | reembedding
+    phase: string | null
+    total: number
+    done: number
+    error: string | null
+    target_model_id: string | null
+    started_at: string | null
+    finished_at: string | null
+  }
+  registry: { id: string; label: string; dim: number | null }[]
+}
+
 export interface McpServer {
   id: number
   name: string

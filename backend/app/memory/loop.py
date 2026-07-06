@@ -56,6 +56,13 @@ class MemoryLoop:
         # Embed in a separate transaction; keeps chunk commits fast.
         while True:
             async with self.sessionmaker() as session:
+                # A model swap owns all embedding writes while it runs — the
+                # re-embed job will pick these chunks up itself.
+                from app.models import EmbeddingState
+
+                state = await session.get(EmbeddingState, 1)
+                if state is not None and state.status == "reembedding":
+                    return
                 n = await embed_pending_chunks(
                     session, self.embedder, self.settings.embedding_batch_size
                 )

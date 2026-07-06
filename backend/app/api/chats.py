@@ -12,7 +12,7 @@ from app.core.tasks import spawn
 from app.core.security import require_operator
 from app.ingest.history_import import delete_import, run_import
 from app.media.render import message_body
-from app.memory.runtime import get_embedder
+from app.memory.runtime import ensure_embedder
 from app.memory.store import search_chat_history
 from app.models import AgentRun, Chat, ImportJob, MemoryGap, Message, MessageAttachment, Note
 
@@ -160,7 +160,8 @@ async def search(
     chat_id: int, q: str, k: int = 5, session: AsyncSession = Depends(get_session)
 ) -> list[SearchHitOut]:
     await _chat_or_404(session, chat_id)
-    hits = await search_chat_history(session, get_embedder(), chat_id, q, k=max(1, min(k, 20)))
+    embedder = await ensure_embedder(session)
+    hits = await search_chat_history(session, embedder, chat_id, q, k=max(1, min(k, 20)))
     return [SearchHitOut(chunk_id=h.chunk_id, distance=h.distance, rendered=h.rendered) for h in hits]
 
 

@@ -19,7 +19,8 @@ from app.intent.executor import FireExecutor
 from app.intent.pipeline import IntentSweeper
 from app.media.loop import MediaLoop
 from app.memory.loop import MemoryLoop
-from app.memory.runtime import get_embedder
+from app.memory.reembed import ReembedJob
+from app.memory.runtime import ensure_embedder
 from app.scheduler.loop import ScheduleLoop
 from app.telegram.consumer import InboxConsumer
 from app.telegram.gateway import Gateway
@@ -59,7 +60,9 @@ async def main() -> None:
         if orphaned:
             log.warning("marked %d orphaned agent run(s) as interrupted", len(orphaned))
     try:
-        embedder = get_embedder()
+        async with sessionmaker() as session:
+            # A completed swap outlives env defaults — follow embedding_state.
+            embedder = await ensure_embedder(session)
         limiter = SendLimiter()
 
         async def sweep_forever() -> None:
@@ -82,6 +85,7 @@ async def main() -> None:
             tg.create_task(Gateway(sessionmaker).run(), name="gateway")
             tg.create_task(InboxConsumer(sessionmaker).run(), name="inbox-consumer")
             tg.create_task(MemoryLoop(sessionmaker, embedder).run(), name="memory-loop")
+            tg.create_task(ReembedJob(sessionmaker, embedder).run(), name="reembed-job")
             tg.create_task(MediaLoop(sessionmaker).run(), name="media-loop")
             tg.create_task(AgentLoop(sessionmaker, embedder, limiter).run(), name="agent-loop")
             tg.create_task(sweep_forever(), name="intent-sweeper")

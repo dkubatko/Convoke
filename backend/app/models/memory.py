@@ -5,6 +5,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -16,10 +17,13 @@ from sqlalchemy.types import JSON
 
 from app.models.base import Base
 
-# 384 matches intfloat/multilingual-e5-small; changing models means a
-# migration + full re-embed. SQLite variant (JSON) exists only for unit tests.
-EMBEDDING_DIM = 384
-EmbeddingVariant = Vector(EMBEDDING_DIM).with_variant(JSON(), "sqlite")
+# Dimension-less on purpose: pgvector's SQLAlchemy type VALIDATES dimensions
+# client-side on every bind, which would reject writes the moment the
+# re-embed job re-types the columns for a new model. The live dimension is
+# owned by the DB typmod (set by migrations, changed by the swap DDL) and
+# recorded in embedding_state. SQLite variant (JSON) exists only for unit
+# tests and is dim-agnostic.
+EmbeddingVariant = Vector().with_variant(JSON(), "sqlite")
 
 IMPORT_STATUSES = ("pending", "validating", "ingesting", "done", "failed", "rejected")
 
@@ -68,6 +72,36 @@ class ChunkState(Base):
         ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True
     )
     last_tg_message_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class EmbeddingState(Base):
+    """Singleton (id=1): which embedding model owns the stored vectors, and
+    the progress of an in-flight model swap. Spec fields (prefixes, clamp
+    band) are persisted so a custom HF model survives restarts without a
+    registry entry."""
+
+    __tablename__ = "embedding_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    model_id: Mapped[str] = mapped_column(Text)
+    dim: Mapped[int] = mapped_column(Integer)  # 0 = probe at swap time
+    doc_prefix: Mapped[str] = mapped_column(Text, default="")
+    query_prefix: Mapped[str] = mapped_column(Text, default="")
+    threshold_floor: Mapped[float] = mapped_column(Float, default=0.70)
+    threshold_ceil: Mapped[float] = mapped_column(Float, default=0.88)
+    status: Mapped[str] = mapped_column(Text, default="ready")  # ready | reembedding
+    # The requested swap, applied to the current fields only after the model
+    # proves loadable — a bad custom id must never poison the live config.
+    target: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    phase: Mapped[str | None] = mapped_column(Text, nullable=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    done: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

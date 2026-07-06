@@ -1,7 +1,7 @@
 from app.models.agents import AgentRun, ConnectedModel, ModelRoleAssignment, Note
 from app.models.base import Base
 from app.models.mcp import ChatMcpServer, McpServer
-from app.models.memory import Chunk, ChunkState, ImportJob
+from app.models.memory import Chunk, ChunkState, EmbeddingState, ImportJob
 from app.models.settings import ChatSetting, RuntimeSetting
 from app.models.telegram import (
     AuthNonce,
@@ -32,6 +32,7 @@ __all__ = [
     "ChatMcpServer",
     "Chunk",
     "ChunkState",
+    "EmbeddingState",
     "ImportJob",
     "InboxUpdate",
     "IntentCursor",

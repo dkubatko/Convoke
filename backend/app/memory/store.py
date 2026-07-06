@@ -41,6 +41,11 @@ async def search_chat_history(
 ) -> list[SearchHit]:
     if session.bind.dialect.name != "postgresql":
         return []  # vector search is Postgres-only; unit tests hit this path
+    from app.models import EmbeddingState
+
+    state = await session.get(EmbeddingState, 1)
+    if state is not None and state.status == "reembedding":
+        return []  # vectors are being rebuilt; query dim may not match yet
     qvec = await embedder.embed_query(query)
     rows = (
         await session.execute(

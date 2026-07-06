@@ -23,6 +23,8 @@ services:
       CONVOKE_SECRET_KEY: ${CONVOKE_SECRET_KEY:?set in .env}
       CONVOKE_FERNET_KEY: ${CONVOKE_FERNET_KEY:?set in .env}
       CONVOKE_PUBLIC_URL: ${CONVOKE_PUBLIC_URL:-http://localhost:${CONVOKE_PORT:-8080}}
+      # Optional: unlocks gated Hugging Face models (e.g. EmbeddingGemma)
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - imports:/data/imports
       - hf-cache:/root/.cache/huggingface
@@ -45,6 +47,7 @@ services:
       CONVOKE_OPERATOR_PASSWORD: ${CONVOKE_OPERATOR_PASSWORD:?set in .env}
       CONVOKE_SECRET_KEY: ${CONVOKE_SECRET_KEY:?set in .env}
       CONVOKE_FERNET_KEY: ${CONVOKE_FERNET_KEY:?set in .env}
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       # imports is shared with the backend: the media loop describes
       # import-sourced media from there (then deletes the files).

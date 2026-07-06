@@ -64,7 +64,10 @@ def _percentile(sorted_values: list[float], q: float) -> float:
 
 
 def calibrate_threshold(
-    positive_vecs: list[list[float]], negative_vecs: list[list[float]]
+    positive_vecs: list[list[float]],
+    negative_vecs: list[list[float]],
+    floor: float = THRESHOLD_FLOOR,
+    ceil: float = THRESHOLD_CEIL,
 ) -> float:
     """Recall-first. The prefilter's only job is to stop obviously off-topic
     windows cheaply — precision belongs to the classifier behind it, and a
@@ -87,7 +90,7 @@ def calibrate_threshold(
     if negative_vecs:
         neg_best = sorted(max(dot(n, p) for p in positive_vecs) for n in negative_vecs)
         candidates.append(_percentile(neg_best, 0.75) + 0.01)
-    return max(THRESHOLD_FLOOR, min(THRESHOLD_CEIL, min(candidates)))
+    return max(floor, min(ceil, min(candidates)))
 
 
 async def generate_examples(
@@ -131,7 +134,8 @@ async def generate_examples(
             session.add(
                 WorkflowExample(workflow_id=workflow_id, kind="negative", text=text, embedding=vec)
             )
-        wf.threshold = calibrate_threshold(pos_vecs, neg_vecs)
+        band = await _clamp_band(session)
+        wf.threshold = calibrate_threshold(pos_vecs, neg_vecs, floor=band[0], ceil=band[1])
         wf.examples_status = status
         wf.updated_at = datetime.now(timezone.utc)
         await session.commit()
@@ -140,6 +144,17 @@ async def generate_examples(
             workflow_id, status, len(positives), len(generated.media_positives),
             len(negatives), len(generated.media_negatives), wf.threshold,
         )
+
+
+async def _clamp_band(session: AsyncSession) -> tuple[float, float]:
+    """The calibration clamp band belongs to the embedding model (similarity
+    scales differ wildly across model families)."""
+    from app.models import EmbeddingState
+
+    state = await session.get(EmbeddingState, 1)
+    if state is None:
+        return THRESHOLD_FLOOR, THRESHOLD_CEIL
+    return state.threshold_floor, state.threshold_ceil
 
 
 async def _generate(session: AsyncSession, wf: Workflow) -> GeneratedExamples:

@@ -1,7 +1,7 @@
 import { FormEvent, useState } from 'react'
 import { api, ApiError } from '../lib/api'
 import { timeAgo } from '../lib/format'
-import { ConnectedModel, ModelTestResult, RoleAssignment } from '../lib/types'
+import { ConnectedModel, EmbeddingsInfo, ModelTestResult, RoleAssignment } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
@@ -411,20 +411,7 @@ function RoleAssignments({
   const byRole = new Map((roles.data ?? []).map((r) => [r.role, r]))
   return (
     <div className="stack">
-      <Card>
-        <div className="page-head-row" style={{ marginBottom: 10 }}>
-          <h3 style={{ fontSize: 16 }}>Embeddings — the memory</h3>
-          <span className="pill pill--ok">
-            <span className="lamp" aria-hidden />
-            built-in · local
-          </span>
-        </div>
-        <p className="muted">
-          Chat memory is embedded locally with <code>multilingual-e5-small</code> inside the
-          worker — nothing to configure, works offline. Swapping embedding models is a
-          deployment-level change since stored vectors would need rebuilding.
-        </p>
-      </Card>
+      <EmbeddingsCard />
       {ROLES.map((meta) => (
         <RoleCard
           key={meta.role}
@@ -435,6 +422,114 @@ function RoleAssignments({
         />
       ))}
     </div>
+  )
+}
+
+const CUSTOM_MODEL = '__custom__'
+
+function EmbeddingsCard() {
+  const toast = useToast()
+  const confirm = useConfirm()
+  const info = useQuery<EmbeddingsInfo>(() => api.get('/api/embeddings'), [], { pollMs: 5000 })
+  const [selected, setSelected] = useState('')
+  const [customId, setCustomId] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const cur = info.data?.current
+  const reembedding = cur?.status === 'reembedding'
+  const targetId = selected === CUSTOM_MODEL ? customId.trim() : selected
+  const changed = targetId !== '' && targetId !== cur?.model_id
+
+  async function switchModel() {
+    if (!cur || !targetId) return
+    const ok = await confirm({
+      title: `Switch embeddings to ${targetId}?`,
+      body:
+        'Every memory vector is rebuilt with the new model. Semantic search and the ' +
+        'intent prefilter degrade until the rebuild finishes — workflow windows fall ' +
+        'through to the classifier meanwhile, so nothing is missed.',
+      actionLabel: 'Switch & re-embed',
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      await api.post('/api/embeddings/model', { model_id: targetId })
+      toast('ok', `Re-embedding everything with ${targetId}…`)
+      setSelected('')
+      setCustomId('')
+      void info.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t start the re-embed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card>
+      <div className="page-head-row" style={{ marginBottom: 10 }}>
+        <h3 style={{ fontSize: 16 }}>Embeddings — the memory</h3>
+        {cur ? (
+          reembedding ? (
+            <span className="pill pill--warn pill--live">
+              <span className="lamp" aria-hidden />
+              rebuilding · {cur.phase ?? 'queued'}
+              {cur.total > 0 ? ` (${cur.done}/${cur.total})` : ''}
+            </span>
+          ) : (
+            <span className="pill pill--ok">
+              <span className="lamp" aria-hidden />
+              {cur.model_id} · {cur.dim}d · local
+            </span>
+          )
+        ) : (
+          <span className="pill pill--idle">loading…</span>
+        )}
+      </div>
+      <p className="muted" style={{ marginBottom: 14 }}>
+        Chat memory, notes, and the intent prefilter all run on locally computed embeddings
+        (CPU, inside the worker). Switching models rebuilds every stored vector and
+        recalibrates workflow thresholds.
+      </p>
+      <div className="row" style={{ alignItems: 'flex-start' }}>
+        <div style={{ flex: '0 1 420px' }}>
+          <Field label="Model" hint="Vetted CPU-viable options, or any sentence-transformers model from Hugging Face.">
+            <select
+              value={selected}
+              disabled={reembedding}
+              onChange={(e) => setSelected(e.target.value)}
+            >
+              <option value="">{cur ? `(current: ${cur.model_id})` : '…'}</option>
+              {(info.data?.registry ?? []).map((r) => (
+                <option key={r.id} value={r.id}>{r.label}</option>
+              ))}
+              <option value={CUSTOM_MODEL}>Custom Hugging Face id…</option>
+            </select>
+          </Field>
+          {selected === CUSTOM_MODEL && (
+            <Field label="Hugging Face id" hint="Must be loadable by sentence-transformers; the dimension is probed automatically.">
+              <input
+                className="mono"
+                value={customId}
+                onChange={(e) => setCustomId(e.target.value)}
+                placeholder="org/model-name"
+              />
+            </Field>
+          )}
+        </div>
+        <div className="field">
+          <label aria-hidden>&nbsp;</label>
+          <button
+            className="btn btn--primary"
+            disabled={!changed || reembedding || busy}
+            onClick={() => void switchModel()}
+          >
+            {reembedding ? 'Rebuilding…' : 'Switch & re-embed'}
+          </button>
+        </div>
+      </div>
+      {cur?.error && <p className="field-error" style={{ marginTop: 8 }}>{cur.error}</p>}
+    </Card>
   )
 }
 
