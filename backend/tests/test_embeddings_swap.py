@@ -33,7 +33,6 @@ class SwapFake(FakeEmbedder):
 
         self.spec = EmbeddingModelSpec(
             id="fake/model", label="fake", dim=None, doc_prefix="", query_prefix="",
-            threshold_floor=0.4, threshold_ceil=0.9,
         )
 
     async def probe_dim(self) -> int:
@@ -48,9 +47,8 @@ class SwapFake(FakeEmbedder):
 async def seed(db_sessionmaker, *, target: dict | None):
     async with db_sessionmaker() as s:
         s.add(EmbeddingState(
-            id=1, model_id="intfloat/multilingual-e5-small", dim=384,
-            doc_prefix="passage: ", query_prefix="query: ",
-            threshold_floor=0.70, threshold_ceil=0.88,
+            id=1, model_id="sentence-transformers/distiluse-base-multilingual-cased-v2", dim=512,
+            doc_prefix="", query_prefix="",
             status="reembedding" if target is not None else "ready", target=target,
         ))
         bot = Bot(tg_bot_id=1, username="b", name="b", token_encrypted="x",
@@ -79,8 +77,7 @@ async def seed(db_sessionmaker, *, target: dict | None):
         return wf.id
 
 
-TARGET = {"model_id": "fake/model", "dim": None, "doc_prefix": "", "query_prefix": "",
-          "threshold_floor": 0.4, "threshold_ceil": 0.9}
+TARGET = {"model_id": "fake/model", "dim": None, "doc_prefix": "", "query_prefix": ""}
 
 
 async def test_swap_job_reembeds_everything_and_recalibrates(db_sessionmaker, monkeypatch):
@@ -100,7 +97,9 @@ async def test_swap_job_reembeds_everything_and_recalibrates(db_sessionmaker, mo
         examples = (await s.execute(select(WorkflowExample))).scalars().all()
         assert all(e.embedding is not None and len(e.embedding) == 768 for e in examples)
         wf = await s.get(Workflow, wf_id)
-        assert 0.4 <= wf.threshold <= 0.9  # recalibrated inside the new band
+        # Recalibrated off the re-embedded examples: one positive → the
+        # permissive floor, and no longer the seeded 0.83.
+        assert wf.threshold == pytest.approx(0.15)
         chunk = (await s.execute(select(Chunk))).scalar_one()
         assert chunk.embedding is not None and len(chunk.embedding) == 768
         note = (await s.execute(select(Note))).scalar_one()
@@ -119,7 +118,7 @@ async def test_swap_job_failure_leaves_config_untouched(db_sessionmaker, monkeyp
         state = await s.get(EmbeddingState, 1)
         assert state.status == "ready"
         assert "no such model" in state.error
-        assert state.model_id == "intfloat/multilingual-e5-small"  # never poisoned
+        assert state.model_id == "sentence-transformers/distiluse-base-multilingual-cased-v2"  # never poisoned
         assert state.target is None
         from sqlalchemy import select
         chunk = (await s.execute(select(Chunk))).scalar_one()
@@ -137,39 +136,43 @@ async def test_idle_job_does_nothing(db_sessionmaker, monkeypatch):
     await job._tick()
 
 
+DISTILUSE = "sentence-transformers/distiluse-base-multilingual-cased-v2"
+MPNET = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+
+
 def test_registry_and_custom_spec():
-    assert EMBEDDING_REGISTRY["intfloat/multilingual-e5-small"].dim == 384
-    assert len(EMBEDDING_REGISTRY) == 5
+    assert EMBEDDING_REGISTRY[DISTILUSE].dim == 512
+    assert len(EMBEDDING_REGISTRY) == 3
     spec = custom_spec("someone/some-model")
     assert spec.dim is None and spec.doc_prefix == ""
 
 
-@pytest.mark.parametrize("model_id,expect_prefix", [
-    ("intfloat/multilingual-e5-small", "passage: "),
-    ("BAAI/bge-m3", ""),
-])
-def test_prefixes_are_data(model_id, expect_prefix):
-    assert EMBEDDING_REGISTRY[model_id].doc_prefix == expect_prefix
+@pytest.mark.parametrize("model_id", list(EMBEDDING_REGISTRY))
+def test_prefixes_are_data(model_id):
+    # The registry's paraphrase models need no prefixes; the fields still exist
+    # as data so a custom/prefixed model can override them.
+    spec = EMBEDDING_REGISTRY[model_id]
+    assert spec.doc_prefix == "" and spec.query_prefix == ""
 
 
 async def test_embeddings_api_contract(db_sessionmaker, client):
     async with db_sessionmaker() as s:
-        s.add(EmbeddingState(id=1, model_id="intfloat/multilingual-e5-small", dim=384,
-                             doc_prefix="passage: ", query_prefix="query: "))
+        s.add(EmbeddingState(id=1, model_id=DISTILUSE, dim=512,
+                             doc_prefix="", query_prefix=""))
         await s.commit()
 
     got = await client.get("/api/embeddings")
     assert got.status_code == 200
     body = got.json()
-    assert body["current"]["model_id"] == "intfloat/multilingual-e5-small"
-    assert len(body["registry"]) == 5
+    assert body["current"]["model_id"] == DISTILUSE
+    assert len(body["registry"]) == 3
 
-    switched = await client.post("/api/embeddings/model", json={"model_id": "BAAI/bge-m3"})
+    switched = await client.post("/api/embeddings/model", json={"model_id": MPNET})
     assert switched.status_code == 202
     assert switched.json()["current"]["status"] == "reembedding"
-    assert switched.json()["current"]["target_model_id"] == "BAAI/bge-m3"
+    assert switched.json()["current"]["target_model_id"] == MPNET
 
-    again = await client.post("/api/embeddings/model", json={"model_id": "BAAI/bge-m3"})
+    again = await client.post("/api/embeddings/model", json={"model_id": MPNET})
     assert again.status_code == 409
 
 
@@ -206,7 +209,7 @@ async def test_transient_failure_resumes_instead_of_aborting(db_sessionmaker, mo
         assert state.status == "ready" and state.error is None
         from sqlalchemy import select
         wf = await s.get(Workflow, wf_id)
-        assert 0.4 <= wf.threshold <= 0.9
+        assert wf.threshold == pytest.approx(0.15)
         chunk = (await s.execute(select(Chunk))).scalar_one()
         assert chunk.embedding is not None and len(chunk.embedding) == 768
 

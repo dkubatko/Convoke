@@ -99,8 +99,6 @@ async def switch_model(
         "dim": spec.dim,
         "doc_prefix": spec.doc_prefix,
         "query_prefix": spec.query_prefix,
-        "threshold_floor": spec.threshold_floor,
-        "threshold_ceil": spec.threshold_ceil,
     }
     state.status = "reembedding"
     state.phase = "queued"

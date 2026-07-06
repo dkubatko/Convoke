@@ -5,7 +5,6 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
-    Float,
     ForeignKey,
     Index,
     Integer,
@@ -79,9 +78,9 @@ class ChunkState(Base):
 
 class EmbeddingState(Base):
     """Singleton (id=1): which embedding model owns the stored vectors, and
-    the progress of an in-flight model swap. Spec fields (prefixes, clamp
-    band) are persisted so a custom HF model survives restarts without a
-    registry entry."""
+    the progress of an in-flight model swap. Spec fields (prefixes) are
+    persisted so a custom HF model survives restarts without a registry
+    entry."""
 
     __tablename__ = "embedding_state"
 
@@ -90,8 +89,6 @@ class EmbeddingState(Base):
     dim: Mapped[int] = mapped_column(Integer)  # 0 = probe at swap time
     doc_prefix: Mapped[str] = mapped_column(Text, default="")
     query_prefix: Mapped[str] = mapped_column(Text, default="")
-    threshold_floor: Mapped[float] = mapped_column(Float, default=0.70)
-    threshold_ceil: Mapped[float] = mapped_column(Float, default=0.88)
     status: Mapped[str] = mapped_column(Text, default="ready")  # ready | reembedding
     # The requested swap, applied to the current fields only after the model
     # proves loadable — a bad custom id must never poison the live config.

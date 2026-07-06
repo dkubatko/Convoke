@@ -1,11 +1,17 @@
 """Example-utterance generation + prefilter threshold calibration.
 
 The prefilter matches chat windows against synthetic example utterances, not
-the trigger prompt: prompts are meta-language ("when there is intent to…"),
-while real messages look like "does Tue 7pm work?" — often in other languages.
-The strong model generates positives and hard negatives at save time; the
-threshold lands between how positives cluster and how close the best negative
-gets, so it stays loose (recall-first — the classifier supplies precision).
+the trigger prompt (prompts are meta-language; real messages aren't, and are
+often in other languages). The strong model generates positives, plus hard
+negatives kept for display, at save time.
+
+Calibration is recall-first and model-agnostic: the threshold is a low
+percentile of positive cross-similarity — the "softest positive we must not
+lose" — so it self-scales to the model's similarity range. Real on-topic
+traffic scores against the best positive, flooring above that softest pair, so
+anchoring there targets ~100% recall. The permissiveness knob (1–5) slides the
+anchor from strict (near the positive floor) to permissive (below it); the
+classifier supplies precision either way.
 """
 
 import logging
@@ -18,16 +24,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.models import ProviderNotConfigured, build_model, get_provider
 from app.core.runtime_settings import effective_settings
 from app.intent.schemas import GeneratedExamples
-from app.memory.embeddings import Embedder
+from app.memory.embeddings import (
+    GLOBAL_THRESHOLD_CEIL,
+    GLOBAL_THRESHOLD_FLOOR,
+    Embedder,
+)
 from app.models import Workflow, WorkflowExample
 
 log = logging.getLogger("convoke.intent.examples")
 
-DEFAULT_THRESHOLD = 0.80
-THRESHOLD_FLOOR = 0.70
-# e5-small compresses all similarities into ~0.80–0.95; anything above 0.88
-# starts rejecting genuine paraphrases.
-THRESHOLD_CEIL = 0.88
+DEFAULT_PERMISSIVENESS = 4
+# Permissiveness (1 strictest … 5 most permissive) → the percentile of positive
+# cross-similarity used as the threshold anchor, plus how far BELOW the softest
+# positive to push (as a fraction of the positive spread, so it stays
+# scale-invariant across model families). Lower anchor / larger sub-floor =
+# lower threshold = more recall and more classifier noise.
+_PERMISSIVENESS_PCT: dict[int, float] = {1: 0.30, 2: 0.18, 3: 0.10, 4: 0.04, 5: 0.0}
+_PERMISSIVENESS_SUBFLOOR: dict[int, float] = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.15, 5: 0.60}
 
 GENERATION_PROMPT = """\
 A Telegram group-chat bot watches conversations for this intent:
@@ -65,32 +78,31 @@ def _percentile(sorted_values: list[float], q: float) -> float:
 
 def calibrate_threshold(
     positive_vecs: list[list[float]],
-    negative_vecs: list[list[float]],
-    floor: float = THRESHOLD_FLOOR,
-    ceil: float = THRESHOLD_CEIL,
+    negative_vecs: list[list[float]] | None = None,
+    floor: float = GLOBAL_THRESHOLD_FLOOR,
+    ceil: float = GLOBAL_THRESHOLD_CEIL,
+    permissiveness: int = DEFAULT_PERMISSIVENESS,
 ) -> float:
-    """Recall-first. The prefilter's only job is to stop obviously off-topic
-    windows cheaply — precision belongs to the classifier behind it, and a
-    false positive costs one cheap-model call while a false negative means
-    the workflow never fires.
-
-    Two anchors, take the looser (min):
-    - most (75%) generated hard negatives should be excluded — but not the
-      single most adversarial one, which under e5's compressed similarity
-      scale sits nearly on top of the positives;
-    - a real paraphrase scores like positives score against each other, so
-      stay clearly below the lower quartile of positive cross-similarity."""
-    if not positive_vecs:
-        return DEFAULT_THRESHOLD
+    """Anchor on `pos_best` — per positive, its best match to another positive.
+    A low percentile is the softest positive to keep; `permissiveness` slides it
+    down (lower percentile + a sub-floor push scaled to the positive spread) for
+    more recall. See the module docstring for why this targets ~100% recall and
+    self-scales across models. Negatives are ignored — raising toward them would
+    cost the recall this gate exists to protect."""
+    del negative_vecs  # informational only; recall-first threshold is positives-driven
+    level = min(5, max(1, int(permissiveness)))
+    # Too few positives to characterize a distribution (e.g. the no-strong-model
+    # fallback set): sit at the permissive floor rather than over-reject.
+    if len(positive_vecs) < 2:
+        return floor
     pos_best = sorted(
-        max((dot(v, w) for j, w in enumerate(positive_vecs) if j != i), default=1.0)
+        max(dot(v, w) for j, w in enumerate(positive_vecs) if j != i)
         for i, v in enumerate(positive_vecs)
     )
-    candidates = [_percentile(pos_best, 0.25) - 0.02]
-    if negative_vecs:
-        neg_best = sorted(max(dot(n, p) for p in positive_vecs) for n in negative_vecs)
-        candidates.append(_percentile(neg_best, 0.75) + 0.01)
-    return max(floor, min(ceil, min(candidates)))
+    anchor = _percentile(pos_best, _PERMISSIVENESS_PCT[level])
+    spread = max(0.0, _percentile(pos_best, 0.25) - pos_best[0])
+    thr = anchor - _PERMISSIVENESS_SUBFLOOR[level] * spread
+    return max(floor, min(ceil, thr))
 
 
 async def generate_examples(
@@ -134,8 +146,8 @@ async def generate_examples(
             session.add(
                 WorkflowExample(workflow_id=workflow_id, kind="negative", text=text, embedding=vec)
             )
-        band = await _clamp_band(session)
-        wf.threshold = calibrate_threshold(pos_vecs, neg_vecs, floor=band[0], ceil=band[1])
+        permissiveness = (await effective_settings(session)).intent_prefilter_permissiveness
+        wf.threshold = calibrate_threshold(pos_vecs, neg_vecs, permissiveness=permissiveness)
         wf.examples_status = status
         wf.updated_at = datetime.now(timezone.utc)
         await session.commit()
@@ -144,17 +156,6 @@ async def generate_examples(
             workflow_id, status, len(positives), len(generated.media_positives),
             len(negatives), len(generated.media_negatives), wf.threshold,
         )
-
-
-async def _clamp_band(session: AsyncSession) -> tuple[float, float]:
-    """The calibration clamp band belongs to the embedding model (similarity
-    scales differ wildly across model families)."""
-    from app.models import EmbeddingState
-
-    state = await session.get(EmbeddingState, 1)
-    if state is None:
-        return THRESHOLD_FLOOR, THRESHOLD_CEIL
-    return state.threshold_floor, state.threshold_ceil
 
 
 async def _generate(session: AsyncSession, wf: Workflow) -> GeneratedExamples:
@@ -236,3 +237,34 @@ async def load_positive_vectors(session: AsyncSession, workflow_id: int) -> list
         .all()
     )
     return [list(v) for v in rows]
+
+
+async def recalibrate_intent_thresholds(session: AsyncSession, permissiveness: int) -> int:
+    """Re-derive every intent workflow's threshold from its ALREADY-STORED
+    example vectors at the given permissiveness — no model calls, no re-embed.
+    This is the seam the permissiveness knob writes through: a handful of dot
+    products per workflow, so it runs inline on the settings save. Returns the
+    number of workflows retuned."""
+    wf_ids = (
+        (await session.execute(select(Workflow.id).where(Workflow.type == "intent")))
+        .scalars()
+        .all()
+    )
+    retuned = 0
+    for wf_id in wf_ids:
+        rows = (
+            await session.execute(
+                select(WorkflowExample.embedding, WorkflowExample.kind).where(
+                    WorkflowExample.workflow_id == wf_id,
+                    WorkflowExample.embedding.is_not(None),
+                )
+            )
+        ).all()
+        pos = [list(e) for e, kind in rows if kind == "positive"]
+        if not pos:
+            continue  # nothing stored (mid re-embed / unready) — leave as-is
+        neg = [list(e) for e, kind in rows if kind == "negative"]
+        wf = await session.get(Workflow, wf_id)
+        wf.threshold = calibrate_threshold(pos, neg, permissiveness=permissiveness)
+        retuned += 1
+    return retuned

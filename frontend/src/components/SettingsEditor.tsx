@@ -98,16 +98,38 @@ export default function SettingsEditor({
                       )}
                     </label>
                     <div className="setting-control">
-                      <input
-                        id={s.key}
-                        type="number"
-                        className="mono"
-                        min={s.minimum}
-                        max={s.maximum}
-                        value={val}
-                        onChange={(e) => stage(s.key, Number(e.target.value))}
-                      />
-                      <span className="unit">{s.unit}</span>
+                      {s.step_labels ? (
+                        <div className="steps" role="radiogroup" aria-label={s.label}>
+                          {s.step_labels.map((lbl, i) => {
+                            const v = s.minimum + i
+                            return (
+                              <button
+                                type="button"
+                                key={lbl}
+                                role="radio"
+                                aria-checked={val === v}
+                                className={`step${val === v ? ' step--on' : ''}`}
+                                onClick={() => stage(s.key, v)}
+                              >
+                                {lbl}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      ) : (
+                        <>
+                          <input
+                            id={s.key}
+                            type="number"
+                            className="mono"
+                            min={s.minimum}
+                            max={s.maximum}
+                            value={val}
+                            onChange={(e) => stage(s.key, Number(e.target.value))}
+                          />
+                          <span className="unit">{s.unit}</span>
+                        </>
+                      )}
                     </div>
                     <p className="setting-desc">
                       {s.description}{' '}
@@ -115,7 +137,7 @@ export default function SettingsEditor({
                         <span style={{ opacity: 0.7 }}>Default.</span>
                       ) : (
                         <button type="button" className="linkbtn" onClick={() => stage(s.key, s.default)}>
-                          Reset to default ({s.default})
+                          Reset to default ({s.step_labels ? s.step_labels[s.default - s.minimum] : s.default})
                         </button>
                       )}
                     </p>

@@ -763,6 +763,28 @@ td.mono {
   font: 400 12px var(--font-mono);
   color: var(--ink-2);
 }
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.step {
+  padding: 4px 10px;
+  font: 400 12px var(--font-sans);
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.step:hover {
+  color: var(--ink-1);
+}
+.step--on {
+  color: var(--bg-1);
+  background: var(--accent);
+  border-color: var(--accent);
+}
 .setting-desc {
   grid-column: 1 / -1;
   grid-row: 2;

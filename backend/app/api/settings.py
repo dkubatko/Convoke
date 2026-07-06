@@ -12,6 +12,7 @@ from app.core.runtime_settings import (
     set_override,
 )
 from app.core.security import require_operator
+from app.intent.examples import recalibrate_intent_thresholds
 from app.models import Chat
 
 router = APIRouter(dependencies=[Depends(require_operator)])
@@ -27,6 +28,9 @@ class SettingOut(BaseModel):
     value: int  # effective (override or default)
     default: int
     overridden: bool
+    # Present for step-labelled knobs: one label per integer minimum..maximum,
+    # rendered as a named N-stop control instead of a numeric slider.
+    step_labels: list[str] | None = None
 
 
 class SettingUpdate(BaseModel):
@@ -52,6 +56,7 @@ async def list_settings(
                 minimum=t.minimum, maximum=t.maximum,
                 value=overrides.get(t.key, default), default=default,
                 overridden=t.key in overrides,
+                step_labels=list(t.step_labels) if t.step_labels else None,
             )
         )
     return out
@@ -66,6 +71,15 @@ async def update_settings(
             await set_override(session, u.key, u.value)
     except ValueError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+    # The permissiveness knob has an effect only through the workflow thresholds
+    # it calibrates — re-derive them from the stored example vectors now (cheap:
+    # no model calls, no re-embed) so the change lands immediately, whether the
+    # override was set or cleared back to the default.
+    if any(u.key == "intent_prefilter_permissiveness" for u in updates):
+        effective = (await load_overrides(session)).get(
+            "intent_prefilter_permissiveness", default_for("intent_prefilter_permissiveness")
+        )
+        await recalibrate_intent_thresholds(session, effective)
     await session.commit()
     return await list_settings(session=session)
 

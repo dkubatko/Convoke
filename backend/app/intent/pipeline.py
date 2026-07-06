@@ -83,11 +83,9 @@ def gate_texts(m: Message, target: Message | None) -> list[str]:
     gate score is the max over them.
 
     Media messages get their components scored SEPARATELY as well as combined:
-    a verbose vision description ("iPhone screenshot of Google search results
-    for shrek…") concatenated with a short caption dilutes the caption's
-    intent signal in a single embedding — measured live, "what about this
-    movie" alone scored 0.877 while annotation+caption scored 0.814 against a
-    0.836 threshold. Max-over-components lets the strongest signal through.
+    a verbose vision description concatenated with a short caption dilutes the
+    caption's intent signal in a single embedding, so max-over-components lets
+    the strongest signal through.
 
     A plain text-only, reply-free message yields exactly [m.text] — identical
     to the pre-media behavior."""

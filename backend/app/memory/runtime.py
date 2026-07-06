@@ -34,8 +34,6 @@ def spec_from_state(state: EmbeddingState) -> EmbeddingModelSpec:
         dim=state.dim or None,
         doc_prefix=state.doc_prefix,
         query_prefix=state.query_prefix,
-        threshold_floor=state.threshold_floor,
-        threshold_ceil=state.threshold_ceil,
     )
 
 
@@ -61,7 +59,7 @@ class EmbedderHandle:
         old.shutdown()
 
 
-DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/distiluse-base-multilingual-cased-v2"
 
 
 def get_embedder() -> EmbedderHandle:

@@ -25,6 +25,10 @@ class Tunable:
     maximum: int
     scope: str  # "global" | "chat"
     page: str  # where it's edited: "models" | "workflows" | "chat"
+    # When set, the UI renders a labelled N-stop control (one label per integer
+    # from minimum..maximum) instead of a numeric slider — the operator picks a
+    # named position and never sees the underlying value.
+    step_labels: tuple[str, ...] | None = None
 
 
 TUNABLES: list[Tunable] = [
@@ -76,6 +80,16 @@ TUNABLES: list[Tunable] = [
         "the prefilter (more = a steadier threshold, slower to generate). Applies on the next "
         "save/edit of a workflow.",
         "phrases", 6, 60, "global", "workflows",
+    ),
+    Tunable(
+        "intent_prefilter_permissiveness", "Prefilter permissiveness",
+        "How readily the embedding prefilter lets a conversation reach the classifier. "
+        "Stricter filters more aggressively (less classifier noise, but a genuinely on-topic "
+        "message is more likely to be missed); more permissive lets borderline messages "
+        "through (nothing on-topic is lost, at the cost of more classifier calls on chatter). "
+        "Changing it instantly re-tunes every workflow — no re-analysis needed.",
+        "", 1, 5, "global", "workflows",
+        step_labels=("Strictest", "Strict", "Balanced", "Permissive", "Most permissive"),
     ),
     Tunable(
         "intent_candidate_ttl_minutes", "Vague-topic lifetime",

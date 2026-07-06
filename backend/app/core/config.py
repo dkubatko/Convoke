@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     # Positive example phrases the strong model generates per workflow to
     # calibrate the prefilter (negatives scale with it).
     intent_example_count: int = 18
+    # Prefilter permissiveness, 1 (strictest) … 5 (most permissive). A coarse
+    # recall/noise knob: higher places the embedding threshold lower, so more
+    # windows reach the classifier (recall up, cheap-model noise up). Recall-
+    # first default leans permissive. Changing it recalibrates every intent
+    # workflow's threshold from its stored example vectors (no re-embed).
+    intent_prefilter_permissiveness: int = 4
     confirm_timeout_minutes: int = 60
 
 

@@ -4,10 +4,8 @@ Local models run in a ProcessPoolExecutor: sentence-transformers is CPU-bound
 and would freeze the worker's event loop (and with it every bot's polling).
 The model loads once per subprocess.
 
-Prefix schemes differ per model family (e5's "passage: "/"query: ",
-EmbeddingGemma's prompt strings, Qwen's query instruction, BGE's nothing) —
-they're data on EmbeddingModelSpec, never code paths. The doc/query asymmetry
-is also what makes the intent prefilter work (trigger examples vs windows).
+Doc/query prefixes are data on EmbeddingModelSpec, not code paths — the shipped
+paraphrase models need none, but a custom model can carry its own.
 """
 
 import asyncio
@@ -19,6 +17,13 @@ _model = None  # per-subprocess singleton
 _model_name: str | None = None
 
 
+# The prefilter's clamp band, global to every model: recall-first calibration
+# self-scales to the model's similarity range (see calibrate_threshold), so this
+# is only a backstop against degenerate calibration.
+GLOBAL_THRESHOLD_FLOOR = 0.15
+GLOBAL_THRESHOLD_CEIL = 0.90
+
+
 @dataclass(frozen=True)
 class EmbeddingModelSpec:
     id: str  # HuggingFace model id
@@ -26,74 +31,48 @@ class EmbeddingModelSpec:
     dim: int | None  # None → probe by encoding one string
     doc_prefix: str
     query_prefix: str
-    # Calibration clamp band for prefilter thresholds — similarity scales are
-    # model-specific (e5 compresses everything into ~0.80–0.95).
-    threshold_floor: float
-    threshold_ceil: float
 
 
+# Multilingual PARAPHRASE/STS models — not retrieval models. Retrieval embedders
+# (e5, BGE, Granite) compress similarity into a narrow high band and rank
+# language/topic poorly for a cross-lingual intent gate; paraphrase models keep
+# a wide, calibrated range and align languages by meaning, so one English
+# example set covers every chat language. Validated on real multilingual
+# traffic: distiluse separated on-/off-topic cleanly, mpnet/minilm weaker.
 EMBEDDING_REGISTRY: dict[str, EmbeddingModelSpec] = {
     s.id: s
     for s in (
         EmbeddingModelSpec(
-            id="intfloat/multilingual-e5-small",
-            label="Multilingual E5 small (default) · 384d · fastest",
+            id="sentence-transformers/distiluse-base-multilingual-cased-v2",
+            label="Distiluse multilingual · 512d · recommended",
+            dim=512,
+            doc_prefix="",
+            query_prefix="",
+        ),
+        EmbeddingModelSpec(
+            id="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+            label="Paraphrase multilingual MPNet · 768d · weaker",
+            dim=768,
+            doc_prefix="",
+            query_prefix="",
+        ),
+        EmbeddingModelSpec(
+            id="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            label="Paraphrase multilingual MiniLM · 384d · weaker, lightest",
             dim=384,
-            doc_prefix="passage: ",
-            query_prefix="query: ",
-            threshold_floor=0.70,
-            threshold_ceil=0.88,
-        ),
-        EmbeddingModelSpec(
-            id="ibm-granite/granite-embedding-278m-multilingual",
-            label="Granite Embedding 278m · 768d · open",
-            dim=768,
             doc_prefix="",
             query_prefix="",
-            threshold_floor=0.45,
-            threshold_ceil=0.90,
-        ),
-        EmbeddingModelSpec(
-            id="google/embeddinggemma-300m",
-            label="EmbeddingGemma 300m · 768d · gated: accept the HF license + set HF_TOKEN",
-            dim=768,
-            doc_prefix="title: none | text: ",
-            query_prefix="task: search result | query: ",
-            threshold_floor=0.55,
-            threshold_ceil=0.90,
-        ),
-        EmbeddingModelSpec(
-            id="BAAI/bge-m3",
-            label="BGE-M3 · 1024d · strongest, heaviest",
-            dim=1024,
-            doc_prefix="",
-            query_prefix="",
-            threshold_floor=0.45,
-            threshold_ceil=0.90,
-        ),
-        EmbeddingModelSpec(
-            id="Qwen/Qwen3-Embedding-0.6B",
-            label="Qwen3 Embedding 0.6B · 1024d",
-            dim=1024,
-            doc_prefix="",
-            query_prefix=(
-                "Instruct: Given a web search query, retrieve relevant passages "
-                "that answer the query\nQuery: "
-            ),
-            threshold_floor=0.45,
-            threshold_ceil=0.90,
         ),
     )
 }
 
 
 def custom_spec(model_id: str, dim: int | None = None) -> EmbeddingModelSpec:
-    """Escape hatch for an operator-supplied HuggingFace id: no prefixes,
-    generic clamp band, dim probed at swap time when not given."""
+    """Escape hatch for an operator-supplied HuggingFace id: no prefixes, the
+    global clamp band, dim probed at swap time when not given."""
     return EmbeddingModelSpec(
         id=model_id, label=f"{model_id} (custom)", dim=dim,
         doc_prefix="", query_prefix="",
-        threshold_floor=0.45, threshold_ceil=0.92,
     )
 
 

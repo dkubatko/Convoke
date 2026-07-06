@@ -21,6 +21,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
+from app.core.runtime_settings import effective_settings
 from app.intent.examples import calibrate_threshold
 from app.memory.embeddings import LocalEmbedder
 from app.memory.runtime import EmbedderHandle, spec_from_state
@@ -91,8 +92,6 @@ class ReembedJob:
             state.model_id = spec.id
             state.doc_prefix = spec.doc_prefix
             state.query_prefix = spec.query_prefix
-            state.threshold_floor = spec.threshold_floor
-            state.threshold_ceil = spec.threshold_ceil
             state.target = None
             state.dim = dim
             state.error = None
@@ -121,6 +120,9 @@ class ReembedJob:
         async with self.sessionmaker() as session:
             state = await session.get(EmbeddingState, 1)
             await self._phase(session, state, "re-embedding workflow examples")
+            permissiveness = (
+                await effective_settings(session, self.settings)
+            ).intent_prefilter_permissiveness
             wf_ids = (
                 (await session.execute(select(Workflow.id).where(Workflow.type == "intent")))
                 .scalars()
@@ -145,8 +147,7 @@ class ReembedJob:
                 wf.threshold = calibrate_threshold(
                     [r.embedding for r in rows if r.kind == "positive"],
                     [r.embedding for r in rows if r.kind == "negative"],
-                    floor=spec.threshold_floor,
-                    ceil=spec.threshold_ceil,
+                    permissiveness=permissiveness,
                 )
             await session.commit()
 
@@ -256,6 +257,4 @@ def _spec_from_target(target: dict):
         dim=target.get("dim") or None,
         doc_prefix=target.get("doc_prefix", ""),
         query_prefix=target.get("query_prefix", ""),
-        threshold_floor=target.get("threshold_floor", 0.45),
-        threshold_ceil=target.get("threshold_ceil", 0.92),
     )

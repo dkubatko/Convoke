@@ -36,23 +36,79 @@ REQUIRED = [{"name": "date", "description": "agreed date"}, {"name": "title", "d
 
 # ---------- threshold calibration ----------
 
-def test_calibrate_threshold_recall_first():
-    pos = [[1.0, 0.0], [0.98, 0.02]]
-    neg = [[0.85, 0.15]]  # best sim to a positive ≈ 0.85
-    t = calibrate_threshold(pos, neg)
-    # negatives anchor (0.85 + 0.01) is looser than the positives anchor — wins
-    assert t == pytest.approx(0.86, abs=0.01)
-    assert 0.70 <= t <= 0.88
+import math
+
+from app.intent.examples import DEFAULT_PERMISSIVENESS
+from app.memory.embeddings import GLOBAL_THRESHOLD_CEIL, GLOBAL_THRESHOLD_FLOOR
 
 
-def test_calibrate_threshold_capped_when_negatives_hug_positives():
-    pos = [[1.0, 0.0], [0.99, 0.01]]
-    neg = [[0.995, 0.005]]  # adversarial negative nearly on top of positives
-    assert calibrate_threshold(pos, neg) <= 0.88
+def _unit(deg: float) -> list[float]:
+    r = math.radians(deg)
+    return [math.cos(r), math.sin(r)]
 
 
-def test_calibrate_threshold_empty_defaults():
-    assert calibrate_threshold([], []) == pytest.approx(0.80)
+def _softest_positive(pos):
+    """The lowest 'best match to another positive' — the recall floor calibration
+    must not exceed for genuine paraphrases to survive."""
+    return min(max(sum(a * b for a, b in zip(p, q)) for q in pos if q is not p) for p in pos)
+
+
+def test_calibrate_threshold_targets_recall_at_default():
+    # 3 tight positives + 1 outlier; the default must keep even the outlier.
+    pos = [_unit(0), _unit(5), _unit(10), _unit(40)]
+    t = calibrate_threshold(pos, [], permissiveness=DEFAULT_PERMISSIVENESS)
+    assert t <= _softest_positive(pos) + 1e-9
+    assert GLOBAL_THRESHOLD_FLOOR <= t <= GLOBAL_THRESHOLD_CEIL
+
+
+def test_calibrate_threshold_permissiveness_is_monotonic():
+    pos = [_unit(0), _unit(5), _unit(10), _unit(40)]
+    thresholds = [calibrate_threshold(pos, [], permissiveness=lvl) for lvl in range(1, 6)]
+    # stricter (lower level) never yields a lower threshold than more permissive
+    assert thresholds == sorted(thresholds, reverse=True)
+
+
+def test_calibrate_threshold_ignores_negatives():
+    # Negatives are informational only; the recall-first threshold is positives-driven.
+    pos = [_unit(0), _unit(5), _unit(40)]
+    neg = [_unit(3), _unit(6)]  # near-misses hugging the positives
+    assert calibrate_threshold(pos, neg) == calibrate_threshold(pos, [])
+
+
+def test_calibrate_threshold_too_few_positives_is_permissive():
+    # The no-strong-model fallback (one positive) sits at the floor, never over-rejects.
+    assert calibrate_threshold([], []) == GLOBAL_THRESHOLD_FLOOR
+    assert calibrate_threshold([_unit(0)], []) == GLOBAL_THRESHOLD_FLOOR
+
+
+async def test_recalibrate_intent_thresholds_from_stored_vectors(db_sessionmaker):
+    # The permissiveness knob re-derives thresholds from ALREADY-stored example
+    # vectors — no embedder, no re-embed.
+    from app.intent.examples import recalibrate_intent_thresholds
+
+    pos = [_unit(0), _unit(6), _unit(12), _unit(45)]
+    async with db_sessionmaker() as s:
+        wf = Workflow(name="m", type="intent", action_prompt="a", trigger_prompt="t",
+                      required_slots=[], threshold=0.99, examples_status="ready")
+        s.add(wf)
+        await s.flush()
+        wf_id = wf.id
+        for v in pos:
+            s.add(WorkflowExample(workflow_id=wf_id, kind="positive", text="x", embedding=v))
+        s.add(WorkflowExample(workflow_id=wf_id, kind="negative", text="n", embedding=_unit(90)))
+        await s.commit()
+
+    async with db_sessionmaker() as s:
+        assert await recalibrate_intent_thresholds(s, permissiveness=1) == 1
+        await s.commit()
+        strict = (await s.get(Workflow, wf_id)).threshold
+    async with db_sessionmaker() as s:
+        await recalibrate_intent_thresholds(s, permissiveness=5)
+        await s.commit()
+        loose = (await s.get(Workflow, wf_id)).threshold
+
+    assert loose <= strict  # more permissive re-tune lowers the bar
+    assert strict == pytest.approx(calibrate_threshold(pos, permissiveness=1))
 
 
 # ---------- shared setup ----------
