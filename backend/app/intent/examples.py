@@ -41,6 +41,16 @@ Generate example chat messages for training a semantic prefilter:
 this intent is being expressed or converging. Vary phrasing, formality and \
 language (include a few in Spanish/Russian/German if plausible for a generic group).
 - negatives: about {n_neg} near-misses — same topic area but NOT expressing the intent.
+
+Members also express intent through PHOTOS and VOICE NOTES, which the bot sees \
+as text in exactly these shapes:
+  [photo: <subject-first description, any visible text quoted>] optional caption
+  [voice 0:12: "<transcript>"]
+- media_positives: about {n_media_pos} such messages where the MEDIA carries the \
+intent — e.g. a photo of tickets, a screenshot of a search result, a voice note \
+proposing it. Descriptions lead with the subject.
+- media_negatives: about {n_media_neg} media near-misses in the same shapes — \
+same topic area but NOT expressing the intent (these calibrate precision).
 """
 
 
@@ -101,17 +111,23 @@ async def generate_examples(
             generated = GeneratedExamples(positives=[wf.trigger_prompt or ""], negatives=[])
             status = "fallback"
 
-        pos_vecs = await embedder.embed_passages(generated.positives) if generated.positives else []
-        neg_vecs = await embedder.embed_passages(generated.negatives) if generated.negatives else []
+        # Media-shaped examples join both sides: media positives give media
+        # windows same-register anchors to MATCH (raising their scores without
+        # touching the bar), media negatives keep the negative calibration
+        # anchor honest for that register (precision, not a lower bar).
+        positives = generated.positives + generated.media_positives
+        negatives = generated.negatives + generated.media_negatives
+        pos_vecs = await embedder.embed_passages(positives) if positives else []
+        neg_vecs = await embedder.embed_passages(negatives) if negatives else []
 
         await session.execute(
             delete(WorkflowExample).where(WorkflowExample.workflow_id == workflow_id)
         )
-        for text, vec in zip(generated.positives, pos_vecs):
+        for text, vec in zip(positives, pos_vecs):
             session.add(
                 WorkflowExample(workflow_id=workflow_id, kind="positive", text=text, embedding=vec)
             )
-        for text, vec in zip(generated.negatives, neg_vecs):
+        for text, vec in zip(negatives, neg_vecs):
             session.add(
                 WorkflowExample(workflow_id=workflow_id, kind="negative", text=text, embedding=vec)
             )
@@ -120,8 +136,9 @@ async def generate_examples(
         wf.updated_at = datetime.now(timezone.utc)
         await session.commit()
         log.info(
-            "workflow %s examples %s: %d pos / %d neg, threshold %.3f",
-            workflow_id, status, len(generated.positives), len(generated.negatives), wf.threshold,
+            "workflow %s examples %s: %d pos (%d media) / %d neg (%d media), threshold %.3f",
+            workflow_id, status, len(positives), len(generated.media_positives),
+            len(negatives), len(generated.media_negatives), wf.threshold,
         )
 
 
@@ -133,31 +150,49 @@ async def _generate(session: AsyncSession, wf: Workflow) -> GeneratedExamples:
     )
     n_pos = (await effective_settings(session)).intent_example_count
     n_neg = max(4, round(n_pos * 0.4))
+    n_media_pos = max(4, n_pos // 3)
+    n_media_neg = max(3, n_neg // 3)
     agent = Agent(build_model(provider), output_type=GeneratedExamples, retries=3)
     result = await agent.run(
         GENERATION_PROMPT.format(
-            trigger_prompt=wf.trigger_prompt, slots=slots_desc, n_pos=n_pos, n_neg=n_neg
+            trigger_prompt=wf.trigger_prompt, slots=slots_desc, n_pos=n_pos, n_neg=n_neg,
+            n_media_pos=n_media_pos, n_media_neg=n_media_neg,
         )
     )
     return result.output
 
 
-async def regenerate_stale_pending(
+async def regenerate_unready(
     sessionmaker: async_sessionmaker[AsyncSession], embedder: Embedder, older_than_s: int = 180
 ) -> int:
-    """Recover intent workflows stuck in examples_status='pending' — the
-    generation task runs in the backend process and dies with it on restart,
-    which would otherwise leave the detector uncalibrated forever."""
+    """Recover intent workflows without a healthy example set:
+
+    - stuck 'pending' — the generation task runs in the backend process and
+      dies with it on restart, which would otherwise leave the detector
+      uncalibrated forever;
+    - 'fallback' — generated without a strong model (prefilter matches only
+      the trigger prompt), retried once an agent model exists, so a workflow
+      created before models were configured heals instead of staying degraded.
+
+    A 'ready' set is never touched, and fallback only regenerates when a
+    provider exists — good examples can only be replaced by a full
+    regeneration, never downgraded."""
     from datetime import timedelta
 
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=older_than_s)
     async with sessionmaker() as session:
-        stale_ids = (
+        try:
+            await get_provider(session, "agent")
+            has_provider = True
+        except ProviderNotConfigured:
+            has_provider = False
+        statuses = ("pending", "fallback") if has_provider else ("pending",)
+        unready_ids = (
             (
                 await session.execute(
                     select(Workflow.id).where(
                         Workflow.type == "intent",
-                        Workflow.examples_status == "pending",
+                        Workflow.examples_status.in_(statuses),
                         Workflow.updated_at < cutoff,
                     )
                 )
@@ -165,10 +200,10 @@ async def regenerate_stale_pending(
             .scalars()
             .all()
         )
-    for wf_id in stale_ids:
-        log.warning("workflow %s stuck in examples_status=pending; regenerating", wf_id)
+    for wf_id in unready_ids:
+        log.info("workflow %s has no ready example set; regenerating", wf_id)
         await generate_examples(sessionmaker, embedder, wf_id)
-    return len(stale_ids)
+    return len(unready_ids)
 
 
 async def load_positive_vectors(session: AsyncSession, workflow_id: int) -> list[list[float]]:

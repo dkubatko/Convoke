@@ -24,22 +24,25 @@ DESCRIBE_TIMEOUT_S = 120
 
 IMAGE_PROMPT = (
     "This image was sent in a group chat; your description becomes its searchable memory.\n"
-    "Describe it in 1-3 sentences: what it shows, and any visible text quoted VERBATIM — "
-    "tickets, receipts, posters, screenshots (dates, times, names, amounts matter most).\n"
+    "Describe it in 1-3 sentences, LEADING with the subject — what it is about — and only "
+    "then the medium: 'Movie card for Shrek (2001 comedy) — a Google-search screenshot; …', "
+    "never 'A screenshot of …'. Quote any visible text VERBATIM — tickets, receipts, "
+    "posters, screenshots (dates, times, names, amounts matter most).\n"
     "Keep it under {max_chars} characters. Reply with the description only."
 )
 
 VIDEO_PROMPT = (
     "This video was sent in a group chat; your description becomes its searchable memory.\n"
-    "Describe it in 1-3 sentences: what happens, and any visible text quoted VERBATIM.\n"
+    "Describe it in 1-3 sentences, LEADING with the subject — what it is about — then the "
+    "format. Quote any visible text VERBATIM.\n"
     "Keep it under {max_chars} characters. Reply with the description only."
 )
 
 FRAMES_PROMPT = (
     "These images are frames sampled from a video sent in a group chat (the first is its "
     "thumbnail); your description becomes the video's searchable memory.\n"
-    "Describe the video in 1-3 sentences: what appears to happen, and any visible text "
-    "quoted VERBATIM.{transcript_line}\n"
+    "Describe the video in 1-3 sentences, LEADING with the subject — what it is about — "
+    "then the format. Quote any visible text VERBATIM.{transcript_line}\n"
     "Keep it under {max_chars} characters. Reply with the description only."
 )
 

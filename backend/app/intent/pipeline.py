@@ -50,7 +50,7 @@ from app.intent.prompts import (
     build_recheck_prompt,
 )
 from app.intent.schemas import AttributionVerdict, DetectVerdict, RecheckVerdict
-from app.media.render import message_body
+from app.media.render import attachment_annotation, message_body
 from app.intent.state import (
     MIN_FIRE_CONFIDENCE,
     apply_slot_updates,
@@ -75,6 +75,36 @@ from app.models import (
 log = logging.getLogger("convoke.intent")
 
 Key = tuple[int, int, int]  # (workflow_id, chat_id, thread_key)
+
+
+def gate_texts(m: Message, target: Message | None) -> list[str]:
+    """Candidate texts a message contributes to the prefilter — the message's
+    gate score is the max over them.
+
+    Media messages get their components scored SEPARATELY as well as combined:
+    a verbose vision description ("iPhone screenshot of Google search results
+    for shrek…") concatenated with a short caption dilutes the caption's
+    intent signal in a single embedding — measured live, "what about this
+    movie" alone scored 0.877 while annotation+caption scored 0.814 against a
+    0.836 threshold. Max-over-components lets the strongest signal through.
+
+    A plain text-only, reply-free message yields exactly [m.text] — identical
+    to the pre-media behavior."""
+    candidates: list[str] = []
+    if m.text:
+        candidates.append(m.text)
+    if m.attachment is not None:
+        candidates.append(attachment_annotation(m.attachment))
+        if m.text:
+            candidates.append(message_body(m))  # combined, for good measure
+    # Replies inherit their target's topicality ("cool!" replying to "let's
+    # hike in Sunnyvale" must score like the proposal) — as an ADDITIONAL
+    # candidate, so a strong bare caption can't be dragged down by it either.
+    if target is not None and message_body(target):
+        candidates.append(f"{message_body(target)}\n{message_body(m)}")
+    seen: set[str] = set()
+    unique = [c for c in candidates if c and not (c in seen or seen.add(c))]
+    return unique or [message_body(m)]
 
 
 @dataclass
@@ -412,13 +442,6 @@ class IntentSweeper:
             ).scalars()
             reply_targets.update({m.tg_message_id: m for m in fetched})
 
-        def gate_text(m: Message) -> str:
-            target = reply_targets.get(m.reply_to_tg_message_id or 0)
-            body = message_body(m)
-            if target is not None and message_body(target):
-                return f"{message_body(target)}\n{body}"
-            return body
-
         # Stickiness (bypassing the prefilter) exists so an ACTIVE negotiation
         # never loses a weak-looking follow-up ("yes, 7 works"). A satisfied
         # episode is memory, not activity: the embedding gate resumes — weak
@@ -434,7 +457,14 @@ class IntentSweeper:
             if positives:
                 self._mark(cursor, now, "evaluating_prefilter")
                 await session.commit()
-                vecs = await self.embedder.embed_passages([gate_text(m) for m in window])
+                flat = [
+                    text
+                    for m in window
+                    for text in gate_texts(
+                        m, reply_targets.get(m.reply_to_tg_message_id or 0)
+                    )
+                ]
+                vecs = await self.embedder.embed_passages(flat)
                 score = max(dot(v, p) for v in vecs for p in positives)
                 if score < (wf.threshold or 0.8):
                     cursor.last_tg_message_id = window[-1].tg_message_id

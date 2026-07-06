@@ -81,3 +81,27 @@ def test_render_segment_annotates_media_and_quoted_media_reply():
     seg_with_media = Segment(thread_id=None, messages=[photo, reply], tg_id_start=1, tg_id_end=2)
     out = render_segment(seg_with_media)
     assert "[photo: movie tickets for Dune]" in out.splitlines()[0]
+
+
+def test_gate_texts_components():
+    from app.intent.pipeline import gate_texts
+
+    plain = Message(chat_id=1, tg_message_id=1, sender_name="A", text="hello", sent_at=T0)
+    assert gate_texts(plain, None) == ["hello"]  # identical to pre-media behavior
+
+    photo = media_msg(status="described", description="a long screenshot description")
+    assert gate_texts(photo, None) == ["[photo: a long screenshot description]"]
+
+    captioned = media_msg(text="wanna see", status="described", description="shrek card")
+    assert gate_texts(captioned, None) == [
+        "wanna see",
+        "[photo: shrek card]",
+        "[photo: shrek card] wanna see",
+    ]
+
+    # Reply composition is an ADDITIONAL candidate, not a replacement.
+    reply = Message(chat_id=1, tg_message_id=2, sender_name="B", text="cool!",
+                    sent_at=T0, reply_to_tg_message_id=1)
+    texts = gate_texts(reply, captioned)
+    assert texts[0] == "cool!"
+    assert texts[-1] == "[photo: shrek card] wanna see\ncool!"

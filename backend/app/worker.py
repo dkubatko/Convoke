@@ -63,7 +63,7 @@ async def main() -> None:
         limiter = SendLimiter()
 
         async def sweep_forever() -> None:
-            from app.intent.examples import regenerate_stale_pending
+            from app.intent.examples import regenerate_unready
 
             sweeper = IntentSweeper(sessionmaker, embedder)
             ticks = 0
@@ -72,7 +72,7 @@ async def main() -> None:
                     await sweeper.sweep()
                     ticks += 1
                     if ticks % 24 == 0:  # ~every 2 minutes
-                        await regenerate_stale_pending(sessionmaker, embedder)
+                        await regenerate_unready(sessionmaker, embedder)
                 except Exception:  # noqa: BLE001 — the loop must survive
                     log.exception("intent sweep failed")
                 # sweep() refreshes settings with operator overrides each pass

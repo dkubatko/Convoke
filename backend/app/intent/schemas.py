@@ -91,3 +91,14 @@ class GeneratedExamples(BaseModel):
         description="Near-miss messages that look related but do NOT express the "
         "intent (hard negatives)"
     )
+    media_positives: list[str] = Field(
+        default_factory=list,
+        description="Messages expressing the intent VIA MEDIA, written exactly as "
+        'the bot renders media: [photo: <subject-first description>] optional '
+        'caption, or [voice 0:12: "<transcript>"]',
+    )
+    media_negatives: list[str] = Field(
+        default_factory=list,
+        description="Hard-negative media messages in the same rendered format — "
+        "same topic area but NOT expressing the intent",
+    )

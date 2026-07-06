@@ -390,3 +390,87 @@ async def test_cancel_flow(db_sessionmaker):
         fire = (await s.execute(select(PendingFire))).scalar_one()
         assert fire.status == "cancelled"
         assert (await s.execute(select(AgentRun))).scalar_one_or_none() is None
+
+
+async def test_generate_examples_stores_media_register(db_sessionmaker, monkeypatch):
+    """Media positives/negatives join the example set and calibration."""
+    from sqlalchemy import select
+
+    import app.intent.examples as ex
+    from app.intent.schemas import GeneratedExamples
+    from app.memory.embeddings import FakeEmbedder
+    from app.models import Workflow, WorkflowExample
+
+    async with db_sessionmaker() as s:
+        wf = Workflow(name="movies", type="intent", action_prompt="rate it",
+                      trigger_prompt="someone mentions a movie", required_slots=[])
+        s.add(wf)
+        await s.commit()
+        wf_id = wf.id
+
+    generated = GeneratedExamples(
+        positives=["wanna watch Moana?", "have you seen Dune?"],
+        negatives=["my TV is fixed"],
+        media_positives=['[photo: movie card for Shrek] wanna see', '[voice 0:05: "movie night?"]'],
+        media_negatives=["[photo: a TV showing a football game]"],
+    )
+
+    async def fake_generate(session, wf):
+        return generated
+
+    monkeypatch.setattr(ex, "_generate", fake_generate)
+    await ex.generate_examples(db_sessionmaker, FakeEmbedder(), wf_id)
+
+    async with db_sessionmaker() as s:
+        wf = await s.get(Workflow, wf_id)
+        assert wf.examples_status == "ready"
+        rows = (await s.execute(select(WorkflowExample).where(
+            WorkflowExample.workflow_id == wf_id))).scalars().all()
+        by_kind = {}
+        for r in rows:
+            by_kind.setdefault(r.kind, []).append(r.text)
+        assert '[photo: movie card for Shrek] wanna see' in by_kind["positive"]
+        assert "[photo: a TV showing a football game]" in by_kind["negative"]
+        assert len(by_kind["positive"]) == 4 and len(by_kind["negative"]) == 2
+
+
+async def test_fallback_examples_self_heal_when_provider_appears(db_sessionmaker, monkeypatch):
+    """A workflow generated without a strong model sits on trigger-prompt
+    fallback examples; once an agent model exists the rescue loop upgrades it.
+    Without a provider, fallback is left alone (regenerating would be a
+    no-op downgrade) — and a READY set is never touched."""
+    from datetime import datetime, timedelta, timezone
+
+    import app.intent.examples as ex
+    from app.memory.embeddings import FakeEmbedder
+    from app.models import Workflow
+
+    stale = datetime.now(timezone.utc) - timedelta(minutes=10)
+    async with db_sessionmaker() as s:
+        fb = Workflow(name="movies", type="intent", action_prompt="rate it",
+                      trigger_prompt="someone mentions a movie", required_slots=[],
+                      examples_status="fallback", updated_at=stale)
+        ready = Workflow(name="hikes", type="intent", action_prompt="weather",
+                         trigger_prompt="someone proposes a hike", required_slots=[],
+                         examples_status="ready", updated_at=stale)
+        s.add_all([fb, ready])
+        await s.commit()
+        fb_id, ready_id = fb.id, ready.id
+
+    # Without a provider: nothing to gain — untouched.
+    assert await ex.regenerate_unready(db_sessionmaker, FakeEmbedder()) == 0
+
+    from tests.test_agent import add_agent_model
+    async with db_sessionmaker() as s:
+        await add_agent_model(s)
+        await s.commit()
+
+    async def fake_generate(session, wf):
+        from app.intent.schemas import GeneratedExamples
+        return GeneratedExamples(positives=["p"], negatives=[], media_positives=["[photo: p]"])
+
+    monkeypatch.setattr(ex, "_generate", fake_generate)
+    assert await ex.regenerate_unready(db_sessionmaker, FakeEmbedder()) == 1  # only the fallback one
+    async with db_sessionmaker() as s:
+        assert (await s.get(Workflow, fb_id)).examples_status == "ready"
+        assert (await s.get(Workflow, ready_id)).examples_status == "ready"  # untouched

@@ -762,3 +762,30 @@ async def test_media_grace_expiry_releases_window(db_sessionmaker):
         # Window consumed (prefilter skip) — the sweeper is not stuck on it.
         assert (await s.execute(select(IntentCursor))).scalar_one().last_tg_message_id == 1
     assert script.prompts == []  # suppressed without spending the model
+
+
+async def test_media_caption_component_survives_description_dilution(db_sessionmaker):
+    """The measured live failure: a strong caption on a photo whose verbose
+    description would drag the combined embedding under the threshold. The
+    gate scores components separately — the caption alone passes."""
+    script = ScriptedModel()
+    _, chat, _ = await _setup(db_sessionmaker)
+    sweeper = _sweeper(db_sessionmaker, script)
+
+    noise = ("An iPhone screenshot of Google search results showing a card with "
+             "ratings runtime year and various interface elements " * 3)
+    msg = _media_msg(chat.id, 1, at=NOW - timedelta(minutes=2), description=noise)
+    msg.text = ON_TOPIC  # strong caption, diluted when concatenated
+    await _add(db_sessionmaker, msg)
+
+    # Sanity: the combined body alone would fail the gate at this threshold.
+    from app.media.render import message_body
+    emb = FakeEmbedder()
+    combined = (await emb.embed_passages([message_body(msg)]))[0]
+    example = (await emb.embed_passages([ON_TOPIC]))[0]
+    from app.intent.examples import dot
+    assert dot(combined, example) < 0.5  # pre-fix behavior: prefilter_skip
+
+    script.push(detect(summary="movie night"))
+    assert await sweeper.sweep(now=NOW) == 1  # component-max let the caption through
+    assert len(await _fires(db_sessionmaker)) == 1
