@@ -22,7 +22,7 @@ const SUBTABS = ['Role assignment', 'Model library', 'Settings'] as const
 
 const CAPABILITIES = ['chat', 'vision', 'transcription', 'video'] as const
 
-const ROLES: { role: string; title: string; blurb: string; recommended: string }[] = [
+const ROLES: { role: string; title: string; blurb: string; recommended: string; note?: string }[] = [
   {
     role: 'agent',
     title: 'Agent — the voice',
@@ -34,7 +34,8 @@ const ROLES: { role: string; title: string; blurb: string; recommended: string }
     title: 'Intent — the listener',
     blurb:
       'A cheap, fast model that classifies conversation windows for intent workflows. Falls back to the agent model if unset.',
-    recommended: 'a small, fast model (gpt-5.4-nano / gemma4 class) — cost matters more than brilliance',
+    recommended: 'a small, fast model (gpt-5.4-nano / gemma4 class)',
+    note: 'Cost matters more than brilliance here.',
   },
   {
     role: 'vision',
@@ -55,7 +56,8 @@ const ROLES: { role: string; title: string; blurb: string; recommended: string }
     title: 'Video — motion understanding',
     blurb:
       'Optional: a model that accepts video input directly. Unset: videos are described from thumbnail + sampled frames + audio transcript instead.',
-    recommended: 'a video-native VLM served by vLLM (Qwen3-VL class) — most setups leave this unassigned',
+    recommended: 'a video-native VLM served by vLLM (Qwen3-VL class)',
+    note: 'Most setups leave this unassigned.',
   },
 ]
 
@@ -491,9 +493,9 @@ function EmbeddingsCard() {
         (CPU, inside the worker). Switching models rebuilds every stored vector and
         recalibrates workflow thresholds.
       </p>
-      <div className="row" style={{ alignItems: 'flex-start' }}>
+      <div className="row" style={{ alignItems: 'flex-end' }}>
         <div style={{ flex: '0 1 420px' }}>
-          <Field label="Model" hint="Vetted CPU-viable options, or any sentence-transformers model from Hugging Face.">
+          <Field label="Model">
             <select
               value={selected}
               disabled={reembedding}
@@ -506,8 +508,23 @@ function EmbeddingsCard() {
               <option value={CUSTOM_MODEL}>Custom Hugging Face id…</option>
             </select>
           </Field>
-          {selected === CUSTOM_MODEL && (
-            <Field label="Hugging Face id" hint="Must be loadable by sentence-transformers; the dimension is probed automatically.">
+        </div>
+        <button
+          className="btn btn--primary"
+          disabled={!changed || reembedding || busy}
+          onClick={() => void switchModel()}
+        >
+          {reembedding ? 'Rebuilding…' : 'Switch & re-embed'}
+        </button>
+      </div>
+      {/* Hint outside the 420px column so it uses the card's full width. */}
+      <div className="field-hint" style={{ marginTop: 6 }}>
+        Vetted CPU-viable options, or any sentence-transformers model from Hugging Face.
+      </div>
+      {selected === CUSTOM_MODEL && (
+        <>
+          <div style={{ maxWidth: 420, marginTop: 10 }}>
+            <Field label="Hugging Face id">
               <input
                 className="mono"
                 value={customId}
@@ -515,19 +532,12 @@ function EmbeddingsCard() {
                 placeholder="org/model-name"
               />
             </Field>
-          )}
-        </div>
-        <div className="field">
-          <label aria-hidden>&nbsp;</label>
-          <button
-            className="btn btn--primary"
-            disabled={!changed || reembedding || busy}
-            onClick={() => void switchModel()}
-          >
-            {reembedding ? 'Rebuilding…' : 'Switch & re-embed'}
-          </button>
-        </div>
-      </div>
+          </div>
+          <div className="field-hint" style={{ marginTop: 6 }}>
+            Must be loadable by sentence-transformers; the dimension is probed automatically.
+          </div>
+        </>
+      )}
       {cur?.error && <p className="field-error" style={{ marginTop: 8 }}>{cur.error}</p>}
     </Card>
   )
@@ -539,7 +549,7 @@ function RoleCard({
   library,
   onChanged,
 }: {
-  meta: { role: string; title: string; blurb: string; recommended: string }
+  meta: (typeof ROLES)[number]
   assignment: RoleAssignment | undefined
   library: ConnectedModel[]
   onChanged: () => void
@@ -595,12 +605,9 @@ function RoleCard({
         )}
       </div>
       <p className="muted" style={{ marginBottom: 14 }}>{meta.blurb}</p>
-      <div className="row" style={{ alignItems: 'flex-start' }}>
+      <div className="row" style={{ alignItems: 'flex-end' }}>
         <div style={{ flex: '0 1 420px' }}>
-          <Field
-            label="Model"
-            hint={`Needs the “${required}” capability — recommended: ${meta.recommended}.`}
-          >
+          <Field label="Model">
             <select
               value={selected}
               onChange={(e) => setSelected(e.target.value === '' ? '' : Number(e.target.value))}
@@ -614,12 +621,15 @@ function RoleCard({
             </select>
           </Field>
         </div>
-        <div className="field">
-          <label aria-hidden>&nbsp;</label>
-          <button className="btn btn--primary" disabled={!dirty || busy} onClick={() => void apply()}>
-            {busy ? 'Saving…' : 'Apply'}
-          </button>
-        </div>
+        <button className="btn btn--primary" disabled={!dirty || busy} onClick={() => void apply()}>
+          {busy ? 'Saving…' : 'Apply'}
+        </button>
+      </div>
+      {/* Hints sit outside the 420px column so they use the card's full width. */}
+      <div className="field-hint" style={{ marginTop: 6 }}>
+        <div>Needs the “{required}” capability.</div>
+        <div>Recommended: {meta.recommended}.</div>
+        {meta.note && <div>{meta.note}</div>}
       </div>
       {selectionLacksCapability && (
         <p className="field-error" style={{ marginTop: 8 }}>

@@ -361,7 +361,14 @@ export function WorkflowForm({ chats, initial, onDone, onCancel }: {
             </Field>
             <Field
               label="Information to wait for (one per line: name: description)"
-              hint="Values are collected across messages as the conversation unfolds — they never need to appear in a single message. The workflow fires once every line has a confident value."
+              hint={
+                <>
+                  Values are collected across messages as the conversation unfolds — they never
+                  need to appear in a single message.
+                  <br />
+                  The workflow fires once every line has a confident value.
+                </>
+              }
             >
               <textarea
                 rows={3}

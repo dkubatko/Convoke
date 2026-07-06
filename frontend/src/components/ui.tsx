@@ -46,7 +46,7 @@ export function Card({ title, children, pad = true, onClick, style }: {
 
 export function Field({ label, hint, error, children }: {
   label: string
-  hint?: string
+  hint?: ReactNode
   error?: string | null
   children: ReactNode
 }) {

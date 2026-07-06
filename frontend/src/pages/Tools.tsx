@@ -247,7 +247,13 @@ export default function Tools() {
                     <div className="grid-2">
                       <Field
                         label="Client id"
-                        hint="Leave blank first — most servers register Convoke automatically. Only needed for providers like Google."
+                        hint={
+                          <>
+                            Leave blank first — most servers register Convoke automatically.
+                            <br />
+                            Only needed for providers like Google.
+                          </>
+                        }
                       >
                         <input className="mono" value={oauthClientId} onChange={(e) => setOauthClientId(e.target.value)} />
                       </Field>
