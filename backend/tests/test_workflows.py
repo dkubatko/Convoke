@@ -111,6 +111,42 @@ async def test_recalibrate_intent_thresholds_from_stored_vectors(db_sessionmaker
     assert strict == pytest.approx(calibrate_threshold(pos, permissiveness=1))
 
 
+async def test_pending_counts_per_thread_not_global_min(db_sessionmaker):
+    # A stale seed cursor in a quiet thread must not flag another thread's
+    # already-evaluated messages as pending (the "stuck waiting" bug).
+    from app.api.workflows import CursorOut, _pending_for
+
+    async with db_sessionmaker() as s:
+        bot = Bot(tg_bot_id=1, username="b", name="b", token_encrypted="x",
+                  can_read_all_group_messages=True)
+        s.add(bot)
+        await s.flush()
+        chat = Chat(bot_id=bot.id, tg_chat_id=-100, type="supergroup", status="authorized")
+        s.add(chat)
+        await s.flush()
+        cid = chat.id
+        for tg, thr in [(5, 55), (10, None), (11, None)]:  # quiet thread 55: 5 ; main: 10,11
+            s.add(Message(chat_id=cid, tg_message_id=tg, thread_id=thr,
+                          sender_name="A", text="x", sent_at=NOW))
+        await s.commit()
+
+    def cur(tk, last):
+        return CursorOut(thread_key=tk, last_tg_message_id=last, last_evaluated_at=None,
+                         last_stage=None, last_score=None, last_confidence=None)
+
+    # Both threads caught up. The quiet thread's cursor (5) sits below the main
+    # thread's newer messages (10, 11) — global-min logic would wrongly count
+    # those two as pending; per-thread must count 0.
+    cursors = [cur(0, 11), cur(55, 5)]
+    async with db_sessionmaker() as s:
+        assert await _pending_for(s, cid, cursors) == 0
+        s.add(Message(chat_id=cid, tg_message_id=12, thread_id=None,
+                      sender_name="A", text="y", sent_at=NOW))
+        await s.commit()
+    async with db_sessionmaker() as s:
+        assert await _pending_for(s, cid, cursors) == 1  # only the new main-thread msg
+
+
 # ---------- shared setup ----------
 
 async def _bot_and_chat(db_sessionmaker):

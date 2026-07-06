@@ -48,7 +48,7 @@ export default function SettingsEditor({
   }
 
   return (
-    <Card>
+    <Card style={{ maxWidth: 720 }}>
       <div className="page-head-row">
         <button
           type="button"

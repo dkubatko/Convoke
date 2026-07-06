@@ -324,6 +324,35 @@ async def _cursors_for(
     return [CursorOut.model_validate(c) for c in rows]
 
 
+async def _pending_for(
+    session: AsyncSession, chat_id: int, cursors: list["CursorOut"]
+) -> int:
+    """Non-self messages a workflow hasn't evaluated, counted PER THREAD against
+    that thread's own cursor. A single global min-cursor miscounts: a stale seed
+    cursor in a quiet thread would flag another thread's already-evaluated
+    messages as pending forever."""
+    total = 0
+    for c in cursors:
+        thread_pred = (
+            Message.thread_id.is_(None)
+            if c.thread_key == 0
+            else Message.thread_id == c.thread_key
+        )
+        total += (
+            await session.execute(
+                select(func.count())
+                .select_from(Message)
+                .where(
+                    Message.chat_id == chat_id,
+                    Message.source != "self",
+                    Message.tg_message_id > c.last_tg_message_id,
+                    thread_pred,
+                )
+            )
+        ).scalar() or 0
+    return total
+
+
 class ChatRunOut(BaseModel):
     id: int
     status: str
@@ -374,19 +403,6 @@ async def chat_workflows(
             )
         ).scalars()
     )
-    async def pending_since(cursor: int) -> int:
-        return (
-            await session.execute(
-                select(func.count())
-                .select_from(Message)
-                .where(
-                    Message.chat_id == chat_id,
-                    Message.tg_message_id > cursor,
-                    Message.source != "self",
-                )
-            )
-        ).scalar() or 0
-
     workflows = (await session.execute(select(Workflow).order_by(Workflow.id))).scalars().all()
 
     out: list[ChatWorkflowOut] = []
@@ -401,8 +417,7 @@ async def chat_workflows(
         # seeding starts it at the chat tail anyway).
         pending_messages = 0
         if wf.type == "intent" and wf.id in assigned_ids and cursors:
-            wf_cursor = min(c.last_tg_message_id for c in cursors)
-            pending_messages = await pending_since(wf_cursor)
+            pending_messages = await _pending_for(session, chat_id, cursors)
         fires = (
             (
                 await session.execute(
@@ -511,18 +526,7 @@ async def workflow_detail(
         )
         pending = 0
         if wf.type == "intent" and cursors:
-            wf_cursor = min(c.last_tg_message_id for c in cursors)
-            pending = (
-                await session.execute(
-                    select(func.count())
-                    .select_from(Message)
-                    .where(
-                        Message.chat_id == chat.id,
-                        Message.tg_message_id > wf_cursor,
-                        Message.source != "self",
-                    )
-                )
-            ).scalar() or 0
+            pending = await _pending_for(session, chat.id, cursors)
         fires = (
             (
                 await session.execute(
