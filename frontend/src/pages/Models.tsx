@@ -16,6 +16,7 @@ import {
   TableSkeleton,
 } from '../components/ui'
 import SettingsEditor from '../components/SettingsEditor'
+import { Select, SelectOption } from '../components/Select'
 import { useUrlTab } from '../hooks/useUrlTab'
 
 const SUBTABS = ['Role assignment', 'Model library', 'Settings'] as const
@@ -79,11 +80,7 @@ export default function Models() {
       />
       <TabBar tabs={SUBTABS} active={subtab} onSelect={setSubtab} />
       {subtab === 'Settings' && (
-        <SettingsEditor
-          endpoint="/api/settings?page=models"
-          title="Runtime tuning"
-          intro="How the intent classifier and the media describers are called while watching chats."
-        />
+        <SettingsEditor endpoint="/api/settings?page=models" />
       )}
       {subtab === 'Model library' && (
         <ModelLibrary models={models} onChanged={refetchAll} />
@@ -438,8 +435,20 @@ function EmbeddingsCard() {
   const [busy, setBusy] = useState(false)
 
   const cur = info.data?.current
+  const registry = info.data?.registry ?? []
   const reembedding = cur?.status === 'reembedding'
-  const targetId = selected === CUSTOM_MODEL ? customId.trim() : selected
+  // Default the picker to the current model so it reads as the selected option
+  // — not a separate "(current: …)" entry duplicating a registry row.
+  const effective = selected || cur?.model_id || ''
+  const inRegistry = registry.some((r) => r.id === cur?.model_id)
+  const modelOptions: SelectOption[] = [
+    ...(cur && !inRegistry
+      ? [{ value: cur.model_id, label: cur.model_id, hint: '· current (custom)' }]
+      : []),
+    ...registry.map((r) => ({ value: r.id, label: r.label })),
+    { value: CUSTOM_MODEL, label: 'Custom Hugging Face id…' },
+  ]
+  const targetId = effective === CUSTOM_MODEL ? customId.trim() : effective
   const changed = targetId !== '' && targetId !== cur?.model_id
 
   async function switchModel() {
@@ -496,17 +505,13 @@ function EmbeddingsCard() {
       <div className="row" style={{ alignItems: 'flex-end' }}>
         <div style={{ flex: '0 1 420px' }}>
           <Field label="Model">
-            <select
-              value={selected}
+            <Select
+              value={effective}
+              options={modelOptions}
               disabled={reembedding}
-              onChange={(e) => setSelected(e.target.value)}
-            >
-              <option value="">{cur ? `(current: ${cur.model_id})` : '…'}</option>
-              {(info.data?.registry ?? []).map((r) => (
-                <option key={r.id} value={r.id}>{r.label}</option>
-              ))}
-              <option value={CUSTOM_MODEL}>Custom Hugging Face id…</option>
-            </select>
+              onChange={setSelected}
+              ariaLabel="Embedding model"
+            />
           </Field>
         </div>
         <button
@@ -521,7 +526,7 @@ function EmbeddingsCard() {
       <div className="field-hint" style={{ marginTop: 6 }}>
         Vetted CPU-viable options, or any sentence-transformers model from Hugging Face.
       </div>
-      {selected === CUSTOM_MODEL && (
+      {effective === CUSTOM_MODEL && (
         <>
           <div style={{ maxWidth: 420, marginTop: 10 }}>
             <Field label="Hugging Face id">
@@ -608,17 +613,19 @@ function RoleCard({
       <div className="row" style={{ alignItems: 'flex-end' }}>
         <div style={{ flex: '0 1 420px' }}>
           <Field label="Model">
-            <select
-              value={selected}
-              onChange={(e) => setSelected(e.target.value === '' ? '' : Number(e.target.value))}
-            >
-              <option value="">(not assigned)</option>
-              {library.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}{m.capabilities[required] ? '' : ` — no ${required}`}
-                </option>
-              ))}
-            </select>
+            <Select
+              value={selected === '' ? '' : String(selected)}
+              onChange={(v) => setSelected(v === '' ? '' : Number(v))}
+              ariaLabel={`${meta.title} model`}
+              options={[
+                { value: '', label: '(not assigned)' },
+                ...library.map((m) => ({
+                  value: String(m.id),
+                  label: m.name,
+                  hint: m.capabilities[required] ? undefined : `— no ${required}`,
+                })),
+              ]}
+            />
           </Field>
         </div>
         <button className="btn btn--primary" disabled={!dirty || busy} onClick={() => void apply()}>

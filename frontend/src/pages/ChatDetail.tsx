@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api, ApiError } from '../lib/api'
-import { shortDateTime, timeAgo, truncate } from '../lib/format'
+import { shortDateTime, stripTags, timeAgo, truncate } from '../lib/format'
 import {
   Chat,
   ChatThread,
@@ -80,11 +80,7 @@ export default function ChatDetail() {
       {tab === 'Tools' && <ToolsTab chatId={id} />}
       {tab === 'Agent runs' && <RunsTab chatId={id} />}
       {tab === 'Settings' && (
-        <SettingsEditor
-          endpoint={`/api/chats/${id}/settings`}
-          title="Detection timing for this chat"
-          intro="Override how the detector windows this chat's conversation. Left at their defaults, these follow the global settings."
-        />
+        <SettingsEditor endpoint={`/api/chats/${id}/settings`} />
       )}
     </>
   )
@@ -577,7 +573,7 @@ function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
       when: r.created_at,
       status: r.status,
       error: !!r.error,
-      detail: [truncate(r.error ?? r.response_text ?? '', 120)].filter(Boolean),
+      detail: [truncate(stripTags(r.error ?? r.response_text ?? ''), 120)].filter(Boolean),
     })
   }
   return entries.sort((a, b) => b.when.localeCompare(a.when))
@@ -1022,9 +1018,9 @@ function RunsTab({ chatId }: { chatId: number }) {
                 <td>
                   <StatusPill status={r.status} />
                 </td>
-                <td className="muted">{truncate(r.request_text, 70)}</td>
+                <td className="muted">{truncate(stripTags(r.request_text), 70)}</td>
                 <td className={r.error ? 'field-error' : 'muted'}>
-                  {truncate(r.error ?? r.response_text ?? '', 90)}
+                  {truncate(stripTags(r.error ?? r.response_text ?? ''), 90)}
                 </td>
               </tr>
             ))}

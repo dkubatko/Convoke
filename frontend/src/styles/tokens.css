@@ -27,6 +27,7 @@
 
   --radius: 10px;
   --radius-s: 7px;
+  --ctl-h: 36px; /* shared height for inputs, selects, and buttons — keeps rows aligned */
   --shadow-1: 0 1px 2px rgb(23 34 44 / 6%), 0 2px 10px rgb(23 34 44 / 5%);
   --shadow-2: 0 4px 12px rgb(23 34 44 / 10%), 0 12px 40px rgb(23 34 44 / 12%);
 

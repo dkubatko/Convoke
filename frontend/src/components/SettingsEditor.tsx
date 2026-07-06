@@ -1,33 +1,33 @@
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { api, ApiError } from '../lib/api'
 import { AppSetting } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from './Toast'
 import { Card, CardSkeleton, ErrorNote } from './ui'
+import { LevelSlider } from './LevelSlider'
 
 /** Reusable editor for a set of tunables served by `endpoint` (global or
     per-chat). Renders a save-on-demand form; only changed keys are sent. */
-export default function SettingsEditor({
-  endpoint,
-  title,
-  intro,
-  collapsible = false,
-}: {
-  endpoint: string
-  title: string
-  intro?: string
-  collapsible?: boolean
-}) {
+export default function SettingsEditor({ endpoint }: { endpoint: string }) {
   const settings = useQuery<AppSetting[]>(() => api.get(endpoint), [endpoint])
   const toast = useToast()
   const [edits, setEdits] = useState<Record<string, number>>({})
+  // Raw text for a number field mid-edit, so it can be cleared to empty without
+  // snapping back to 0 on every keystroke.
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
-  const [open, setOpen] = useState(!collapsible)
 
   const data = settings.data ?? []
   const valueOf = (s: AppSetting) => (s.key in edits ? edits[s.key] : s.value)
   const dirty = data.filter((s) => s.key in edits && edits[s.key] !== s.value)
   const stage = (key: string, value: number) => setEdits((p) => ({ ...p, [key]: value }))
+  const clearDraft = (key: string) =>
+    setDrafts((d) => {
+      if (!(key in d)) return d
+      const next = { ...d }
+      delete next[key]
+      return next
+    })
 
   async function save() {
     if (!dirty.length) return
@@ -38,8 +38,10 @@ export default function SettingsEditor({
         dirty.map((s) => ({ key: s.key, value: edits[s.key] })),
       )
       toast('ok', 'Saved — applies within a few seconds')
+      // Refetch first, THEN drop the local edits — so the fresh server values
+      // are already in place and the fields never flash back to the old ones.
+      await settings.refetch()
       setEdits({})
-      void settings.refetch()
     } catch (err) {
       toast('err', err instanceof ApiError ? err.message : 'Couldn’t save settings')
     } finally {
@@ -47,106 +49,143 @@ export default function SettingsEditor({
     }
   }
 
-  return (
-    <Card style={{ maxWidth: 720 }}>
-      <div className="page-head-row">
-        <button
-          type="button"
-          onClick={() => collapsible && setOpen((v) => !v)}
-          style={{
-            background: 'none', border: 'none', padding: 0, cursor: collapsible ? 'pointer' : 'default',
-            font: 'inherit', color: 'inherit', display: 'flex', alignItems: 'center', gap: 8,
-          }}
-          aria-expanded={collapsible ? open : undefined}
-        >
-          <span className="card-title" style={{ margin: 0 }}>{title}</span>
-          {collapsible && <span className="muted">{open ? '▾' : '▸'}</span>}
-        </button>
-        {open && (
-          <button className="btn btn--primary btn--sm" disabled={busy || dirty.length === 0} onClick={() => void save()}>
-            {busy ? 'Saving…' : dirty.length ? `Save ${dirty.length}` : 'Saved'}
-          </button>
-        )}
-      </div>
+  // Discard every staged edit and revert to the saved values.
+  function cancel() {
+    setEdits({})
+    setDrafts({})
+  }
 
-      {open &&
-        (settings.loading ? (
-          <div style={{ marginTop: 12 }}><CardSkeleton lines={4} /></div>
-        ) : settings.error ? (
-          <div style={{ marginTop: 12 }}>
-            <ErrorNote message={settings.error} onRetry={() => void settings.refetch()} />
-          </div>
-        ) : (
-          <div style={{ marginTop: 12 }}>
-            {intro && (
-              <p className="muted" style={{ fontSize: 12.5, margin: '0 0 4px', maxWidth: 640 }}>
-                {intro}
-              </p>
-            )}
-            <div className="setting-list">
-              {data.map((s) => {
-                const val = valueOf(s)
-                const changed = s.key in edits && edits[s.key] !== s.value
+  return (
+    // pad=false: the list owns its padding (horizontal only), so no vertical card
+    // padding adds space above the first group or below the last; the action row
+    // is a padded footer inside the card.
+    <Card pad={false}>
+      {settings.loading ? (
+        <div className="card-pad">
+          <CardSkeleton lines={4} />
+        </div>
+      ) : settings.error ? (
+        <div className="card-pad">
+          <ErrorNote message={settings.error} onRetry={() => void settings.refetch()} />
+        </div>
+      ) : (
+        <>
+          <div className="setting-list">
+            {data.map((s, i) => {
+              const val = valueOf(s)
+              const changed = s.key in edits && edits[s.key] !== s.value
+              const atDefault = val === s.default
+              const header =
+                s.group && (i === 0 || data[i - 1].group !== s.group) ? (
+                  <div className="setting-group">
+                    <span className="setting-group-label">{s.group}</span>
+                  </div>
+                ) : null
+              // Minimal circular-arrow reset that keeps its footprint even when
+              // hidden, so it never shifts the value.
+              const resetBtn = (
+                <button
+                  type="button"
+                  className={`reset-btn${atDefault ? ' reset-btn--off' : ''}`}
+                  title="Reset to default"
+                  aria-label="Reset to default"
+                  tabIndex={atDefault ? -1 : 0}
+                  onClick={() => stage(s.key, s.default)}
+                >
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                  </svg>
+                </button>
+              )
+              // A step-labelled knob renders as a lever; everything else is a
+              // numeric box. Both put the reset + control in the right column.
+              if (s.step_labels) {
                 return (
-                  <div className="setting" key={s.key}>
-                    <label className="setting-label" htmlFor={s.key}>
-                      {s.label}
-                      {changed && (
-                        <span className="pill pill--warn">
-                          <span className="lamp" aria-hidden />unsaved
-                        </span>
-                      )}
-                    </label>
-                    <div className="setting-control">
-                      {s.step_labels ? (
-                        <div className="steps" role="radiogroup" aria-label={s.label}>
-                          {s.step_labels.map((lbl, i) => {
-                            const v = s.minimum + i
-                            return (
-                              <button
-                                type="button"
-                                key={lbl}
-                                role="radio"
-                                aria-checked={val === v}
-                                className={`step${val === v ? ' step--on' : ''}`}
-                                onClick={() => stage(s.key, v)}
-                              >
-                                {lbl}
-                              </button>
-                            )
-                          })}
-                        </div>
-                      ) : (
-                        <>
-                          <input
-                            id={s.key}
-                            type="number"
-                            className="mono"
+                  <Fragment key={s.key}>
+                    {header}
+                    <div className={`setting setting--row${changed ? ' setting--changed' : ''}`}>
+                      <div className="setting-main">
+                        <label className="setting-label">{s.label}</label>
+                        <p className="setting-desc">{s.description}</p>
+                      </div>
+                      <div className="setting-control setting-control--lever">
+                        <div className="setting-value">
+                          {resetBtn}
+                          <LevelSlider
+                            value={val}
                             min={s.minimum}
                             max={s.maximum}
-                            value={val}
-                            onChange={(e) => stage(s.key, Number(e.target.value))}
+                            labels={s.step_labels}
+                            ariaLabel={s.label}
+                            onChange={(v) => stage(s.key, v)}
                           />
-                          <span className="unit">{s.unit}</span>
-                        </>
-                      )}
+                        </div>
+                      </div>
                     </div>
-                    <p className="setting-desc">
-                      {s.description}{' '}
-                      {val === s.default ? (
-                        <span style={{ opacity: 0.7 }}>Default.</span>
-                      ) : (
-                        <button type="button" className="linkbtn" onClick={() => stage(s.key, s.default)}>
-                          Reset to default ({s.step_labels ? s.step_labels[s.default - s.minimum] : s.default})
-                        </button>
-                      )}
-                    </p>
-                  </div>
+                  </Fragment>
                 )
-              })}
-            </div>
+              }
+              return (
+                <Fragment key={s.key}>
+                  {header}
+                  <div className={`setting setting--row${changed ? ' setting--changed' : ''}`}>
+                    <div className="setting-main">
+                      <label className="setting-label" htmlFor={s.key}>
+                        {s.label}
+                      </label>
+                      <p className="setting-desc">{s.description}</p>
+                    </div>
+                    <div className="setting-control">
+                      <div className="setting-value">
+                        {resetBtn}
+                        <input
+                          id={s.key}
+                          type="number"
+                          inputMode="numeric"
+                          className="mono setting-num"
+                          min={s.minimum}
+                          max={s.maximum}
+                          value={s.key in drafts ? drafts[s.key] : val}
+                          onChange={(e) => {
+                            const raw = e.target.value
+                            if (raw === '') {
+                              setDrafts((d) => ({ ...d, [s.key]: '' }))
+                            } else {
+                              clearDraft(s.key)
+                              stage(s.key, Number(raw))
+                            }
+                          }}
+                          onBlur={() => {
+                            if (drafts[s.key] === '') stage(s.key, s.minimum)
+                            clearDraft(s.key)
+                          }}
+                        />
+                      </div>
+                      <span className="unit">{s.unit}</span>
+                    </div>
+                  </div>
+                </Fragment>
+              )
+            })}
           </div>
-        ))}
+
+          <div className="settings-actions">
+            <button
+              className="btn btn--primary"
+              disabled={busy || dirty.length === 0}
+              onClick={() => void save()}
+            >
+              {busy ? 'Saving…' : dirty.length ? `Save ${dirty.length}` : 'Saved'}
+            </button>
+            {dirty.length > 0 && (
+              <button type="button" className="btn btn--quiet" disabled={busy} onClick={cancel}>
+                Cancel
+              </button>
+            )}
+          </div>
+        </>
+      )}
     </Card>
   )
 }

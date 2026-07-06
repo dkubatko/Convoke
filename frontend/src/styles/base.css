@@ -101,10 +101,13 @@ code,
 .btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 7px;
-  padding: 7px 14px;
+  min-height: var(--ctl-h);
+  padding: 0 14px;
   border: 1px solid transparent;
   border-radius: var(--radius-s);
+  box-sizing: border-box;
   font: 500 13.5px var(--font-body);
   cursor: pointer;
   white-space: nowrap;
@@ -146,6 +149,7 @@ code,
 }
 
 .btn--sm {
+  min-height: 0;
   padding: 4px 10px;
   font-size: 12.5px;
 }
@@ -154,13 +158,18 @@ input,
 select,
 textarea {
   width: 100%;
+  min-height: var(--ctl-h);
   padding: 8px 11px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-s);
+  box-sizing: border-box;
   background: var(--surface);
   color: var(--ink);
   font: 400 14px var(--font-body);
   transition: border-color 120ms ease;
+}
+textarea {
+  min-height: calc(var(--ctl-h) * 2);
 }
 
 input:focus,
@@ -719,71 +728,308 @@ td.mono {
   font-size: 13px;
 }
 
-/* Settings editor — a constrained, aligned form so the control never flings to
-   the far edge of a wide card. */
+/* Settings editor — a single-column list grouped by topic headers. Spans the card
+   full-width (the card has no padding of its own) so a changed row highlights
+   edge-to-edge; each row pads its own content back in. */
 .setting-list {
   display: flex;
   flex-direction: column;
-  max-width: 640px;
 }
-.setting {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 150px;
-  column-gap: 24px;
-  row-gap: 5px;
+/* Every group header is the same fixed height, its label vertically centered. */
+.setting-group {
+  display: flex;
   align-items: center;
-  padding: 14px 0;
+  min-height: 34px;
+  padding: 0 20px;
+  box-sizing: border-box;
+}
+.setting-group-label {
+  font: 600 11px var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+/* Save / cancel are a footer row inside the card, left-aligned with the same
+   standard buttons the app's other forms use. */
+.settings-actions {
+  display: flex;
+  gap: 10px;
+  padding: 14px 20px;
   border-top: 1px solid var(--line);
 }
-.setting:first-child {
-  border-top: none;
-  padding-top: 4px;
+.setting {
+  padding: 13px 20px 15px;
+  border-top: 1px solid var(--line);
 }
-.setting-label {
-  grid-column: 1;
-  grid-row: 1;
-  font-weight: 600;
-  font-size: 13.5px;
+/* Only the edited row is highlighted, not the whole card. */
+.setting--changed {
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+/* A setting row: title + description on the left, value in its own column on the
+   right, so the two never compete for width. */
+.setting--row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 28px;
 }
-.setting-control {
-  grid-column: 2;
-  grid-row: 1;
+.setting-main {
+  flex: 1;
+  min-width: 0;
   display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.setting-control input {
-  width: 78px;
-  text-align: right;
-}
-.setting-control .unit {
-  font: 400 12px var(--font-mono);
-  color: var(--ink-2);
-}
-.steps {
-  display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 4px;
 }
-.step {
-  padding: 4px 10px;
-  font: 400 12px var(--font-sans);
+.setting-label {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+/* Value column: [reset][box] with the unit centered beneath. Right-aligned and
+   fixed so the boxes line up down the list. */
+.setting-control {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+.setting-value {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.setting-num {
+  width: 64px;
+  text-align: center;
+  font-size: 15px;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.setting-num::-webkit-outer-spin-button,
+.setting-num::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+/* Minimal reset icon; keeps its footprint when hidden (no layout shift). */
+.reset-btn {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
   color: var(--ink-2);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+}
+.reset-btn:hover {
+  color: var(--accent);
   background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 999px;
+}
+.reset-btn--off {
+  visibility: hidden;
+}
+.setting-control .unit {
+  width: 64px;
+  text-align: center;
+  font: 400 11px var(--font-mono);
+  color: var(--ink-2);
+  line-height: 1;
+}
+.setting-desc {
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* Custom select — replaces the native dropdown, same height as inputs/buttons. */
+.select {
+  position: relative;
+  width: 100%;
+}
+.select-btn {
+  width: 100%;
+  min-height: var(--ctl-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-s);
+  box-sizing: border-box;
+  background: var(--surface);
+  color: var(--ink);
+  font: 400 14px var(--font-body);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.select-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.select--open .select-btn,
+.select-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.select-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-hint {
+  color: var(--ink-2);
+}
+.select-caret {
+  flex: none;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+.select--open .select-caret {
+  transform: rotate(180deg);
+}
+.select-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 5px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 5px;
+  list-style: none;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-s);
+  box-shadow: var(--shadow-2);
+}
+.select-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 5px;
+  font-size: 13.5px;
+  color: var(--ink);
   cursor: pointer;
 }
-.step:hover {
-  color: var(--ink-1);
+.select-opt--active {
+  background: var(--surface-2);
 }
-.step--on {
-  color: var(--bg-1);
+.select-opt--on {
+  color: var(--accent);
+  font-weight: 500;
+}
+.select-opt--disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.select-opt-check {
+  flex: none;
+  width: 13px;
+  color: var(--accent);
+  font-size: 11px;
+}
+.select-opt-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Discrete lever — a line with N stops and the chosen level named beneath.
+   Compact, so it sits in the value column like a numeric input. */
+.lever {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  width: 100%;
+  padding: 0 8px;
+  box-sizing: border-box;
+}
+.lever-track {
+  position: relative;
+  width: 100%;
+  height: 22px;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+}
+.lever-rail,
+.lever-fill {
+  position: absolute;
+  top: 50%;
+  height: 3px;
+  border-radius: 2px;
+  transform: translateY(-50%);
+}
+.lever-rail {
+  left: 0;
+  right: 0;
+  background: var(--line-strong);
+}
+.lever-fill {
+  left: 0;
+  background: var(--accent);
+}
+.lever-stop {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--line-strong);
+  background: var(--surface);
+  pointer-events: none; /* clicks/drags land on the track, not the dots */
+  transition: width 100ms ease, height 100ms ease, border-color 100ms ease;
+}
+.lever-stop--filled {
+  border-color: var(--accent);
+}
+.lever-stop--on {
+  width: 16px;
+  height: 16px;
   background: var(--accent);
   border-color: var(--accent);
+}
+.lever-track:focus-visible {
+  outline: none;
+}
+.lever-track:focus-visible .lever-stop--on {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.lever-caption {
+  align-self: center;
+  font: 600 12.5px var(--font-body);
+  color: var(--ink);
+}
+.lever--disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+/* The permissiveness lever's value column is wider than a numeric box. Its reset
+   sits to the left, aligned with the track, matching the numeric layout. */
+.setting-control--lever {
+  width: 222px;
+  align-items: stretch;
+}
+.setting-control--lever .setting-value {
+  align-items: flex-start;
+  width: 100%;
+}
+.setting-control--lever .lever {
+  flex: 1;
+  min-width: 0;
 }
 /* Threads: inline rename that reads as the h3 until clicked. The fixed-height
    slot keeps the row from reflowing when the text swaps to an input. */

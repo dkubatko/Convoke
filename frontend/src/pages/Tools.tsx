@@ -4,6 +4,7 @@ import { McpServer } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
+import { Select } from '../components/Select'
 import {
   Card,
   EmptyState,
@@ -203,10 +204,15 @@ export default function Tools() {
                     : 'The command must exist inside the backend container.'
                 }
               >
-                <select value={transport} onChange={(e) => edit(setTransport)(e.target.value as 'http' | 'stdio')}>
-                  <option value="http">Streamable HTTP</option>
-                  <option value="stdio">stdio (local command)</option>
-                </select>
+                <Select
+                  value={transport}
+                  ariaLabel="Transport"
+                  onChange={(v) => edit(setTransport)(v as 'http' | 'stdio')}
+                  options={[
+                    { value: 'http', label: 'Streamable HTTP' },
+                    { value: 'stdio', label: 'stdio (local command)' },
+                  ]}
+                />
               </Field>
             </div>
             {transport === 'http' ? (
@@ -230,11 +236,16 @@ export default function Tools() {
                           : 'For open servers that need no credentials.'
                     }
                   >
-                    <select value={auth} onChange={(e) => edit(setAuth)(e.target.value as typeof auth)}>
-                      <option value="none">None</option>
-                      <option value="bearer">Bearer token</option>
-                      <option value="oauth">OAuth sign-in</option>
-                    </select>
+                    <Select
+                      value={auth}
+                      ariaLabel="Authentication"
+                      onChange={(v) => edit(setAuth)(v as typeof auth)}
+                      options={[
+                        { value: 'none', label: 'None' },
+                        { value: 'bearer', label: 'Bearer token' },
+                        { value: 'oauth', label: 'OAuth sign-in' },
+                      ]}
+                    />
                   </Field>
                 </div>
                 {auth === 'bearer' && (

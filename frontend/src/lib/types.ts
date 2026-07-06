@@ -282,6 +282,7 @@ export interface AppSetting {
   value: number
   default: number
   overridden: boolean
+  group: string
   // When present, one label per integer minimum..maximum: render a named
   // N-stop control instead of a numeric input (the value stays hidden).
   step_labels?: string[] | null

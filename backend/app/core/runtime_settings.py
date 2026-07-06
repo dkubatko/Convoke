@@ -25,6 +25,7 @@ class Tunable:
     maximum: int
     scope: str  # "global" | "chat"
     page: str  # where it's edited: "models" | "workflows" | "chat"
+    group: str = ""  # topic header the UI lists this setting under
     # When set, the UI renders a labelled N-stop control (one label per integer
     # from minimum..maximum) instead of a numeric slider — the operator picks a
     # named position and never sees the underlying value.
@@ -35,125 +36,116 @@ TUNABLES: list[Tunable] = [
     # --- per-chat: how a chat's conversation is windowed ---
     Tunable(
         "intent_lull_seconds", "Quiet gap before a check",
-        "How long this chat must be silent before the detector evaluates the latest burst. "
-        "Lower reacts sooner after someone stops typing; higher waits for a more settled "
-        "conversation.",
-        "seconds", 1, 3600, "chat", "chat",
+        "How long the chat must be quiet before the detector evaluates the latest burst. "
+        "Lower reacts sooner; higher waits for the conversation to settle.",
+        "seconds", 1, 3600, "chat", "chat", group="Windowing",
     ),
     Tunable(
         "intent_window_max_messages", "Messages that force a check",
-        "The detector also evaluates once this many new messages pile up in this chat, "
-        "without waiting for a quiet gap.",
-        "messages", 2, 500, "chat", "chat",
+        "The detector also evaluates once this many new messages pile up, without waiting "
+        "for a quiet gap.",
+        "messages", 2, 500, "chat", "chat", group="Windowing",
     ),
     # --- global, edited on Models: how the classifier model is called ---
     Tunable(
         "intent_min_llm_interval_seconds", "Minimum time between checks",
-        "A circuit breaker: the classifier model runs at most once per workflow per thread "
-        "per this interval. The quiet-gap window is the real pacing — this only stops a "
-        "pathological loop from hammering the model. (A failed call doesn't count — it "
-        "retries right away.)",
-        "seconds", 0, 3600, "global", "models",
+        "Circuit breaker: the classifier runs at most once per workflow per thread per this "
+        "interval. The quiet gap is the real pacing — this just stops a runaway loop. Failed "
+        "calls don't count; they retry at once.",
+        "seconds", 0, 3600, "global", "models", group="Classifier",
     ),
     Tunable(
         "intent_classifier_concurrency", "Parallel classifier calls",
-        "How many classifier calls may run at the same time across all chats and workflows. "
-        "Higher clears busy sweeps faster; keep modest for local models.",
-        "calls", 1, 16, "global", "models",
+        "Classifier calls allowed to run at once across all chats. Higher clears busy sweeps "
+        "faster; keep modest for local models.",
+        "calls", 1, 16, "global", "models", group="Classifier",
     ),
     Tunable(
         "intent_context_messages", "Lead-up messages for the classifier",
-        "How many earlier messages are shown to the classifier model as context.",
-        "messages", 0, 50, "global", "models",
+        "Earlier messages shown to the classifier as context.",
+        "messages", 0, 50, "global", "models", group="Classifier",
     ),
     # --- global, edited on Workflows: detector + firing behaviour ---
     Tunable(
         "intent_sweep_interval_seconds", "Detector loop interval",
-        "How often the detector wakes to look for chats ready to evaluate. One global loop "
-        "handles every chat, so this is system-wide — the floor on how quickly anything can "
-        "happen (per-chat responsiveness is the quiet gap in each chat's Settings).",
-        "seconds", 1, 300, "global", "workflows",
+        "How often the detector wakes to find chats ready to evaluate. One global loop serves "
+        "every chat — the floor on how fast anything happens. Per-chat pacing is the quiet gap.",
+        "seconds", 1, 300, "global", "workflows", group="Pacing & calibration",
     ),
     Tunable(
         "intent_example_count", "Example phrases per workflow",
-        "How many sample messages the model generates from each workflow's trigger to calibrate "
-        "the prefilter (more = a steadier threshold, slower to generate). Applies on the next "
-        "save/edit of a workflow.",
-        "phrases", 6, 60, "global", "workflows",
+        "Sample messages generated from each workflow's trigger to calibrate the prefilter. "
+        "More = a steadier threshold, slower to generate. Applies on the next save.",
+        "phrases", 6, 60, "global", "workflows", group="Pacing & calibration",
     ),
     Tunable(
         "intent_prefilter_permissiveness", "Prefilter permissiveness",
-        "How readily the embedding prefilter lets a conversation reach the classifier. "
-        "Stricter filters more aggressively (less classifier noise, but a genuinely on-topic "
-        "message is more likely to be missed); more permissive lets borderline messages "
-        "through (nothing on-topic is lost, at the cost of more classifier calls on chatter). "
-        "Changing it instantly re-tunes every workflow — no re-analysis needed.",
-        "", 1, 5, "global", "workflows",
+        "How readily the prefilter lets a conversation reach the classifier. Stricter filters "
+        "harder (less noise, but on-topic messages are likelier missed); permissive lets "
+        "borderline through (nothing lost, more classifier calls on chatter). Re-tunes every "
+        "workflow instantly.",
+        "", 1, 5, "global", "workflows", group="Pacing & calibration",
         step_labels=("Strictest", "Strict", "Balanced", "Permissive", "Most permissive"),
     ),
     Tunable(
         "intent_candidate_ttl_minutes", "Vague-topic lifetime",
-        "A followed topic with no concrete details gathered yet is dropped after this much "
-        "time without on-topic activity. Once a detail lands, the topic switches to the "
-        "longer idle limit below.",
-        "minutes", 1, 720, "global", "workflows",
+        "A followed topic with no details yet is dropped after this long without on-topic "
+        "activity. Once a detail lands, the longer idle limit below takes over.",
+        "minutes", 1, 720, "global", "workflows", group="Topic tracking",
     ),
     Tunable(
         "intent_candidate_unrelated_k", "Off-topic checks to drop a vague topic",
-        "A topic with no details gathered is also dropped after this many consecutive "
-        "evaluations judged unrelated — cheaper than waiting out its lifetime.",
-        "checks", 1, 10, "global", "workflows",
+        "A detail-less topic is also dropped after this many evaluations in a row judged "
+        "unrelated — cheaper than waiting out its lifetime.",
+        "checks", 1, 10, "global", "workflows", group="Topic tracking",
     ),
     Tunable(
         "intent_tracking_idle_hours", "Detailed-topic idle limit",
-        "A topic that has gathered concrete details is closed after this much time with no "
-        "on-topic activity (off-topic chatter doesn't keep it alive).",
-        "hours", 1, 168, "global", "workflows",
+        "A topic with concrete details is closed after this long with no on-topic activity "
+        "(off-topic chatter doesn't keep it alive).",
+        "hours", 1, 168, "global", "workflows", group="Topic tracking",
     ),
     Tunable(
         "intent_decay_grace_hours", "Detail-decay grace period",
-        "Each gathered detail (date, place, …) keeps full confidence for this long after it "
-        "was last stated in the chat; only then does it start to fade.",
-        "hours", 0, 48, "global", "workflows",
+        "Each gathered detail (date, place, …) holds full confidence for this long after it "
+        "was last stated, then begins to fade.",
+        "hours", 0, 48, "global", "workflows", group="Topic tracking",
     ),
     Tunable(
         "intent_decay_per_hour_pct", "Detail decay per hour",
-        "After the grace period, each gathered detail keeps this percentage of its confidence "
-        "per hour (85 = fades to ~44% in 5 hours). Details too faded no longer count toward "
-        "firing; a re-mention restores full strength.",
-        "%", 50, 99, "global", "workflows",
+        "After the grace period, each detail keeps this % of its confidence per hour "
+        "(85 → ~44% in 5h). Too-faded details stop counting toward firing; a re-mention "
+        "restores them.",
+        "percent", 50, 99, "global", "workflows", group="Topic tracking",
     ),
     Tunable(
         "intent_episode_max_age_days", "Topic hard age cap",
-        "No topic is followed longer than this, regardless of activity — a backstop against "
-        "a negotiation that never concludes.",
-        "days", 1, 30, "global", "workflows",
+        "No topic is followed longer than this, whatever the activity — a backstop against a "
+        "negotiation that never ends.",
+        "days", 1, 30, "global", "workflows", group="Topic tracking",
     ),
     Tunable(
         "intent_max_open_episodes", "Topics followed at once",
-        "How many separate in-progress topics one workflow tracks per thread. Keep at 1 until "
-        "the classifier's topic-attribution quality is validated; raising it lets interleaved "
-        "conversations be tracked in parallel.",
-        "topics", 1, 5, "global", "workflows",
+        "In-progress topics one workflow tracks per thread. Keep at 1 until topic-attribution "
+        "is proven; higher tracks interleaved conversations in parallel.",
+        "topics", 1, 5, "global", "workflows", group="Topic tracking",
     ),
     Tunable(
         "confirm_timeout_minutes", "Confirmation timeout",
-        "How long an in-chat confirmation prompt waits for an answer before it's cancelled.",
-        "minutes", 1, 1440, "global", "workflows",
+        "How long a confirmation prompt waits for an answer before it's cancelled.",
+        "minutes", 1, 1440, "global", "workflows", group="Firing",
     ),
     Tunable(
         "media_describe_concurrency", "Parallel media descriptions",
-        "How many photos/voice notes/videos are described or transcribed at the same time. "
-        "Higher drains a backlog (e.g. after a media-heavy import) faster; keep modest for "
-        "local vision/whisper models.",
-        "workers", 1, 16, "global", "models",
+        "Photos/voice notes/videos described at once. Higher drains a backlog faster; keep "
+        "modest for local vision/whisper models.",
+        "workers", 1, 16, "global", "models", group="Media",
     ),
     Tunable(
         "intent_media_grace_seconds", "Media description grace",
-        "When a conversation window contains a photo/voice/video still being described, the "
-        "detector waits up to this long for the description before evaluating — so intent is "
-        "judged on what the media shows, not a placeholder.",
-        "seconds", 0, 900, "global", "workflows",
+        "If a window holds media still being described, the detector waits up to this long for "
+        "it — so intent is judged on the media, not a placeholder.",
+        "seconds", 0, 900, "global", "workflows", group="Firing",
     ),
 ]
 

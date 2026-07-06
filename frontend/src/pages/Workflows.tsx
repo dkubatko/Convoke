@@ -5,6 +5,7 @@ import { shortDateTime } from '../lib/format'
 import { Chat, Workflow } from '../lib/types'
 import { dedupLabel } from '../lib/intent'
 import SettingsEditor from '../components/SettingsEditor'
+import { Select } from '../components/Select'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
@@ -92,11 +93,7 @@ export default function Workflows() {
       />
       <TabBar tabs={SUBTABS} active={subtab} onSelect={setSubtab} />
       {subtab === 'Settings' && (
-        <SettingsEditor
-          endpoint="/api/settings?page=workflows"
-          title="Detection & firing"
-          intro="How the detector paces itself, how workflows re-fire, and how their detectors are calibrated — applies to every chat."
-        />
+        <SettingsEditor endpoint="/api/settings?page=workflows" />
       )}
       {subtab === 'Workflows' && (
       <div className="stack">
@@ -331,14 +328,16 @@ export function WorkflowForm({ chats, initial, onDone, onCancel }: {
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Event scheduler" />
           </Field>
           <Field label="Kind" hint={editing ? 'The kind of a workflow can’t be changed after creation.' : undefined}>
-            <select
+            <Select
               value={type}
               disabled={editing}
-              onChange={(e) => setType(e.target.value as 'intent' | 'scheduled')}
-            >
-              <option value="intent">Intent — fires when the chat converges on something</option>
-              <option value="scheduled">Scheduled — fires on a cron schedule</option>
-            </select>
+              ariaLabel="Workflow kind"
+              onChange={(v) => setType(v as 'intent' | 'scheduled')}
+              options={[
+                { value: 'intent', label: 'Intent — fires when the chat converges on something' },
+                { value: 'scheduled', label: 'Scheduled — fires on a cron schedule' },
+              ]}
+            />
           </Field>
         </div>
 

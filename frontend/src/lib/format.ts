@@ -22,3 +22,16 @@ export function shortDateTime(iso: string): string {
 export function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max - 1) + '…' : text
 }
+
+/** Agent replies are formatted for Telegram (HTML) — strip the markup so
+    dashboard previews read as plain text instead of "<b>Trolls</b> …". */
+export function stripTags(text: string): string {
+  return text
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .trim()
+}

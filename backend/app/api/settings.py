@@ -28,6 +28,7 @@ class SettingOut(BaseModel):
     value: int  # effective (override or default)
     default: int
     overridden: bool
+    group: str  # topic header the setting is listed under
     # Present for step-labelled knobs: one label per integer minimum..maximum,
     # rendered as a named N-stop control instead of a numeric slider.
     step_labels: list[str] | None = None
@@ -55,7 +56,7 @@ async def list_settings(
                 key=t.key, label=t.label, description=t.description, unit=t.unit,
                 minimum=t.minimum, maximum=t.maximum,
                 value=overrides.get(t.key, default), default=default,
-                overridden=t.key in overrides,
+                overridden=t.key in overrides, group=t.group,
                 step_labels=list(t.step_labels) if t.step_labels else None,
             )
         )
@@ -98,7 +99,7 @@ async def list_chat_settings(
             key=t.key, label=t.label, description=t.description, unit=t.unit,
             minimum=t.minimum, maximum=t.maximum,
             value=overrides.get(t.key, default_for(t.key)), default=default_for(t.key),
-            overridden=t.key in overrides,
+            overridden=t.key in overrides, group=t.group,
         )
         for t in TUNABLES
         if t.scope == "chat"

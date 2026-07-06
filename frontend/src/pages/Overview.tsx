@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
-import { timeAgo, truncate } from '../lib/format'
+import { stripTags, timeAgo, truncate } from '../lib/format'
 import { Bot, Chat, GlobalRun, RoleAssignment, Workflow } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { Card, CardSkeleton, EmptyState, ErrorNote, PageHead, StatusPill, TableSkeleton } from '../components/ui'
@@ -125,7 +125,7 @@ export default function Overview() {
                       <td>
                         <StatusPill status={r.status} />
                       </td>
-                      <td className="muted">{truncate(r.error ?? r.response_text ?? r.request_text, 90)}</td>
+                      <td className="muted">{truncate(stripTags(r.error ?? r.response_text ?? r.request_text), 90)}</td>
                     </tr>
                   ))}
                 </tbody>
