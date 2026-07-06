@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from 'react'
+import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api, ApiError } from '../lib/api'
 import { shortDateTime, timeAgo, truncate } from '../lib/format'
@@ -382,79 +382,126 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
     )
   }
 
+  const active = workflows.data!.filter((wf) => assignedIds.includes(wf.id))
+  const available = workflows.data!.filter((wf) => !assignedIds.includes(wf.id))
+
+  const renderCard = (wf: ChatWorkflow) => {
+    const assigned = assignedIds.includes(wf.id)
+    const expanded = expandedIds.includes(wf.id)
+    const toggleExpand = () =>
+      setExpandedIds((ids) =>
+        ids.includes(wf.id) ? ids.filter((i) => i !== wf.id) : [...ids, wf.id],
+      )
+    return (
+      <Card key={wf.id}>
+        {/* The Details button is the expand affordance — the card surface
+            itself is inert, so no misleading pointer cursor. */}
+        <div className="page-head-row">
+          {/* Checkbox standalone — never wrapped in a <label> with other
+              content, or a click bubbles to the label and re-fires on the
+              input, toggling twice (spurious PUT, box won't stay checked). */}
+          <div className="row" style={{ gap: 10 }}>
+            <input
+              type="checkbox"
+              aria-label={`Enable ${wf.name} for this chat`}
+              style={{ width: 'auto', cursor: 'pointer' }}
+              checked={assigned}
+              onChange={(e) => void toggle(wf, e.target.checked)}
+            />
+            <h3 style={{ fontSize: 15, margin: 0 }}>
+              <HoverCard content={<WorkflowPreview wf={wf} />}>
+                <Link to={`/workflows/${wf.id}`} style={{ color: 'inherit' }}>
+                  {wf.name}
+                </Link>
+              </HoverCard>
+            </h3>
+            <span className="pill pill--accent">
+              <span className="lamp" aria-hidden />
+              {wf.type}
+            </span>
+            {!wf.enabled && <StatusPill status="disabled" />}
+          </div>
+          <span className="row" style={{ gap: 8 }}>
+            {assigned && wf.type === 'intent' && <IntentStatus wf={wf} />}
+            {assigned && wf.type === 'intent' && wf.pending_messages > 0 && (
+              <Chip label={`${wf.pending_messages} new`} tone="idle" />
+            )}
+            {assigned && (
+              <button
+                className="btn btn--quiet btn--sm"
+                aria-expanded={expanded}
+                onClick={toggleExpand}
+              >
+                {expanded ? 'Hide details \u25be' : 'Details \u25b8'}
+              </button>
+            )}
+          </span>
+        </div>
+        {assigned && !expanded && (
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+            {wf.type === 'scheduled'
+              ? `${wf.cron ?? ''} \u00b7 next ${wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '\u2014'}`
+              : stageStory(wf.cursors[0], wf.episodes, wf.threshold, wf.examples_status)}
+            {wf.type === 'intent' && wf.pending_messages > 0 && (
+              <span className="muted">
+                {' \u00b7 '}
+                {wf.pending_messages} new message{wf.pending_messages === 1 ? '' : 's'} waiting for
+                the next check
+              </span>
+            )}
+          </p>
+        )}
+        {assigned && expanded && <ExpandedWorkflow wf={wf} chatId={chatId} />}
+      </Card>
+    )
+  }
+
   return (
     <div className="stack">
-      {workflows.data!.map((wf) => {
-        const assigned = assignedIds.includes(wf.id)
-        const expanded = expandedIds.includes(wf.id)
-        const toggleExpand = () =>
-          setExpandedIds((ids) =>
-            ids.includes(wf.id) ? ids.filter((i) => i !== wf.id) : [...ids, wf.id],
-          )
-        return (
-          <Card key={wf.id}>
-            {/* The Details button is the expand affordance — the card surface
-                itself is inert, so no misleading pointer cursor. */}
-            <div className="page-head-row">
-              {/* Checkbox standalone — never wrapped in a <label> with other
-                  content, or a click bubbles to the label and re-fires on the
-                  input, toggling twice (spurious PUT, box won't stay checked). */}
-              <div className="row" style={{ gap: 10 }}>
-                <input
-                  type="checkbox"
-                  aria-label={`Enable ${wf.name} for this chat`}
-                  style={{ width: 'auto', cursor: 'pointer' }}
-                  checked={assigned}
-                  onChange={(e) => void toggle(wf, e.target.checked)}
-                />
-                <h3 style={{ fontSize: 15, margin: 0 }}>
-                  <HoverCard content={<WorkflowPreview wf={wf} />}>
-                    <Link to={`/workflows/${wf.id}`} style={{ color: 'inherit' }}>
-                      {wf.name}
-                    </Link>
-                  </HoverCard>
-                </h3>
-                <span className="pill pill--accent">
-                  <span className="lamp" aria-hidden />
-                  {wf.type}
-                </span>
-                {!wf.enabled && <StatusPill status="disabled" />}
-              </div>
-              <span className="row" style={{ gap: 8 }}>
-                {assigned && wf.type === 'intent' && <IntentStatus wf={wf} />}
-                {assigned && wf.type === 'intent' && wf.pending_messages > 0 && (
-                  <Chip label={`${wf.pending_messages} new`} tone="idle" />
-                )}
-                {assigned && (
-                  <button
-                    className="btn btn--quiet btn--sm"
-                    aria-expanded={expanded}
-                    onClick={toggleExpand}
-                  >
-                    {expanded ? 'Hide details \u25be' : 'Details \u25b8'}
-                  </button>
-                )}
-              </span>
-            </div>
-            {assigned && !expanded && (
-              <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
-                {wf.type === 'scheduled'
-                  ? `${wf.cron ?? ''} \u00b7 next ${wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '\u2014'}`
-                  : stageStory(wf.cursors[0], wf.episodes, wf.threshold, wf.examples_status)}
-                {wf.type === 'intent' && wf.pending_messages > 0 && (
-                  <span className="muted">
-                    {' \u00b7 '}
-                    {wf.pending_messages} new message{wf.pending_messages === 1 ? '' : 's'} waiting for
-                    the next check
-                  </span>
-                )}
-              </p>
-            )}
-            {assigned && expanded && <ExpandedWorkflow wf={wf} chatId={chatId} />}
-          </Card>
-        )
-      })}
+      <Blind title="Active" count={active.length} defaultOpen>
+        {active.length === 0 ? (
+          <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+            No workflows watch this chat yet. Expand “Available” below and tick one to activate it.
+          </p>
+        ) : (
+          active.map(renderCard)
+        )}
+      </Blind>
+      {available.length > 0 && (
+        <Blind title="Available" count={available.length}>
+          {available.map(renderCard)}
+        </Blind>
+      )}
     </div>
+  )
+}
+
+/** Collapsible section; open state is local so toggling one blind never
+    re-mounts the other's cards (their Details expansion must survive). */
+function Blind({ title, count, defaultOpen = false, children }: {
+  title: string
+  count: number
+  defaultOpen?: boolean
+  children: ReactNode
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        style={{
+          background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+          font: 'inherit', color: 'inherit', display: 'flex', alignItems: 'center', gap: 8,
+        }}
+      >
+        <span className="card-title" style={{ margin: 0 }}>{title}</span>
+        <span className="muted" style={{ fontSize: 12 }}>{count}</span>
+        <span className="muted">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && <div className="stack" style={{ marginTop: 10 }}>{children}</div>}
+    </section>
   )
 }
 
