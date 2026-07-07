@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api, ApiError } from '../lib/api'
-import { shortDateTime, stripTags, timeAgo, truncate } from '../lib/format'
+import { shortDateTime, stripTags, timeAgo } from '../lib/format'
 import {
   Chat,
   ChatThread,
@@ -14,6 +14,7 @@ import {
   MessageAttachment,
   Run,
   SearchHit,
+  ToolCall,
 } from '../lib/types'
 import { dedupLabel, funnel, stageStory, statusChip } from '../lib/intent'
 import { EpisodeList } from '../components/Episodes'
@@ -30,10 +31,12 @@ import {
   ErrorNote,
   Funnel,
   HoverCard,
+  HoverText,
   PageHead,
   StatusPill,
   TabBar,
   TableSkeleton,
+  ToolCalls,
 } from '../components/ui'
 import { useUrlTab } from '../hooks/useUrlTab'
 
@@ -254,11 +257,12 @@ function MemoryTab({ chatId }: { chatId: number }) {
                           marginBottom: 4,
                         }}
                       >
-                        ↪ <b>{m.reply_to.sender_name}</b>: {m.reply_to.text}
+                        ↪ <b>{m.reply_to.sender_name}</b>:{' '}
+                        <HoverText text={m.reply_to.text} max={90} />
                       </div>
                     )}
                     {m.attachment && <AttachmentLine att={m.attachment} />}
-                    {m.text}
+                    {m.text && <HoverText text={m.text} max={180} />}
                   </td>
                 </tr>
               ))}
@@ -541,7 +545,10 @@ interface ActivityEntry {
   when: string
   status: string
   error: boolean
-  detail: string[]
+  // Full slots + outcome, one string; HoverText truncates it and reveals the
+  // rest on hover.
+  detail: string
+  tools: ToolCall[] | null
 }
 
 /** A fire and the agent run it queued are ONE event — merge them. */
@@ -551,22 +558,23 @@ function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
   const entries: ActivityEntry[] = wf.recent_fires.map((f) => {
     const run = f.agent_run_id != null ? runsById.get(f.agent_run_id) : undefined
     if (run) used.add(run.id)
-    const detail: string[] = []
+    const parts: string[] = []
     const slots = Object.entries(f.slots)
       .map(([k, v]) => `${k}: ${v.value}`)
       .join(' \u00b7 ')
-    if (slots) detail.push(slots)
+    if (slots) parts.push(slots)
     // Strip the Telegram HTML markup the agent's reply carries (<b>, <pre>, …)
     // so the activity preview reads as plain text — same as the Runs tab and the
     // run-only branch below.
     const outcome = run ? (run.error ?? run.response_text) : f.error
-    if (outcome) detail.push(truncate(stripTags(outcome), 120))
+    if (outcome) parts.push(stripTags(outcome))
     return {
       key: `f${f.id}`,
       when: f.created_at,
       status: run && f.status === 'done' ? run.status : f.status,
       error: !!(run?.error ?? f.error),
-      detail,
+      detail: parts.join(' · '),
+      tools: run?.tool_calls ?? null,
     }
   })
   for (const r of wf.recent_runs) {
@@ -576,7 +584,8 @@ function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
       when: r.created_at,
       status: r.status,
       error: !!r.error,
-      detail: [truncate(stripTags(r.error ?? r.response_text ?? ''), 120)].filter(Boolean),
+      detail: stripTags(r.error ?? r.response_text ?? ''),
+      tools: r.tool_calls ?? null,
     })
   }
   return entries.sort((a, b) => b.when.localeCompare(a.when))
@@ -647,7 +656,10 @@ function ExpandedWorkflow({ wf, chatId }: { wf: ChatWorkflow; chatId: number }) 
                     <StatusPill status={a.status} />
                   </td>
                   <td className={a.error ? 'field-error' : 'muted'} style={{ fontSize: 12.5 }}>
-                    {a.detail.join(' · ') || '—'}
+                    <HoverText text={a.detail} max={110} />
+                  </td>
+                  <td className="toolcall-cell" style={{ width: 160 }}>
+                    <ToolCalls calls={a.tools} />
                   </td>
                 </tr>
               ))}
@@ -785,7 +797,9 @@ function ThreadsTab({ chatId }: { chatId: number }) {
                     t.preview.map((m, i) => (
                       <div className="thread-preview-line" key={i}>
                         <b>{m.sender_name || 'unknown'}</b>{' '}
-                        <span className="muted">{m.text || '—'}</span>
+                        <span className="muted">
+                          <HoverText text={m.text || '—'} max={110} />
+                        </span>
                       </div>
                     ))
                   )}
@@ -1005,6 +1019,7 @@ function RunsTab({ chatId }: { chatId: number }) {
               <th>Status</th>
               <th>Request</th>
               <th>Outcome</th>
+              <th>Tool calls</th>
             </tr>
           </thead>
           <tbody>
@@ -1015,9 +1030,14 @@ function RunsTab({ chatId }: { chatId: number }) {
                 <td>
                   <StatusPill status={r.status} />
                 </td>
-                <td className="muted">{truncate(stripTags(r.request_text), 70)}</td>
+                <td className="muted">
+                  <HoverText text={stripTags(r.request_text)} max={70} />
+                </td>
                 <td className={r.error ? 'field-error' : 'muted'}>
-                  {truncate(stripTags(r.error ?? r.response_text ?? ''), 90)}
+                  <HoverText text={stripTags(r.error ?? r.response_text ?? '')} max={90} />
+                </td>
+                <td className="toolcall-cell">
+                  <ToolCalls calls={r.tool_calls} />
                 </td>
               </tr>
             ))}

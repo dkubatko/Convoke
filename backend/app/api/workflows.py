@@ -370,6 +370,7 @@ class ChatRunOut(BaseModel):
     status: str
     error: str | None
     response_text: str | None
+    tool_calls: list[dict] | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

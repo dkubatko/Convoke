@@ -355,3 +355,46 @@ async def test_get_messages_tool_fetches_by_id(db_sessionmaker, bot_row):
     assert "#10: the original plan" in out
     assert "(replying to #10)" in out
     assert "#999: not in Convoke's stored history" in out
+
+
+def test_extract_tool_calls_resolves_provider_and_flags_retries():
+    """Tool calls are captured in order, split into provider + bare tool (MCP
+    prefix stripped, our own tools → "built-in"); a call the model had to retry
+    (a RetryPromptPart carrying its id) is flagged ok=False."""
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        RetryPromptPart,
+        ToolCallPart,
+        ToolReturnPart,
+    )
+
+    from app.agents.runtime import extract_tool_calls
+
+    class FakeResult:
+        def __init__(self, messages):
+            self._messages = messages
+
+        def all_messages(self):
+            return self._messages
+
+    messages = [
+        ModelResponse(parts=[ToolCallPart(tool_name="movie_ratings_search", args={"title": "Ivan"}, tool_call_id="c1")]),
+        ModelRequest(parts=[ToolReturnPart(tool_name="movie_ratings_search", content="{}", tool_call_id="c1")]),
+        ModelResponse(parts=[ToolCallPart(tool_name="search_chat_history", args={"q": "x"}, tool_call_id="c2")]),
+        ModelRequest(parts=[RetryPromptPart(content="bad args", tool_name="search_chat_history", tool_call_id="c2")]),
+    ]
+    prefixes = {"movie_ratings": "Movie ratings"}
+    builtins = {"search_chat_history"}
+    calls = extract_tool_calls(FakeResult(messages), prefixes, builtins)
+    assert calls == [
+        {"tool": "search", "provider": "Movie ratings", "args": '{"title":"Ivan"}', "ok": True},
+        {"tool": "search_chat_history", "provider": "built-in", "args": '{"q":"x"}', "ok": False},
+    ]
+    # No tools called → empty list (distinct from null "unknown/pre-capture").
+    assert extract_tool_calls(FakeResult([]), prefixes, builtins) == []
+    # Unknown prefix falls back to a generic provider rather than crashing.
+    unknown = [ModelResponse(parts=[ToolCallPart(tool_name="mystery_do", args={}, tool_call_id="c3")])]
+    assert extract_tool_calls(FakeResult(unknown), {}, set()) == [
+        {"tool": "mystery_do", "provider": "tool", "args": "{}", "ok": True}
+    ]

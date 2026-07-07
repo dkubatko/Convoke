@@ -2,6 +2,7 @@
 
 import asyncio
 import html
+import json
 import logging
 from contextlib import AsyncExitStack
 from datetime import datetime, timezone
@@ -9,11 +10,12 @@ from datetime import datetime, timezone
 from aiogram import Bot as AiogramBot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from pydantic_ai import Agent
+from pydantic_ai.messages import RetryPromptPart, ToolCallPart
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.context import assemble_context
 from app.agents.deps import AgentDeps
-from app.agents.mcp import toolsets_for_chat
+from app.agents.mcp import chat_server_prefixes, toolsets_for_chat
 from app.agents.models import ProviderNotConfigured, build_model, evict_model, get_provider
 from app.agents.tools import AGENT_TOOLS
 from app.intent.episodes import finish_run_episode
@@ -27,6 +29,10 @@ log = logging.getLogger("convoke.agent")
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 MAX_REPLY_PARTS = 3
+
+# Names the model sees for our own (non-MCP) tools; used to label their captured
+# calls with the "built-in" provider rather than an MCP server.
+BUILTIN_TOOL_NAMES = {getattr(t, "__name__", getattr(t, "name", "")) for t in AGENT_TOOLS}
 
 INSTRUCTIONS_TEMPLATE = """\
 You are {bot_name} (@{bot_username}), an assistant participating in the Telegram \
@@ -132,6 +138,9 @@ async def execute_run(
                 session, embedder, chat, request_text, thread_id=thread_id
             )
             mcp_toolsets = await toolsets_for_chat(session, chat.id)
+            # Captured tool names are prefixed; keep the prefix→server map so
+            # they can be grouped by provider after the run.
+            server_prefixes = await chat_server_prefixes(session, chat.id)
 
         instructions = INSTRUCTIONS_TEMPLATE.format(
             bot_name=bot_row.name,
@@ -184,10 +193,13 @@ async def execute_run(
         # immediately re-fire (and the classifier sees WHY nothing happened).
         declined = is_workflow and reply_text.upper().startswith("NO_ACTION")
 
+        tool_calls = extract_tool_calls(result, server_prefixes, BUILTIN_TOOL_NAMES)
+
         async with sessionmaker() as session:
             run = await session.get(AgentRun, run_id)
             chat = await session.get(Chat, run.chat_id)
             run.response_text = reply_text
+            run.tool_calls = tool_calls
             run.finished_at = datetime.now(timezone.utc)
             if declined:
                 reason = reply_text[len("NO_ACTION"):].lstrip(" :—-").strip() or "no reason given"
@@ -221,6 +233,74 @@ async def execute_run(
                     notify="Something went wrong and I couldn't finish that. "
                     "The details are in Convoke's run log.",
                 )
+
+
+def _resolve_provider(
+    name: str, prefixes: dict[str, str], builtins: set[str]
+) -> tuple[str, str]:
+    """Split a model-facing tool name into (provider, bare tool). MCP tools carry
+    a `<server-prefix>_` prefix stamped by build_toolset; our own tools don't.
+    Returns the server's display name (or "built-in") and the un-prefixed tool."""
+    if name in builtins:
+        return "built-in", name
+    best = ""
+    for prefix in prefixes:
+        if name.startswith(prefix + "_") and len(prefix) > len(best):
+            best = prefix
+    if best:
+        return prefixes[best], name[len(best) + 1 :]
+    return "tool", name
+
+
+def extract_tool_calls(
+    result, prefixes: dict[str, str] | None = None, builtins: set[str] | None = None
+) -> list[dict]:
+    """The tools the agent called this run, in order, each
+    {"tool", "provider", "args" (truncated json), "ok"}. `provider` is the MCP
+    server's display name (or "built-in" for our own tools); `tool` is the
+    un-prefixed name. A call is `ok` unless the model had to retry it (a
+    RetryPromptPart carrying its id — a tool error or bad args). Best-effort and
+    defensive: observability must never break a run. Note: provider-executed
+    tools (a model's built-in web search) never appear here."""
+    prefixes = prefixes or {}
+    builtins = builtins or set()
+    try:
+        retried: set[str] = set()
+        calls: list[dict] = []
+        for msg in result.all_messages():
+            for part in getattr(msg, "parts", []):
+                if isinstance(part, ToolCallPart):
+                    try:
+                        args = part.args_as_json_str()
+                    except Exception:  # noqa: BLE001
+                        args = json.dumps(part.args, ensure_ascii=False, default=str)
+                    provider, tool = _resolve_provider(part.tool_name, prefixes, builtins)
+                    calls.append(
+                        # Cap args so a tool called with a large payload can't
+                        # bloat the run row; still enough for the hover detail.
+                        {
+                            "tool": tool,
+                            "provider": provider,
+                            "args": args[:600],
+                            "_id": part.tool_call_id,
+                        }
+                    )
+                elif isinstance(part, RetryPromptPart):
+                    tcid = getattr(part, "tool_call_id", None)
+                    if tcid:
+                        retried.add(tcid)
+        return [
+            {
+                "tool": c["tool"],
+                "provider": c["provider"],
+                "args": c["args"],
+                "ok": c["_id"] not in retried,
+            }
+            for c in calls
+        ]
+    except Exception:  # noqa: BLE001
+        log.warning("tool-call extraction failed", exc_info=True)
+        return []
 
 
 async def _send(session, bot, chat, text: str, reply_to: int | None = None, thread_id: int | None = None):

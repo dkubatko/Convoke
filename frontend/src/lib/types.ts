@@ -66,12 +66,22 @@ export interface ImportJob {
   finished_at: string | null
 }
 
+export interface ToolCall {
+  tool: string
+  // Display name of the tool's provider: an MCP server's name, or "built-in"
+  // for Convoke's own tools. May be absent on runs captured before grouping.
+  provider?: string
+  args: string
+  ok: boolean
+}
+
 export interface Run {
   id: number
   trigger: string
   status: string
   request_text: string
   response_text: string | null
+  tool_calls: ToolCall[] | null
   error: string | null
   created_at: string
   finished_at: string | null
@@ -214,6 +224,7 @@ export interface ChatWorkflowRun {
   status: string
   error: string | null
   response_text: string | null
+  tool_calls: ToolCall[] | null
   created_at: string
 }
 

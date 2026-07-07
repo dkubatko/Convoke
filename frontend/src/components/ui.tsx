@@ -1,6 +1,84 @@
-import { CSSProperties, ReactNode } from 'react'
+import { CSSProperties, ReactNode, useEffect, useRef, useState } from 'react'
+import { ToolCall } from '../lib/types'
+import { truncate } from '../lib/format'
 
 /* Small shared primitives. Anything used on two or more pages lives here. */
+
+/** The tools an agent called during a run, grouped by provider. Null = run
+    predates capture (render nothing); [] = called no tools (render nothing).
+    One chip per provider (MCP server name, or "built-in"); the chip is red if
+    any of that provider's calls was retried. Hover a chip to see exactly which
+    tools were called under it, with their arguments. */
+export function ToolCalls({ calls }: { calls: ToolCall[] | null | undefined }) {
+  if (!calls || calls.length === 0) return null
+  // Group by provider, preserving first-seen order. Calls captured before
+  // grouping have no provider — fall back to the (prefixed) tool name so they
+  // still render as their own chip.
+  const groups: { provider: string; calls: ToolCall[] }[] = []
+  for (const c of calls) {
+    const provider = c.provider ?? c.tool
+    let g = groups.find((x) => x.provider === provider)
+    if (!g) {
+      g = { provider, calls: [] }
+      groups.push(g)
+    }
+    g.calls.push(c)
+  }
+  return (
+    <span className="toolcalls">
+      {groups.map((g, i) => {
+        const retried = g.calls.some((c) => !c.ok)
+        return (
+          <HoverCard
+            key={i}
+            align="right"
+            content={
+              <div className="hover-detail hover-detail--mono">
+                <span className="hover-detail-label">{g.provider}</span>
+                {g.calls.map((c, j) => (
+                  <div key={j} className="toolcall-line">
+                    <span className={c.ok ? '' : 'toolcall-line--err'}>
+                      {c.tool}
+                      {c.ok ? '' : ' · retried'}
+                    </span>
+                    {c.args ? <div className="toolcall-args">{c.args}</div> : null}
+                  </div>
+                ))}
+              </div>
+            }
+          >
+            <span className={`toolcall${retried ? ' toolcall--err' : ''}`}>
+              {g.provider}
+              {g.calls.length > 1 ? ` ·${g.calls.length}` : ''}
+            </span>
+          </HoverCard>
+        )
+      })}
+    </span>
+  )
+}
+
+/** Truncated text that reveals its full contents in a hover popover when it
+    doesn't fit. Renders an em-dash for empty text and plain (un-hoverable) text
+    when nothing is cut. */
+export function HoverText({ text, max = 90, mono = false }: {
+  text: string | null | undefined
+  max?: number
+  mono?: boolean
+}) {
+  const full = (text ?? '').trim()
+  if (!full) return <>—</>
+  if (full.length <= max) return <>{full}</>
+  return (
+    <HoverCard
+      wide
+      align="right"
+      content={<div className={`hover-detail${mono ? ' hover-detail--mono' : ''}`}>{full}</div>}
+    >
+      <span className="hover-underline">{truncate(full, max)}</span>
+    </HoverCard>
+  )
+}
 
 export function PageHead({ title, lede, actions }: {
   title: string
@@ -246,12 +324,74 @@ export function StatusPill({ status, live = false }: { status: string; live?: bo
   )
 }
 
-/** Shows a styled popover card when the trigger is hovered/focused. */
-export function HoverCard({ children, content }: { children: ReactNode; content: ReactNode }) {
+/** Shows a styled popover card on hover/focus. Clicking the trigger PINS it open
+    (so its text can be selected and copied) until you click outside or
+    hover/click another hovercard. `wide` widens it for paragraphs; `align="right"`
+    anchors it to the trigger's right edge so it can't overflow a right-hand
+    table column. */
+export function HoverCard({ children, content, wide = false, align = 'left' }: {
+  children: ReactNode
+  content: ReactNode
+  wide?: boolean
+  align?: 'left' | 'right'
+}) {
+  const [pinned, setPinned] = useState(false)
+  const ref = useRef<HTMLSpanElement>(null)
+  // Stable per-instance identity, so the "another card became active" broadcast
+  // can tell self from others.
+  const id = useRef<object>({})
+
+  // Opening/entering any OTHER hovercard closes this pinned one.
+  useEffect(() => {
+    const onActive = (e: Event) => {
+      if ((e as CustomEvent).detail !== id.current) setPinned(false)
+    }
+    document.addEventListener('hovercard-active', onActive)
+    return () => document.removeEventListener('hovercard-active', onActive)
+  }, [])
+
+  // While pinned, a click anywhere outside closes it.
+  useEffect(() => {
+    if (!pinned) return
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setPinned(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [pinned])
+
+  const announce = () =>
+    document.dispatchEvent(new CustomEvent('hovercard-active', { detail: id.current }))
+
   return (
-    <span className="hovercard" tabIndex={0}>
+    <span
+      ref={ref}
+      className={`hovercard${pinned ? ' hovercard--pinned' : ''}`}
+      tabIndex={0}
+      onMouseEnter={announce}
+      onClick={() => {
+        announce()
+        setPinned((p) => !p)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          announce()
+          setPinned((p) => !p)
+        } else if (e.key === 'Escape') {
+          setPinned(false)
+        }
+      }}
+    >
       {children}
-      <span className="hovercard-pop" role="tooltip">
+      <span
+        className={`hovercard-pop${wide ? ' hovercard-pop--wide' : ''}${align === 'right' ? ' hovercard-pop--right' : ''}`}
+        role="tooltip"
+        // Clicks inside the pinned popover (selecting text) must not bubble to
+        // the trigger's toggle or count as an outside click.
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         {content}
       </span>
     </span>

@@ -224,3 +224,22 @@ async def toolsets_for_chat(session: AsyncSession, chat_id: int) -> list[MCPTool
         except Exception:  # noqa: BLE001 — one bad server must not kill the run
             log.exception("could not build toolset for MCP server %s", s.name)
     return toolsets
+
+
+async def chat_server_prefixes(session: AsyncSession, chat_id: int) -> dict[str, str]:
+    """Map each enabled+assigned server's tool-name prefix (`_safe_prefix`, the
+    same prefix `build_toolset` stamps onto every tool) to the server's display
+    name. Lets captured tool calls be grouped back to their provider — the model
+    only ever sees the prefixed name (e.g. `movieratings_search`)."""
+    names = (
+        (
+            await session.execute(
+                select(McpServer.name)
+                .join(ChatMcpServer, ChatMcpServer.mcp_server_id == McpServer.id)
+                .where(ChatMcpServer.chat_id == chat_id, McpServer.enabled.is_(True))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {_safe_prefix(name): name for name in names}

@@ -310,6 +310,65 @@ input[type='checkbox']:disabled {
   border-top: 1px solid var(--line);
 }
 
+/* ---------- tool-call chips ---------- */
+
+/* The tools an agent invoked during a run, shown in its own run/activity-table
+   column. A mono code-chip per call; red when the model had to retry it. */
+.toolcalls {
+  display: flex;
+  flex-wrap: wrap;
+  /* Tighter vertical gap between wrapped chips; chips flow left-to-right and
+     only wrap once a row is full (flex-wrap). */
+  gap: 3px 5px;
+}
+/* Center each chip within its hovercard wrapper (removes the inline-block
+   descender gap so the pill sits vertically centered). */
+.toolcalls .hovercard {
+  display: inline-flex;
+  align-items: center;
+}
+/* The Tool calls column: kept narrow so chips wrap rather than crowd the
+   outcome; an empty cell (no tools / pre-capture) just reads blank. */
+.toolcall-cell {
+  max-width: 200px;
+}
+/* inline-block (not inline-flex) so text-overflow:ellipsis actually applies —
+   a too-long name is truncated with … rather than overflowing the column. */
+.toolcall {
+  display: inline-block;
+  max-width: 160px;
+  padding: 1.5px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  font: 500 11px var(--font-mono);
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.toolcall--err {
+  border-color: color-mix(in srgb, var(--err) 45%, transparent);
+  background: var(--err-soft);
+  color: var(--err);
+}
+/* One called tool inside a provider chip's hover popover: its name, then its
+   arguments indented beneath. */
+.toolcall-line + .toolcall-line {
+  margin-top: 7px;
+}
+.toolcall-line--err {
+  color: var(--err);
+}
+.toolcall-args {
+  margin-top: 2px;
+  padding-left: 10px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
 /* ---------- choice chips (selectable pills) ---------- */
 
 /* A wrap of toggle chips — used where a handful of items are picked (e.g. which
@@ -1220,12 +1279,11 @@ td.mono {
   flex-direction: column;
   gap: 4px;
 }
+/* HoverText handles truncation now (char-based, with a hover popover for the
+   full line), so no CSS width-clip here. */
 .thread-preview-line {
   font-size: 12.5px;
   line-height: 1.5;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .setting-desc {
   grid-column: 1 / -1;
@@ -1273,6 +1331,58 @@ td.mono {
 .hovercard:focus-visible .hovercard-pop {
   opacity: 1;
   transform: translateY(0);
+}
+/* Pinned (clicked open): stays visible and becomes interactive so its text can
+   be selected and copied. An accent border signals the pinned state. */
+.hovercard--pinned .hovercard-pop {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+  user-select: text;
+  border-color: var(--accent);
+}
+.hovercard { cursor: pointer; }
+/* Wider popover for reading a paragraph of run output. */
+.hovercard-pop--wide {
+  max-width: 460px;
+}
+/* Right-anchored: for triggers in a right-hand table column, so the popover
+   grows leftward and never pushes past the viewport edge. */
+.hovercard-pop--right {
+  left: auto;
+  right: 0;
+}
+
+/* Full-text / detail body shown inside a hovercard. Wraps, scrolls if very
+   long, preserves the source line breaks. */
+.hover-detail {
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow-y: auto;
+  color: var(--ink);
+}
+.hover-detail--mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.hover-detail-label {
+  display: block;
+  font: 600 10.5px var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-2);
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+/* Signals "hover for the full text" without shouting. */
+.hover-underline {
+  text-decoration: underline dotted;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 2px;
+  cursor: pointer;
 }
 
 .kv dt {
