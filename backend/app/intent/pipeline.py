@@ -65,6 +65,7 @@ from app.memory.chunker import resolve_reply_targets
 from app.memory.embeddings import Embedder
 from app.threads import unmonitored_threads
 from app.models import (
+    AgentRun,
     Chat,
     ChatThread,
     IntentCursor,
@@ -271,6 +272,24 @@ class IntentSweeper:
             )
             messages = list(reversed(rows))
 
+            # Messages that directly invoked the bot (@mention or reply-to-bot)
+            # already got their own immediate agent run at ingest. The workflow
+            # sweeper must not ALSO fire on them: like the bot's own sends, they
+            # stay visible as context but never count as unevaluated work.
+            # (trigger_tg_message_id is NULL for workflow-triggered runs, and
+            # `> min_cursor` excludes NULLs, so only direct invocations match.)
+            direct_invocations = set(
+                (
+                    await session.execute(
+                        select(AgentRun.trigger_tg_message_id).where(
+                            AgentRun.chat_id == chat_id,
+                            AgentRun.trigger.in_(("mention", "reply")),
+                            AgentRun.trigger_tg_message_id > min_cursor,
+                        )
+                    )
+                ).scalars()
+            )
+
             by_thread: dict[int, list[Message]] = {}
             for m in messages:
                 by_thread.setdefault(m.thread_id or 0, []).append(m)
@@ -303,6 +322,7 @@ class IntentSweeper:
                         by_thread.get(thread_key, []),
                         cursor_by_key,
                         episodes_by_key.get((wf.id, chat_id, thread_key), []),
+                        direct_invocations,
                         max_win,
                         lull,
                         now,
@@ -366,6 +386,7 @@ class IntentSweeper:
         thread_msgs: list[Message],
         cursor_by_key: dict[Key, IntentCursor],
         episodes: list[IntentEpisode],
+        direct_invocations: set[int],
         max_win: int,
         lull: int,
         now: datetime,
@@ -402,7 +423,9 @@ class IntentSweeper:
         unevaluated = [
             m
             for m in thread_msgs
-            if m.source != "self" and m.tg_message_id > cursor.last_tg_message_id
+            if m.source != "self"
+            and m.tg_message_id not in direct_invocations
+            and m.tg_message_id > cursor.last_tg_message_id
         ]
         if not unevaluated:
             return None

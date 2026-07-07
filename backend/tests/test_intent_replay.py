@@ -789,3 +789,38 @@ async def test_media_caption_component_survives_description_dilution(db_sessionm
     script.push(detect(summary="movie night"))
     assert await sweeper.sweep(now=NOW) == 1  # component-max let the caption through
     assert len(await _fires(db_sessionmaker)) == 1
+
+
+# ---------- direct bot invocations: context-only, never a trigger ----------
+
+async def test_direct_invocation_is_context_only_never_fires(db_sessionmaker):
+    """An @mention / reply-to-bot message already got its own immediate agent
+    run at ingest. The workflow sweeper must not ALSO fire on it: like the
+    bot's own sends, it stays visible as context but never opens or advances a
+    firing window itself."""
+    script = ScriptedModel()
+    _, chat, _ = await _setup(db_sessionmaker)  # no-slot: fires on any confident match
+    sweeper = _sweeper(db_sessionmaker, script)
+
+    # A direct invocation whose text WOULD fire if evaluated as work.
+    async with db_sessionmaker() as s:
+        s.add(_msg(chat.id, 1, ON_TOPIC + " DIRECTMARK", at=NOW - timedelta(minutes=2)))
+        s.add(AgentRun(chat_id=chat.id, trigger="mention", trigger_tg_message_id=1,
+                       request_text="x"))
+        await s.commit()
+
+    # No verdicts scripted: if the sweeper classified the direct message, the
+    # ScriptedModel would raise "unexpected classifier call".
+    assert await sweeper.sweep(now=NOW) == 0
+    assert not await _fires(db_sessionmaker)
+    assert not await _episodes(db_sessionmaker)
+
+    # A normal (non-direct) on-topic message DOES open a window — and the
+    # earlier direct-invocation line is present in its classifier context.
+    await _add(db_sessionmaker, _msg(chat.id, 2, ON_TOPIC + " at 7",
+                                     at=NOW + timedelta(minutes=3)))
+    script.push(detect(summary="dinner at 7"))
+    assert await sweeper.sweep(now=NOW + timedelta(minutes=4)) == 1
+
+    assert len(await _fires(db_sessionmaker)) == 1
+    assert "DIRECTMARK" in script.prompts[0]  # the direct line rendered as context
