@@ -96,8 +96,10 @@ export interface FunnelStep {
 }
 
 /** The live pipeline graph: Waiting (if messages are queued) → Prefilter →
-    Classifier → Fire. With an open episode the prefilter shows as bypassed —
-    the topic is sticky and every settled burst goes to the classifier. */
+    Classifier → Fire. Once a topic is open the prefilter is bypassed for later
+    bursts (sticky → straight to the classifier); but the window that first
+    scored and opened the topic still shows its real prefilter score, not
+    "bypassed". */
 export function funnel(
   cursor: CursorInfo | undefined,
   episodes: EpisodeInfo[],
@@ -128,18 +130,23 @@ export function funnel(
     ]
   }
 
+  // A non-null score means the prefilter actually scored THIS window, so show
+  // it even when an episode is open — the window that OPENS a topic ran the gate
+  // and then created the episode, and would otherwise be mislabelled "bypassed".
+  // The backend clears last_score to null whenever the gate is truly skipped
+  // (sticky bypass, or no positive vectors), so a non-null score is unambiguous.
   const prefilter: FunnelStep =
     stage === 'evaluating_prefilter'
       ? { name: 'Prefilter', status: 'wait', detail: 'running…' }
-      : sticky
-        ? { name: 'Prefilter', status: 'pass', detail: 'topic open — bypassed' }
-        : score == null
-          ? { name: 'Prefilter', status: 'skip' }
-          : {
-              name: 'Prefilter',
-              status: score >= th ? 'pass' : 'fail',
-              detail: `${score.toFixed(2)} / ${th.toFixed(2)}`,
-            }
+      : score != null
+        ? {
+            name: 'Prefilter',
+            status: score >= th ? 'pass' : 'fail',
+            detail: `${score.toFixed(2)} / ${th.toFixed(2)}`,
+          }
+        : sticky
+          ? { name: 'Prefilter', status: 'pass', detail: 'topic open — bypassed' }
+          : { name: 'Prefilter', status: 'skip' }
 
   // Suppression happens AT the classifier — color it there (amber), so a
   // blocked run reads "the model held this", not "the fire step failed".
