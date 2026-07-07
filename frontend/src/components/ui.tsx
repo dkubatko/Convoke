@@ -59,6 +59,54 @@ export function Field({ label, hint, error, children }: {
   )
 }
 
+/** A labelled checkbox row. Only for a plain box + text — never wrap other
+    interactive elements (a nested link would double-fire the toggle). */
+export function Check({ checked, onChange, disabled, children }: {
+  checked: boolean
+  onChange: (checked: boolean) => void
+  disabled?: boolean
+  children: ReactNode
+}) {
+  return (
+    <label className="check">
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span>{children}</span>
+    </label>
+  )
+}
+
+/** A wrap of toggle chips for picking a handful of items (multi-select). */
+export function ChoiceChips<T extends string | number>({ options, selected, onToggle }: {
+  options: { value: T; label: string }[]
+  selected: T[]
+  onToggle: (value: T, on: boolean) => void
+}) {
+  return (
+    <div className="choice-group">
+      {options.map((o) => {
+        const on = selected.includes(o.value)
+        return (
+          <button
+            type="button"
+            key={o.value}
+            className={`choice${on ? ' choice--on' : ''}`}
+            aria-pressed={on}
+            onClick={() => onToggle(o.value, !on)}
+          >
+            <span className="choice-tick" aria-hidden>✓</span>
+            {o.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 export function EmptyState({ title, hint, action }: {
   title: string
   hint: string

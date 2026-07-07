@@ -11,6 +11,7 @@ from app.core.security import require_operator
 from app.core.tasks import spawn
 from app.intent.examples import generate_examples
 from app.memory.runtime import ensure_embedder
+from app.threads import unmonitored_threads
 from sqlalchemy import func
 
 from app.models import (
@@ -281,14 +282,21 @@ class EpisodeOut(BaseModel):
 async def _episodes_for(
     session: AsyncSession, workflow_id: int, chat_id: int, limit: int = 10
 ) -> list[EpisodeOut]:
+    # Disabled threads are fully ignored — their stale episodes/cursors must not
+    # surface in workflow displays. Re-enabling the thread brings them back
+    # (nothing is deleted, only filtered).
+    off = await unmonitored_threads(session, chat_id)
+    conds = [
+        IntentEpisode.workflow_id == workflow_id,
+        IntentEpisode.chat_id == chat_id,
+    ]
+    if off:
+        conds.append(IntentEpisode.thread_key.notin_(off))
     rows = (
         (
             await session.execute(
                 select(IntentEpisode)
-                .where(
-                    IntentEpisode.workflow_id == workflow_id,
-                    IntentEpisode.chat_id == chat_id,
-                )
+                .where(*conds)
                 .order_by(
                     # open episodes first, then most recent activity
                     (IntentEpisode.status == "closed").asc(),
@@ -307,14 +315,18 @@ async def _episodes_for(
 async def _cursors_for(
     session: AsyncSession, workflow_id: int, chat_id: int
 ) -> list[CursorOut]:
+    off = await unmonitored_threads(session, chat_id)
+    conds = [
+        IntentCursor.workflow_id == workflow_id,
+        IntentCursor.chat_id == chat_id,
+    ]
+    if off:
+        conds.append(IntentCursor.thread_key.notin_(off))
     rows = (
         (
             await session.execute(
                 select(IntentCursor)
-                .where(
-                    IntentCursor.workflow_id == workflow_id,
-                    IntentCursor.chat_id == chat_id,
-                )
+                .where(*conds)
                 .order_by(IntentCursor.thread_key)
             )
         )

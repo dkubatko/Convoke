@@ -12,6 +12,8 @@ import { useConfirm } from '../components/ConfirmDialog'
 import {
   Card,
   CardSkeleton,
+  Check,
+  ChoiceChips,
   EmptyState,
   ErrorNote,
   Field,
@@ -278,7 +280,6 @@ export function WorkflowForm({ chats, initial, onDone, onCancel }: {
   )
   const [dedupHours, setDedupHours] = useState(initial?.dedup_window_hours ?? 12)
   const [chatIds, setChatIds] = useState<number[]>(initial?.chat_ids ?? [])
-  const hasSlots = parseSlots(slots).length > 0
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -322,148 +323,141 @@ export function WorkflowForm({ chats, initial, onDone, onCancel }: {
 
   return (
     <Card title={editing ? `Edit “${initial!.name}”` : 'New workflow'}>
-      <form className="stack" style={{ gap: 14 }} onSubmit={submit}>
-        <div className="grid-2">
-          <Field label="Name">
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Event scheduler" />
-          </Field>
-          <Field label="Kind" hint={editing ? 'The kind of a workflow can’t be changed after creation.' : undefined}>
-            <Select
-              value={type}
-              disabled={editing}
-              ariaLabel="Workflow kind"
-              onChange={(v) => setType(v as 'intent' | 'scheduled')}
-              options={[
-                { value: 'intent', label: 'Intent — fires when the chat converges on something' },
-                { value: 'scheduled', label: 'Scheduled — fires on a cron schedule' },
-              ]}
+      <form onSubmit={submit}>
+        <div className="form-section">
+          <div className="grid-2">
+            <Field label="Name">
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Event scheduler" />
+            </Field>
+            <Field label="Kind" hint={editing ? 'Can’t change after creation.' : undefined}>
+              <Select
+                value={type}
+                disabled={editing}
+                ariaLabel="Workflow kind"
+                onChange={(v) => setType(v as 'intent' | 'scheduled')}
+                options={[
+                  { value: 'intent', label: 'Intent — when the chat converges' },
+                  { value: 'scheduled', label: 'Scheduled — on a cron clock' },
+                ]}
+              />
+            </Field>
+          </div>
+        </div>
+
+        {type === 'scheduled' ? (
+          <div className="form-section">
+            <div className="form-section-head">
+              <h4>Schedule</h4>
+            </div>
+            <Field label="Cron expression (UTC)" error={error?.includes('cron') ? error : null}>
+              <input className="mono" value={cron} onChange={(e) => setCron(e.target.value)} />
+            </Field>
+          </div>
+        ) : (
+          <>
+            <div className="form-section">
+              <div className="form-section-head">
+                <h4>Trigger</h4>
+                <span className="note">Convoke watches the chat cheaply until it matches.</span>
+              </div>
+              <Field label="The moment to watch for, in plain words">
+                <textarea
+                  rows={2}
+                  value={trigger}
+                  onChange={(e) => setTrigger(e.target.value)}
+                  placeholder="The group agrees to schedule an event, with a specific date and time settled"
+                />
+              </Field>
+              <Field
+                label="Information to wait for"
+                hint="One per line as name: description. Values are gathered across messages; it fires once each has a confident value."
+              >
+                <textarea
+                  rows={3}
+                  className="mono"
+                  value={slots}
+                  onChange={(e) => setSlots(e.target.value)}
+                  placeholder={'date: the agreed date and time\ntitle: what the event is'}
+                />
+              </Field>
+            </div>
+
+            <div className="form-section">
+              <div className="form-section-head">
+                <h4>When it fires</h4>
+                <span className="note">
+                  Each occurrence is one topic; follow-ups on a handled topic don’t re-fire.
+                </span>
+              </div>
+              <div className="grid-2">
+                <Field
+                  label="Follow-up window (hours)"
+                  hint="How long a handled topic is remembered. After this, the same subject counts as new."
+                >
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    className="mono"
+                    value={dedupHours}
+                    onChange={(e) => setDedupHours(Number(e.target.value))}
+                  />
+                </Field>
+                <Field
+                  label="Rate limit (minutes)"
+                  hint="Minimum minutes between actions. A ready topic parks and re-checks when the limit lifts. 0 = off."
+                >
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    className="mono"
+                    value={cooldownMin}
+                    onChange={(e) => setCooldownMin(Number(e.target.value))}
+                  />
+                </Field>
+              </div>
+              <Check checked={confirmFirst} onChange={setConfirmFirst}>
+                Ask in the chat before acting
+              </Check>
+            </div>
+          </>
+        )}
+
+        <div className="form-section">
+          <div className="form-section-head">
+            <h4>Action</h4>
+          </div>
+          <Field label="What the agent should do when this fires">
+            <textarea
+              rows={2}
+              value={action}
+              onChange={(e) => setAction(e.target.value)}
+              placeholder="Create the event via the calendar tools, then post a one-line confirmation"
             />
           </Field>
         </div>
 
-        {type === 'scheduled' ? (
-          <Field label="Schedule (cron, UTC)" error={error?.includes('cron') ? error : null}>
-            <input className="mono" value={cron} onChange={(e) => setCron(e.target.value)} />
-          </Field>
-        ) : (
-          <>
-            <Field
-              label="Trigger — describe the moment to watch for, in plain words"
-              hint="Convoke generates example phrases from this and watches the chat cheaply until they appear."
-            >
-              <textarea
-                rows={2}
-                value={trigger}
-                onChange={(e) => setTrigger(e.target.value)}
-                placeholder="The group agrees to schedule an event, with a specific date and time settled"
-              />
-            </Field>
-            <Field
-              label="Information to wait for (one per line: name: description)"
-              hint={
-                <>
-                  Values are collected across messages as the conversation unfolds — they never
-                  need to appear in a single message.
-                  <br />
-                  The workflow fires once every line has a confident value.
-                </>
-              }
-            >
-              <textarea
-                rows={3}
-                className="mono"
-                value={slots}
-                onChange={(e) => setSlots(e.target.value)}
-                placeholder={'date: the agreed date and time\ntitle: what the event is'}
-              />
-            </Field>
-            <div
-              style={{
-                fontSize: 12.5,
-                color: 'var(--ink-2)',
-                background: 'var(--surface-2)',
-                border: '1px solid var(--line)',
-                borderRadius: 'var(--radius-s)',
-                padding: '9px 12px',
-              }}
-            >
-              <b style={{ color: 'var(--ink)' }}>Acts once per occurrence.</b>{' '}
-              Each occurrence of the trigger is tracked as its own topic
-              {hasSlots ? ', gathering its information as the conversation unfolds' : ''}. After
-              acting, the workflow remembers what it did — follow-ups, thanks, and refinements of
-              a handled topic don&rsquo;t make it act twice. A genuinely new occurrence does.
-            </div>
-            <div className="grid-2">
-              <Field
-                label="Follow-up window (hours)"
-                hint="How long a handled topic is remembered so its follow-ups are recognized. After this, the same subject counts as new."
-              >
-                <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  className="mono"
-                  style={{ maxWidth: 120 }}
-                  value={dedupHours}
-                  onChange={(e) => setDedupHours(Number(e.target.value))}
-                />
-              </Field>
-              <Field
-                label="Rate limit — minimum minutes between actions"
-                hint="Optional. A topic that's ready during the wait parks; when the limit lifts it double-checks it's still wanted, then acts. Nothing is dropped. 0 = no limit."
-              >
-                <input
-                  type="number"
-                  min={0}
-                  step={1}
-                  className="mono"
-                  style={{ maxWidth: 120 }}
-                  value={cooldownMin}
-                  onChange={(e) => setCooldownMin(Number(e.target.value))}
-                />
-              </Field>
-            </div>
-            <label className="row" style={{ gap: 8 }}>
-              <input
-                type="checkbox"
-                style={{ width: 'auto' }}
-                checked={confirmFirst}
-                onChange={(e) => setConfirmFirst(e.target.checked)}
-              />
-              Ask in the chat before acting
-            </label>
-          </>
-        )}
-
-        <Field label="Action — what the agent should do when this fires">
-          <textarea
-            rows={2}
-            value={action}
-            onChange={(e) => setAction(e.target.value)}
-            placeholder="Create the event via the calendar tools, then post a one-line confirmation"
-          />
-        </Field>
-
-        <Field label="Chats this applies to" error={chats.length === 0 ? 'No chats yet — add a bot to a group first' : null}>
-          <div className="row" style={{ gap: 14 }}>
-            {chats.map((c) => (
-              <label key={c.id} className="row" style={{ gap: 6 }}>
-                <input
-                  type="checkbox"
-                  style={{ width: 'auto' }}
-                  checked={chatIds.includes(c.id)}
-                  onChange={(e) =>
-                    setChatIds(e.target.checked ? [...chatIds, c.id] : chatIds.filter((i) => i !== c.id))
-                  }
-                />
-                {c.title || c.tg_chat_id}
-              </label>
-            ))}
+        <div className="form-section">
+          <div className="form-section-head">
+            <h4>Chats</h4>
+            {chats.length > 0 && <span className="note">Which chats this workflow watches.</span>}
           </div>
-        </Field>
+          {chats.length === 0 ? (
+            <p className="field-error">No chats yet — add a bot to a group first.</p>
+          ) : (
+            <ChoiceChips
+              options={chats.map((c) => ({ value: c.id, label: c.title || String(c.tg_chat_id) }))}
+              selected={chatIds}
+              onToggle={(id, on) =>
+                setChatIds(on ? [...chatIds, id] : chatIds.filter((i) => i !== id))
+              }
+            />
+          )}
+        </div>
 
-        {error && <p className="field-error">{error}</p>}
-        <div className="row">
+        {error && <p className="field-error" style={{ marginTop: 14 }}>{error}</p>}
+        <div className="form-actions">
           <button
             className="btn btn--primary"
             disabled={busy || !name || !action || (type === 'intent' && !trigger)}

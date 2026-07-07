@@ -24,6 +24,7 @@ import { useConfirm } from '../components/ConfirmDialog'
 import {
   Card,
   CardSkeleton,
+  Check,
   Chip,
   EmptyState,
   ErrorNote,
@@ -402,7 +403,6 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
             <input
               type="checkbox"
               aria-label={`Enable ${wf.name} for this chat`}
-              style={{ width: 'auto', cursor: 'pointer' }}
               checked={assigned}
               onChange={(e) => void toggle(wf, e.target.checked)}
             />
@@ -556,8 +556,11 @@ function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
       .map(([k, v]) => `${k}: ${v.value}`)
       .join(' \u00b7 ')
     if (slots) detail.push(slots)
+    // Strip the Telegram HTML markup the agent's reply carries (<b>, <pre>, …)
+    // so the activity preview reads as plain text — same as the Runs tab and the
+    // run-only branch below.
     const outcome = run ? (run.error ?? run.response_text) : f.error
-    if (outcome) detail.push(truncate(outcome, 120))
+    if (outcome) detail.push(truncate(stripTags(outcome), 120))
     return {
       key: `f${f.id}`,
       when: f.created_at,
@@ -709,7 +712,6 @@ function ThreadsTab({ chatId }: { chatId: number }) {
                   <input
                     type="checkbox"
                     aria-label={`Monitor ${t.name}`}
-                    style={{ width: 'auto', cursor: 'pointer' }}
                     checked={t.monitored}
                     onChange={(e) => void save(t.thread_key, { monitored: e.target.checked })}
                   />
@@ -953,23 +955,18 @@ function ToolsTab({ chatId }: { chatId: number }) {
       ) : (
         <div className="stack" style={{ gap: 10 }}>
           {servers.data!.map((s) => (
-            <div key={s.id} className="row" style={{ gap: 10 }}>
-              <input
-                type="checkbox"
-                aria-label={`Enable ${s.name} for this chat`}
-                style={{ width: 'auto' }}
-                checked={assigned.includes(s.id)}
-                onChange={(e) => void toggle(s.id, e.target.checked)}
-                disabled={!s.enabled}
-              />
-              <span>
-                <b>{s.name}</b>{' '}
-                <span className="muted mono" style={{ fontSize: 12 }}>
-                  {s.url ?? `${s.command} ${s.args.join(' ')}`}
-                </span>
-                {!s.enabled && <span className="muted"> (disabled globally)</span>}
+            <Check
+              key={s.id}
+              checked={assigned.includes(s.id)}
+              disabled={!s.enabled}
+              onChange={(on) => void toggle(s.id, on)}
+            >
+              <b>{s.name}</b>{' '}
+              <span className="muted mono" style={{ fontSize: 12 }}>
+                {s.url ?? `${s.command} ${s.args.join(' ')}`}
               </span>
-            </div>
+              {!s.enabled && <span className="muted"> (disabled globally)</span>}
+            </Check>
           ))}
         </div>
       )}

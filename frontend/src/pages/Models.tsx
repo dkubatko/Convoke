@@ -8,6 +8,7 @@ import { useConfirm } from '../components/ConfirmDialog'
 import {
   Card,
   CardSkeleton,
+  Check,
   EmptyState,
   ErrorNote,
   Field,
@@ -267,15 +268,9 @@ function ModelLibrary({
               />
             </Field>
           </div>
-          <label className="row" style={{ gap: 6, fontSize: 13 }}>
-            <input
-              type="checkbox"
-              style={{ width: 'auto' }}
-              checked={video}
-              onChange={(e) => setVideo(e.target.checked)}
-            />
+          <Check checked={video} onChange={setVideo}>
             Accepts video input (can’t be probed reliably — check only if the endpoint documents it)
-          </label>
+          </Check>
           <div className="row">
             <button
               type="button"

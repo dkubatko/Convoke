@@ -190,6 +190,69 @@ textarea {
   min-height: 60px;
 }
 
+/* Custom checkbox — a squared control that fills with the accent and stamps a
+   checkmark when on. Replaces the native box everywhere; the inline
+   `width:auto` some call sites still set is harmless (this fixes its own size). */
+input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  cursor: pointer;
+  display: inline-grid;
+  place-content: center;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+input[type='checkbox']::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  transform: scale(0);
+  transition: transform 120ms cubic-bezier(0.2, 0.8, 0.3, 1.4);
+  background: var(--accent-ink);
+  /* checkmark glyph */
+  clip-path: polygon(14% 47%, 0 60%, 40% 100%, 100% 26%, 86% 13%, 39% 71%);
+}
+input[type='checkbox']:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+input[type='checkbox']:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+input[type='checkbox']:checked::before {
+  transform: scale(1);
+}
+input[type='checkbox']:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+input[type='checkbox']:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* A labelled checkbox row: box + text, vertically centered, the whole row
+   clickable via the wrapping <label>. */
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+.check input[type='checkbox'] {
+  margin-top: 0;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -205,6 +268,94 @@ textarea {
 .field-hint {
   font-size: 12px;
   color: var(--ink-2);
+}
+
+/* ---------- form sections ---------- */
+
+/* Groups a set of related fields under a small mono header + divider, echoing
+   the settings page's grouped rows. Keeps long forms legible and structured. */
+.form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.form-section + .form-section {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.form-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.form-section-head h4 {
+  font: 600 11.5px var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--ink-2);
+}
+.form-section-head .note {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+/* Footer action row for forms — mirrors the settings editor's footer. */
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+/* ---------- choice chips (selectable pills) ---------- */
+
+/* A wrap of toggle chips — used where a handful of items are picked (e.g. which
+   chats a workflow watches). Reads as a set of switches, not a raw checkbox list. */
+.choice-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 13px 6px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 500 13px var(--font-body);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.choice:hover {
+  border-color: var(--accent);
+}
+.choice-tick {
+  flex: none;
+  display: inline-grid;
+  place-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong);
+  color: transparent;
+  font-size: 9px;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.choice--on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.choice--on .choice-tick {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .field-error {

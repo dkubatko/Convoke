@@ -191,105 +191,111 @@ export default function Tools() {
       />
       <div className="stack">
         <Card title="Register an MCP server">
-          <form className="stack" style={{ gap: 14 }} onSubmit={add}>
-            <div className="grid-2">
-              <Field label="Name">
-                <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Calendar" />
-              </Field>
-              <Field
-                label="Transport"
-                hint={
-                  transport === 'http'
-                    ? 'Preferred — run the server as its own service.'
-                    : 'The command must exist inside the backend container.'
-                }
-              >
-                <Select
-                  value={transport}
-                  ariaLabel="Transport"
-                  onChange={(v) => edit(setTransport)(v as 'http' | 'stdio')}
-                  options={[
-                    { value: 'http', label: 'Streamable HTTP' },
-                    { value: 'stdio', label: 'stdio (local command)' },
-                  ]}
-                />
-              </Field>
-            </div>
-            {transport === 'http' ? (
-              <>
-                <div className="grid-2">
-                  <Field label="URL">
-                    <input
-                      className="mono"
-                      value={url}
-                      onChange={(e) => edit(setUrl)(e.target.value)}
-                      placeholder="http://calendar:8000/mcp"
-                    />
-                  </Field>
-                  <Field
-                    label="Authentication"
-                    hint={
-                      auth === 'oauth'
-                        ? 'You sign in once in the browser; Convoke keeps refreshed tokens (encrypted).'
-                        : auth === 'bearer'
-                          ? 'A static token sent with every request. Stored encrypted.'
-                          : 'For open servers that need no credentials.'
-                    }
-                  >
-                    <Select
-                      value={auth}
-                      ariaLabel="Authentication"
-                      onChange={(v) => edit(setAuth)(v as typeof auth)}
-                      options={[
-                        { value: 'none', label: 'None' },
-                        { value: 'bearer', label: 'Bearer token' },
-                        { value: 'oauth', label: 'OAuth sign-in' },
-                      ]}
-                    />
-                  </Field>
-                </div>
-                {auth === 'bearer' && (
-                  <Field label="Bearer token">
-                    <input type="password" value={bearer} onChange={(e) => edit(setBearer)(e.target.value)} />
-                  </Field>
-                )}
-                {auth === 'oauth' && (
-                  <>
-                    <div className="grid-2">
-                      <Field
-                        label="Client id"
-                        hint={
-                          <>
-                            Leave blank first — most servers register Convoke automatically.
-                            <br />
-                            Only needed for providers like Google.
-                          </>
-                        }
-                      >
-                        <input className="mono" value={oauthClientId} onChange={(e) => setOauthClientId(e.target.value)} />
-                      </Field>
-                      <Field label="Client secret" hint="Paired with the client id, if the provider issued one.">
-                        <input type="password" value={oauthClientSecret} onChange={(e) => setOauthClientSecret(e.target.value)} />
-                      </Field>
-                    </div>
-                    <Field label="Scopes" hint="Optional, space-separated. Defaults to what the provider advertises.">
-                      <input className="mono" value={oauthScopes} onChange={(e) => setOauthScopes(e.target.value)} placeholder="https://www.googleapis.com/auth/calendar.events" />
-                    </Field>
-                  </>
-                )}
-              </>
-            ) : (
+          <form onSubmit={add}>
+            <div className="form-section">
+              <div className="form-section-head">
+                <h4>Server</h4>
+              </div>
               <div className="grid-2">
-                <Field label="Command">
-                  <input className="mono" value={command} onChange={(e) => edit(setCommand)(e.target.value)} placeholder="mcp-filesystem" />
+                <Field label="Name">
+                  <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Calendar" />
                 </Field>
-                <Field label="Arguments">
-                  <input className="mono" value={args} onChange={(e) => edit(setArgs)(e.target.value)} placeholder="--root /data" />
+                <Field
+                  label="Transport"
+                  hint={
+                    transport === 'http'
+                      ? 'Preferred — its own service.'
+                      : 'Must exist in the backend container.'
+                  }
+                >
+                  <Select
+                    value={transport}
+                    ariaLabel="Transport"
+                    onChange={(v) => edit(setTransport)(v as 'http' | 'stdio')}
+                    options={[
+                      { value: 'http', label: 'Streamable HTTP' },
+                      { value: 'stdio', label: 'stdio (local command)' },
+                    ]}
+                  />
                 </Field>
               </div>
-            )}
-            {error && <p className="field-error">{error}</p>}
-            <div className="row">
+            </div>
+
+            <div className="form-section">
+              <div className="form-section-head">
+                <h4>Connection</h4>
+              </div>
+              {transport === 'http' ? (
+                <>
+                  <div className="grid-2">
+                    <Field label="URL">
+                      <input
+                        className="mono"
+                        value={url}
+                        onChange={(e) => edit(setUrl)(e.target.value)}
+                        placeholder="http://calendar:8000/mcp"
+                      />
+                    </Field>
+                    <Field
+                      label="Authentication"
+                      hint={
+                        auth === 'oauth'
+                          ? 'Sign in once; tokens kept encrypted and refreshed.'
+                          : auth === 'bearer'
+                            ? 'A static token sent every request. Stored encrypted.'
+                            : 'For open servers needing no credentials.'
+                      }
+                    >
+                      <Select
+                        value={auth}
+                        ariaLabel="Authentication"
+                        onChange={(v) => edit(setAuth)(v as typeof auth)}
+                        options={[
+                          { value: 'none', label: 'None' },
+                          { value: 'bearer', label: 'Bearer token' },
+                          { value: 'oauth', label: 'OAuth sign-in' },
+                        ]}
+                      />
+                    </Field>
+                  </div>
+                  {auth === 'bearer' && (
+                    <Field label="Bearer token">
+                      <input type="password" value={bearer} onChange={(e) => edit(setBearer)(e.target.value)} />
+                    </Field>
+                  )}
+                  {auth === 'oauth' && (
+                    <>
+                      <div className="grid-2">
+                        <Field
+                          label="Client id"
+                          hint="Leave blank first — most servers auto-register. Needed for providers like Google."
+                        >
+                          <input className="mono" value={oauthClientId} onChange={(e) => setOauthClientId(e.target.value)} />
+                        </Field>
+                        <Field label="Client secret" hint="Paired with the client id, if the provider issued one.">
+                          <input type="password" value={oauthClientSecret} onChange={(e) => setOauthClientSecret(e.target.value)} />
+                        </Field>
+                      </div>
+                      <Field label="Scopes" hint="Optional, space-separated. Defaults to what the provider advertises.">
+                        <input className="mono" value={oauthScopes} onChange={(e) => setOauthScopes(e.target.value)} placeholder="https://www.googleapis.com/auth/calendar.events" />
+                      </Field>
+                    </>
+                  )}
+                </>
+              ) : (
+                <div className="grid-2">
+                  <Field label="Command">
+                    <input className="mono" value={command} onChange={(e) => edit(setCommand)(e.target.value)} placeholder="mcp-filesystem" />
+                  </Field>
+                  <Field label="Arguments">
+                    <input className="mono" value={args} onChange={(e) => edit(setArgs)(e.target.value)} placeholder="--root /data" />
+                  </Field>
+                </div>
+              )}
+            </div>
+
+            {error && <p className="field-error" style={{ marginTop: 14 }}>{error}</p>}
+            <div className="form-actions">
               {auth !== 'oauth' && (
                 <button
                   type="button"
@@ -313,22 +319,24 @@ export default function Tools() {
                 {busy ? 'Registering…' : auth === 'oauth' ? 'Register & sign in' : 'Register server'}
               </button>
             </div>
-            {test.phase === 'ok' && (
-              <p>
-                <span className="pill pill--ok">
-                  <span className="lamp" aria-hidden />
-                  connection ok
-                </span>{' '}
-                <span className="muted">{test.detail}</span>
-              </p>
-            )}
-            {test.phase === 'failed' && <p className="field-error">{test.detail}</p>}
-            {test.phase === 'idle' && auth !== 'oauth' && (
-              <p className="muted" style={{ fontSize: 12.5 }}>
-                Test the connection to enable registering. OAuth servers verify through the
-                sign-in instead.
-              </p>
-            )}
+            <div style={{ marginTop: 12 }}>
+              {test.phase === 'ok' && (
+                <p>
+                  <span className="pill pill--ok">
+                    <span className="lamp" aria-hidden />
+                    connection ok
+                  </span>{' '}
+                  <span className="muted">{test.detail}</span>
+                </p>
+              )}
+              {test.phase === 'failed' && <p className="field-error">{test.detail}</p>}
+              {test.phase === 'idle' && auth !== 'oauth' && (
+                <p className="muted" style={{ fontSize: 12.5 }}>
+                  Test the connection to enable registering. OAuth servers verify through the
+                  sign-in instead.
+                </p>
+              )}
+            </div>
           </form>
         </Card>
 
