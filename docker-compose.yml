@@ -25,6 +25,10 @@ services:
       CONVOKE_PUBLIC_URL: ${CONVOKE_PUBLIC_URL:-http://localhost:${CONVOKE_PORT:-8080}}
       # Optional: unlocks gated Hugging Face models (e.g. EmbeddingGemma)
       HF_TOKEN: ${HF_TOKEN:-}
+      # Multipart uploads (history imports) spool to a temp file before the
+      # endpoint streams them to imports_dir. Point TMPDIR at the imports
+      # volume so a multi-GB export doesn't fill the small docker root fs.
+      TMPDIR: /data/imports
     volumes:
       - imports:/data/imports
       - hf-cache:/root/.cache/huggingface
