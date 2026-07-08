@@ -146,24 +146,37 @@ class FireExecutor:
         markup = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Go ahead", callback_data=f"{CONFIRM_CALLBACK_PREFIX}y:{nonce}"),
-                    InlineKeyboardButton(text="❌ Cancel", callback_data=f"{CONFIRM_CALLBACK_PREFIX}n:{nonce}"),
+                    InlineKeyboardButton(text="Go ahead", callback_data=f"{CONFIRM_CALLBACK_PREFIX}y:{nonce}"),
+                    InlineKeyboardButton(text="Cancel", callback_data=f"{CONFIRM_CALLBACK_PREFIX}n:{nonce}"),
                 ]
             ]
         )
         bot = await self._bot_for(session, chat.bot_id)
         await self.limiter.acquire(chat.bot_id, chat.tg_chat_id)
-        # HTML parse mode + slot values lifted verbatim from members' messages:
-        # escape both or a value like "<cafe>" fails to parse (wedging the
-        # fire) and "<b>…" would spoof formatting in the bot's official prompt.
-        slots_text = html.escape(render_slots(fire.slots or {}))
+        # Spell out what the agent will do so confirmers approve an explicit
+        # action, not just a workflow name: the action_prompt is the very
+        # instruction the AgentRun will follow, and the slots are the data it
+        # will act on. HTML parse mode + text lifted verbatim from the
+        # action_prompt and from members' messages: escape both or a value like
+        # "<cafe>" fails to parse (wedging the fire) and "<b>…" would spoof
+        # formatting in the bot's official prompt.
+        lines = [
+            f"⚙️ <b>{html.escape(wf.name)}</b> is ready to act:",
+            "",
+            f"<i>{html.escape(wf.action_prompt.strip())}</i>",
+        ]
+        if fire.slots:
+            lines += [
+                "",
+                "<b>Gathered from the conversation:</b>",
+                f"<pre>{html.escape(render_slots(fire.slots))}</pre>",
+            ]
+        lines += ["", "Anyone can confirm or cancel."]
         sent = await send_and_persist(
             session,
             bot,
             chat,
-            f"🤖 <b>{html.escape(wf.name)}</b> is ready to act:\n"
-            f"<pre>{slots_text}</pre>\n"
-            "Anyone can confirm or cancel.",
+            "\n".join(lines),
             reply_markup=markup,
             thread_id=fire.thread_key or None,
         )
