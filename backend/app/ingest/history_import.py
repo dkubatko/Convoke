@@ -249,7 +249,10 @@ def validate_export(
     against substantial live history are hard rejects."""
     result = ValidationResult(ok=False)
 
-    if meta.chat_id is not None and chat.tg_chat_id in normalized_id_candidates(meta.chat_id):
+    id_matched = meta.chat_id is not None and chat.tg_chat_id in normalized_id_candidates(
+        meta.chat_id
+    )
+    if id_matched:
         result.score += 2
         result.reasons.append("chat id matches")
     elif meta.chat_id is not None:
@@ -270,10 +273,18 @@ def validate_export(
         result.score += 2
         result.reasons.append(f"{scan.matches} overlapping messages match live history")
     elif live_count >= MIN_LIVE_FOR_OVERLAP_CHECK and scan.matches == 0:
-        result.reasons.append(
-            "no overlap with live history despite substantial live history — rejected"
-        )
-        return result
+        # Zero overlap against substantial live history normally signals a
+        # wrong-chat upload — but a positively matching chat id already rules
+        # that out. Treat it as a legitimate backfill whose date range simply
+        # predates the live-capture window (e.g. history exported up to the day
+        # before the bot joined).
+        if id_matched:
+            result.reasons.append("no live overlap, but chat id matches")
+        else:
+            result.reasons.append(
+                "no overlap with live history despite substantial live history — rejected"
+            )
+            return result
 
     if scan.senders & live_senders:
         result.score += 1

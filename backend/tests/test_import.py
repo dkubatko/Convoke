@@ -113,11 +113,30 @@ async def test_contradicting_overlap_hard_rejects(db_sessionmaker, tmp_path):
     assert any("contradict" in r for r in verdict.reasons)
 
 
-async def test_no_overlap_with_substantial_live_history_rejects(db_sessionmaker, tmp_path):
+async def test_no_overlap_but_id_matches_accepts(db_sessionmaker, tmp_path):
+    """History exported up to just before the bot joined has zero overlap with
+    the live tail — but a matching chat id already rules out a wrong-chat
+    upload, so it's accepted as a legitimate backfill rather than rejected."""
     chat = await make_chat(db_sessionmaker, with_live=30)
-    # id matches but messages are entirely disjoint from live history
+    # id matches (default); messages are entirely disjoint from live history
     messages = [export_msg(i, f"old {i}") for i in range(1, 10)]
     p = write_export(tmp_path, export_payload(messages=messages))
+    meta = read_export_meta(p)
+    async with db_sessionmaker() as s:
+        live_by_id, live_senders = await load_live_index(s, chat.id)
+    scan = scan_export(p, live_by_id)
+    verdict = validate_export(chat, meta, scan, len(live_by_id), live_senders)
+    assert scan.matches == 0
+    assert verdict.ok
+    assert any("no live overlap, but chat id matches" in r for r in verdict.reasons)
+
+
+async def test_no_overlap_and_wrong_id_still_rejects(db_sessionmaker, tmp_path):
+    """Wrong-chat protection stands: zero overlap against substantial live
+    history with a chat id that does NOT match is still a hard reject."""
+    chat = await make_chat(db_sessionmaker, with_live=30)
+    messages = [export_msg(i, f"old {i}") for i in range(1, 10)]
+    p = write_export(tmp_path, export_payload(chat_id=999, messages=messages))
     meta = read_export_meta(p)
     async with db_sessionmaker() as s:
         live_by_id, live_senders = await load_live_index(s, chat.id)
