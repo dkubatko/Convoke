@@ -121,10 +121,51 @@ def sanitize_tool_name(name: str) -> str:
     return safe[:MAX_TOOL_NAME_LEN]
 
 
+# Keywords whose value is INSTANCE data (a literal the tool accepts), not
+# schema: a null here is meaningful ('year: int | None = None' emits
+# `"default": null`), and nulls nested inside must survive verbatim.
+_INSTANCE_KEYWORDS = frozenset({"default", "const"})
+_INSTANCE_LIST_KEYWORDS = frozenset({"enum", "examples"})  # lists of instances
+
+
+def clean_json_schema(node):
+    """Drop null-valued schema keywords from a JSON Schema so OpenAI-compatible
+    function validation accepts it.
+
+    MCP servers sometimes emit non-standard schemas where optional keywords are
+    present but null (e.g. `"pattern": null`, `"minLength": null`). JSON Schema
+    requires those keywords to be a string/int WHEN PRESENT, so a strict
+    validator rejects the whole `tools` array with a 400 ('None is not of type
+    "string"') — poisoning every request that carries the tool. Removing the
+    null-valued keys leaves an equivalent, valid schema.
+
+    Instance-carrying keywords are the exception: `"default": null` /
+    `"const": null` are valid and meaningful, and values under
+    `default`/`const`/`enum`/`examples` are data, not schema — they pass
+    through untouched (no recursion, no null-stripping inside them). A null
+    where a list of instances belongs (`"enum": null`) is still garbage and
+    dropped."""
+    if isinstance(node, dict):
+        out = {}
+        for k, v in node.items():
+            if k in _INSTANCE_KEYWORDS:
+                out[k] = v
+            elif k in _INSTANCE_LIST_KEYWORDS:
+                if v is not None:
+                    out[k] = v
+            elif v is not None:
+                out[k] = clean_json_schema(v)
+        return out
+    if isinstance(node, list):
+        return [clean_json_schema(v) for v in node]
+    return node
+
+
 @dataclass
 class SanitizedToolset(WrapperToolset):
-    """Renames tools to model-safe names and routes calls back to the
-    originals. Mirrors PrefixedToolset's mechanics."""
+    """Makes MCP tools model-safe: renames tools to accepted names (routing
+    calls back to the originals) and strips schema keywords that would 400 an
+    OpenAI-compatible request."""
 
     _to_original: dict[str, str] = field(default_factory=dict)
 
@@ -141,7 +182,14 @@ class SanitizedToolset(WrapperToolset):
                 safe = sanitize_tool_name(name)[: MAX_TOOL_NAME_LEN - len(suffix)] + suffix
                 n += 1
             self._to_original[safe] = name
-            out[safe] = replace(tool, toolset=self, tool_def=replace(tool.tool_def, name=safe))
+            td = tool.tool_def
+            out[safe] = replace(
+                tool,
+                toolset=self,
+                tool_def=replace(
+                    td, name=safe, parameters_json_schema=clean_json_schema(td.parameters_json_schema)
+                ),
+            )
         return out
 
     async def call_tool(self, name, tool_args, ctx, tool):

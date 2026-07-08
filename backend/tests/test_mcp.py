@@ -54,15 +54,16 @@ def test_sanitize_tool_name():
     assert len(sanitize_tool_name("deepwiki_" + "x" * 80)) == 64
 
 
-def test_sanitized_toolset_caps_length_and_decollides():
+def test_sanitized_toolset_caps_length_decollides_and_cleans_schema():
     import asyncio
-    from dataclasses import dataclass
+    from dataclasses import dataclass, field
 
     from app.agents.mcp import MAX_TOOL_NAME_LEN, SanitizedToolset
 
     @dataclass
     class FakeToolDef:
         name: str
+        parameters_json_schema: dict = field(default_factory=dict)
 
     @dataclass
     class FakeTool:
@@ -71,10 +72,15 @@ def test_sanitized_toolset_caps_length_and_decollides():
 
     long_a = "deepwiki_" + "a" * 70 + "_one"
     long_b = "deepwiki_" + "a" * 70 + "_two"  # same first 64 chars after truncation
+    # a null-valued schema keyword that would 400 an OpenAI-compatible request
+    dirty = {"type": "object", "properties": {"q": {"type": "string", "pattern": None}}}
 
     class FakeInner:
         async def get_tools(self, ctx):
-            return {n: FakeTool(toolset=self, tool_def=FakeToolDef(name=n)) for n in (long_a, long_b)}
+            return {
+                n: FakeTool(toolset=self, tool_def=FakeToolDef(name=n, parameters_json_schema=dirty))
+                for n in (long_a, long_b)
+            }
 
     ts = SanitizedToolset(FakeInner())
     tools = asyncio.run(ts.get_tools(None))
@@ -82,6 +88,57 @@ def test_sanitized_toolset_caps_length_and_decollides():
     assert all(len(n) <= MAX_TOOL_NAME_LEN for n in names)
     assert len(set(names)) == 2  # truncation collision resolved
     assert set(ts._to_original.values()) == {long_a, long_b}  # calls route back
+    # the null-valued "pattern" is stripped so the model won't 400
+    assert tools[names[0]].tool_def.parameters_json_schema == {
+        "type": "object",
+        "properties": {"q": {"type": "string"}},
+    }
+
+
+def test_clean_json_schema_strips_null_keys():
+    from app.agents.mcp import clean_json_schema
+
+    dirty = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "pattern": None, "minLength": 1, "maxLength": None},
+            "kind": {"type": "string", "enumValues": ["movie", "series"], "defaultValue": None},
+        },
+        "required": ["title"],
+    }
+    clean = clean_json_schema(dirty)
+    assert clean["properties"]["title"] == {"type": "string", "minLength": 1}
+    assert clean["properties"]["kind"] == {"type": "string", "enumValues": ["movie", "series"]}
+    assert clean["required"] == ["title"]
+    # null LIST elements stay (a null enum value is legitimate)
+    assert clean_json_schema({"enum": [None, "x"]}) == {"enum": [None, "x"]}
+
+
+def test_clean_json_schema_preserves_instance_values():
+    from app.agents.mcp import clean_json_schema
+
+    # `"default": null` is the standard encoding of `arg: int | None = None`
+    # (FastMCP/pydantic servers) — valid, meaningful, must survive.
+    nullable_opt = {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": None}
+    assert clean_json_schema(nullable_opt) == nullable_opt
+    assert clean_json_schema({"const": None}) == {"const": None}
+    # Values under default/const/enum/examples are DATA — nulls nested inside
+    # them are part of the instance, not broken keywords.
+    assert clean_json_schema({"default": {"filters": None, "limit": 10}}) == {
+        "default": {"filters": None, "limit": 10}
+    }
+    assert clean_json_schema({"enum": [{"a": None, "b": 1}, "x"]}) == {
+        "enum": [{"a": None, "b": 1}, "x"]
+    }
+    assert clean_json_schema({"examples": [None, {"q": None}]}) == {
+        "examples": [None, {"q": None}]
+    }
+    # ...but a null where the list itself belongs is still garbage.
+    assert clean_json_schema({"type": "string", "enum": None}) == {"type": "string"}
+    assert clean_json_schema({"examples": None}) == {}
+    # A property NAMED like a keyword is a subschema position, not a keyword.
+    named = {"properties": {"pattern": {"type": "string", "minLength": None}}}
+    assert clean_json_schema(named) == {"properties": {"pattern": {"type": "string"}}}
 
 
 async def test_agent_calls_tool_with_illegal_name(db_sessionmaker, monkeypatch):
