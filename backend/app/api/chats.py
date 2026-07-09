@@ -13,7 +13,7 @@ from app.core.tasks import spawn
 from app.core.security import require_operator
 from app.ingest.history_import import delete_import, run_import
 from app.media.render import message_body
-from app.members import invalidate_chat_memory, load_member_names, set_override_name
+from app.members import load_member_names, refresh_chat_memory_names, set_override_name
 from app.memory.chunker import resolve_reply_targets
 from app.memory.runtime import ensure_embedder
 from app.memory.store import search_chat_history
@@ -302,7 +302,7 @@ async def update_chat_members(
     session: AsyncSession = Depends(get_session),
 ) -> list[MemberOut]:
     """Batch-apply display-name overrides (the Members form saves all edits at
-    once). Memory is invalidated once, only if something actually changed."""
+    once). Memory is refreshed once, only if something actually changed."""
     await _chat_or_404(session, chat_id)
     changed_any = False
     for o in body:
@@ -313,7 +313,8 @@ async def update_chat_members(
             )
         changed_any = changed_any or changed
     if changed_any:
-        await invalidate_chat_memory(session, chat_id)  # history embeds the old names
+        # History embeds the old names — refresh in place, no memory outage.
+        await refresh_chat_memory_names(session, chat_id)
     await session.commit()
     return await _members_out(session, chat_id)
 
@@ -331,9 +332,9 @@ async def update_chat_member(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such member in this chat")
     out = _member_out(member)
     if changed:
-        # History is rendered/embedded under the old name — rebuild it. Skip
-        # for a no-op save.
-        await invalidate_chat_memory(session, chat_id)
+        # History is rendered/embedded under the old name — refresh it in
+        # place (stale-mark; no memory outage). Skip for a no-op save.
+        await refresh_chat_memory_names(session, chat_id)
     await session.commit()
     return out
 

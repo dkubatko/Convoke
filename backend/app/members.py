@@ -10,7 +10,7 @@ raw input this table derives from, and the fallback when a sender has no row.
 
 from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -154,8 +154,23 @@ async def set_override_name(
 
 
 async def invalidate_chat_memory(session: AsyncSession, chat_id: int) -> None:
-    """Drop the chat's chunks + cursor so the memory loop re-embeds it under the
-    current render — used after a display-name change so history becomes
-    searchable/rendered under the new name. Same mechanism the importer uses."""
+    """Drop the chat's chunks + cursor so the memory loop re-chunks from
+    scratch — for imports, where the MESSAGE SET itself changed. For a rename
+    use refresh_chat_memory_names instead: segmentation doesn't depend on
+    names, so a full rebuild would only leave the chat memoryless for the
+    duration."""
     await session.execute(delete(Chunk).where(Chunk.chat_id == chat_id))
     await session.execute(delete(ChunkState).where(ChunkState.chat_id == chat_id))
+
+
+async def refresh_chat_memory_names(session: AsyncSession, chat_id: int) -> None:
+    """After a display-name change: mark every chunk stale so the memory loop
+    re-renders it from raw rows (which resolves the new name) and re-embeds in
+    place. Old text/vectors stay searchable until each chunk is refreshed — no
+    memory outage, no cursor reset. The content_version bump guards against a
+    rename racing an in-flight embed (same contract as message edits)."""
+    await session.execute(
+        update(Chunk)
+        .where(Chunk.chat_id == chat_id)
+        .values(stale=True, content_version=Chunk.content_version + 1)
+    )

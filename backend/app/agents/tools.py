@@ -6,7 +6,7 @@ from pydantic_ai import RunContext
 from sqlalchemy import select
 
 from app.agents.deps import AgentDeps
-from app.members import invalidate_chat_memory, set_override_name
+from app.members import refresh_chat_memory_names, set_override_name
 from app.memory.chunker import render_for_chat
 from app.memory.store import search_chat_history as store_search
 from app.models import ChatMember, IntentEpisode, Message, Note
@@ -213,8 +213,9 @@ async def set_member_name(ctx: RunContext[AgentDeps], user_id: int, name: str) -
             )
         display = member.display_name
         if changed:
-            # History is rendered under the old name; rebuild it under the new.
-            await invalidate_chat_memory(session, ctx.deps.chat_id)
+            # History is rendered under the old name; refresh it in place (the
+            # memory loop re-renders stale chunks — no memory outage).
+            await refresh_chat_memory_names(session, ctx.deps.chat_id)
         await session.commit()
     return f"Done — I'll refer to user_id {user_id} as {display!r} from now on."
 

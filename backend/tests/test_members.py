@@ -178,12 +178,14 @@ async def test_override_wins_and_clears(db_sessionmaker):
         assert await load_member_names(s, cid) == {555: "Daniel"}
 
 
-async def test_members_api_list_and_rename_invalidates_memory(db_sessionmaker, client):
+async def test_members_api_list_and_rename_stales_memory(db_sessionmaker, client):
     cid = await _seed_chat(db_sessionmaker)
     async with db_sessionmaker() as s:
         await upsert_member(s, cid, 555, "Daniel", T0)
         await upsert_member(s, cid, 777, "Sonya Kim", T0)
-        # a chunk + cursor exist; a rename must invalidate them for the re-chunk
+        # a chunk + cursor exist; a rename must stale-mark the chunk (in-place
+        # refresh under the new name) WITHOUT dropping it or the cursor — the
+        # old text stays searchable until the memory loop re-renders it.
         s.add(Chunk(chat_id=cid, thread_id=None, msg_tg_id_start=1, msg_tg_id_end=1, text="x"))
         s.add(ChunkState(chat_id=cid, last_tg_message_id=5))
         await s.commit()
@@ -202,7 +204,8 @@ async def test_members_api_list_and_rename_invalidates_memory(db_sessionmaker, c
         assert member.override_name == "Даня"
         chunks = (await s.execute(select(Chunk).where(Chunk.chat_id == cid))).scalars().all()
         cursors = (await s.execute(select(ChunkState).where(ChunkState.chat_id == cid))).scalars().all()
-        assert chunks == [] and cursors == []  # memory invalidated for re-chunk
+        assert len(chunks) == 1 and chunks[0].stale and chunks[0].content_version == 1
+        assert len(cursors) == 1  # cursor untouched — no re-chunk needed
 
     miss = await client.put(f"/api/chats/{cid}/members/12345", json={"display_name": "X"})
     assert miss.status_code == 404
@@ -215,12 +218,12 @@ async def test_members_api_noop_rename_keeps_memory(db_sessionmaker, client):
         await set_override_name(s, cid, 555, "Даня")  # existing override
         s.add(Chunk(chat_id=cid, thread_id=None, msg_tg_id_start=1, msg_tg_id_end=1, text="x"))
         await s.commit()
-    # PUT the SAME override value -> no-op -> memory must NOT be wiped.
+    # PUT the SAME override value -> no-op -> memory must NOT be touched.
     r = await client.put(f"/api/chats/{cid}/members/555", json={"display_name": "Даня"})
     assert r.status_code == 200
     async with db_sessionmaker() as s:
         chunks = (await s.execute(select(Chunk).where(Chunk.chat_id == cid))).scalars().all()
-        assert len(chunks) == 1  # unchanged rename left memory intact
+        assert len(chunks) == 1 and not chunks[0].stale  # unchanged rename left memory intact
 
 
 async def test_recent_messages_api_resolves_display_name(db_sessionmaker, client):
@@ -255,7 +258,7 @@ async def test_members_api_batch_update(db_sessionmaker, client):
     assert by_id[111]["display_name"] == "Элис" and by_id[222]["display_name"] == "Боб"
     async with db_sessionmaker() as s:
         chunks = (await s.execute(select(Chunk).where(Chunk.chat_id == cid))).scalars().all()
-        assert chunks == []  # memory invalidated once for the whole batch
+        assert len(chunks) == 1 and chunks[0].stale  # staled once for the whole batch
 
 
 async def test_members_api_order_is_stable_across_rename(db_sessionmaker, client):

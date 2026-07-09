@@ -873,8 +873,8 @@ function MembersTab({ chatId }: { chatId: number }) {
       <p className="muted tab-desc">
         How the bot refers to each person — in the conversation it reads, in its memory, and in its
         replies. The user id is fixed and the handle is filled in from Telegram when available. Click
-        a name to rename it; edits apply — and rebuild this chat’s memory under the new names — only
-        when you click Save.
+        a name to rename it; edits apply only when you click Save — this chat’s memory then
+        refreshes under the new names in the background, staying searchable throughout.
       </p>
       <Card pad={false}>
         {list.length === 0 ? (
