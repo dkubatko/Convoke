@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.media.render import message_body
+from app.members import member_display_name, upsert_member
 from app.memory.chunker import reply_quote
 from app.models import AgentRun, AuthNonce, Bot, Chat, ChatThread, Message, MessageAttachment
 from app.telegram.sender import send_and_persist
@@ -254,6 +255,19 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
     message.attachment = attachment  # cascades on session.add(message)
     session.add(message)
 
+    if msg.from_user is not None:
+        # Keep the member identity current: latest name wins, and the @handle
+        # (absent from imports) is captured here whenever the sender has one.
+        await upsert_member(
+            session,
+            chat.id,
+            msg.from_user.id,
+            msg.from_user.full_name,
+            message.sent_at,
+            handle=msg.from_user.username,
+            update_handle=True,  # live carries the authoritative @username (None clears)
+        )
+
     reply_target = (
         await _ensure_reply_target(session, chat, msg.reply_to_message)
         if msg.reply_to_message is not None
@@ -269,7 +283,15 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
         # the message I replied to say?") — carry the quote so the semantic
         # query and the run log are self-contained.
         if reply_target is not None and message_body(reply_target):
-            request_text += "\n" + reply_quote(reply_target)
+            # Only the reply target's name is needed — a single keyed lookup,
+            # not the whole roster, on this ingest hot path.
+            nm = (
+                await member_display_name(session, chat.id, reply_target.sender_id)
+                if reply_target.sender_id is not None
+                else None
+            )
+            names = {reply_target.sender_id: nm} if nm else {}
+            request_text += "\n" + reply_quote(reply_target, names)
         session.add(
             AgentRun(
                 chat_id=chat.id,

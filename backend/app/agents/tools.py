@@ -6,9 +6,10 @@ from pydantic_ai import RunContext
 from sqlalchemy import select
 
 from app.agents.deps import AgentDeps
-from app.memory.chunker import render_thread, resolve_reply_targets
+from app.members import invalidate_chat_memory, set_override_name
+from app.memory.chunker import render_for_chat
 from app.memory.store import search_chat_history as store_search
-from app.models import IntentEpisode, Message, Note
+from app.models import ChatMember, IntentEpisode, Message, Note
 
 MAX_NOTES_RETURNED = 8
 MAX_PAST_ACTIONS = 6
@@ -48,10 +49,9 @@ async def get_messages(ctx: RunContext[AgentDeps], message_ids: list[int]) -> st
             .scalars()
             .all()
         )
-        targets = await resolve_reply_targets(session, ctx.deps.chat_id, list(rows))
         out: list[str] = []
         if rows:
-            out.append(render_thread(list(rows), targets))
+            out.append(await render_for_chat(session, ctx.deps.chat_id, list(rows)))
         found = {m.tg_message_id for m in rows}
         for mid in ids:
             if mid not in found:
@@ -168,4 +168,63 @@ async def past_workflow_actions(ctx: RunContext[AgentDeps]) -> str:
     return "\n".join(lines)
 
 
-AGENT_TOOLS = [search_chat_history, get_messages, remember, recall, past_workflow_actions]
+async def list_members(ctx: RunContext[AgentDeps]) -> str:
+    """List the people in this chat and how you currently refer to each: their
+    display name, @handle (if they have one), and stable user_id. Use it to
+    answer "who's in here", to tell apart people with similar names, or to find
+    whose user_id to pass to set_member_name. (Who is addressing you right now,
+    with their user_id, is stated in your instructions.)"""
+    async with ctx.deps.sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ChatMember).where(ChatMember.chat_id == ctx.deps.chat_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if not rows:
+        return "No known members yet."
+    lines = []
+    for m in sorted(rows, key=lambda r: r.display_name.lower()):  # sort by shown name
+        handle = f" @{m.handle}" if m.handle else ""
+        lines.append(f"- {m.display_name}{handle} — user_id {m.sender_id}")
+    return "\n".join(lines)
+
+
+async def set_member_name(ctx: RunContext[AgentDeps], user_id: int, name: str) -> str:
+    """Change the display name for a chat member — the name you will use for
+    them EVERYWHERE: in the conversation you are reading, in searched history,
+    and in the roster list_members returns. Use it whenever someone asks to be
+    called a certain name ("call me Даня", "my name is X"). For any OTHER fact
+    about a person, use remember instead, not this. Pass the person's user_id —
+    from list_members, or (for the person addressing you) from your
+    instructions, which name them and give their user_id."""
+    name = name.strip()
+    if not name:
+        return "Give a non-empty name."
+    async with ctx.deps.sessionmaker() as session:
+        member, changed = await set_override_name(session, ctx.deps.chat_id, user_id, name)
+        if member is None:
+            return (
+                f"No member with user_id {user_id} in this chat. "
+                "Call list_members first to find the right id."
+            )
+        display = member.display_name
+        if changed:
+            # History is rendered under the old name; rebuild it under the new.
+            await invalidate_chat_memory(session, ctx.deps.chat_id)
+        await session.commit()
+    return f"Done — I'll refer to user_id {user_id} as {display!r} from now on."
+
+
+AGENT_TOOLS = [
+    search_chat_history,
+    get_messages,
+    remember,
+    recall,
+    past_workflow_actions,
+    list_members,
+    set_member_name,
+]

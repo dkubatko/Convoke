@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.members import load_member_names
 from app.memory.chunker import render_message, render_thread, resolve_reply_targets
 from app.memory.embeddings import Embedder
 from app.memory.store import search_chat_history
@@ -29,6 +30,7 @@ async def assemble_context(
     thread_id: int | None = None,
 ) -> str:
     budget = get_settings().context_char_budget
+    names = await load_member_names(session, chat.id)
 
     # Recent messages, newest first until the share is spent, then re-reversed.
     stmt = select(Message).where(Message.chat_id == chat.id)
@@ -42,7 +44,7 @@ async def assemble_context(
     recent: list[Message] = []
     used = 0
     for m in recent_rows:
-        line = render_message(m)
+        line = render_message(m, names)
         if used + len(line) > budget * RECENT_SHARE and recent:
             break
         recent.append(m)
@@ -54,7 +56,7 @@ async def assemble_context(
         hits = await search_chat_history(session, embedder, chat.id, query_text, k=5)
         # dedup: drop hits already shown verbatim in the recent window
         if recent:
-            first_recent = render_message(recent[0])
+            first_recent = render_message(recent[0], names)
             hits = [h for h in hits if first_recent not in h.rendered]
         hits_used = 0
         for h in hits:
@@ -119,6 +121,6 @@ async def assemble_context(
         # and its target may be far older than the window.
         targets = await resolve_reply_targets(session, chat.id, recent)
         sections.append(
-            "## Recent messages (most recent last)\n" + render_thread(recent, targets)
+            "## Recent messages (most recent last)\n" + render_thread(recent, targets, names)
         )
     return "\n\n".join(sections)

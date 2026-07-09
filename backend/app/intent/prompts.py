@@ -112,7 +112,10 @@ def slots_desc(workflow: Workflow) -> str:
 
 
 def render_transcript(
-    context: list[Message], window: list[Message], targets: dict[int, Message] | None = None
+    context: list[Message],
+    window: list[Message],
+    targets: dict[int, Message],
+    names: dict[int, str],
 ) -> str:
     # Same #id transcript the agent reads; the marker splits earlier context
     # from the messages to classify, and reply_annotation adds the shared
@@ -124,15 +127,15 @@ def render_transcript(
     for i, m in enumerate(msgs):
         if i == len(context):
             lines.append("--- new messages to classify ---")
-        lines.append(_render_line(m) + reply_annotation(m, present, targets))
+        lines.append(_render_line(m, names) + reply_annotation(m, present, targets, names))
     return "\n".join(lines)
 
 
-def _render_line(m: Message) -> str:
+def _render_line(m: Message, names: dict[int, str]) -> str:
     """One classifier transcript line — the shared #id line, with the bot's
     own messages tagged [bot] (they are dialogue context, never window or
     prefilter input)."""
-    base = render_message(m)
+    base = render_message(m, names)
     return f"[bot] {base}" if m.source == "self" else base
 
 
@@ -159,12 +162,13 @@ def build_detect_prompt(
     workflow: Workflow,
     context: list[Message],
     window: list[Message],
-    quoted: dict[int, Message] | None = None,
+    quoted: dict[int, Message],
+    names: dict[int, str],
 ) -> str:
     return DETECT_PROMPT.format(
         trigger_prompt=workflow.trigger_prompt,
         slots_desc=slots_desc(workflow),
-        transcript=render_transcript(context, window, quoted),
+        transcript=render_transcript(context, window, quoted, names),
     )
 
 
@@ -173,22 +177,26 @@ def build_attribution_prompt(
     episodes: list[IntentEpisode],
     context: list[Message],
     window: list[Message],
-    quoted: dict[int, Message] | None = None,
+    quoted: dict[int, Message],
+    names: dict[int, str],
 ) -> str:
     return ATTRIBUTION_PROMPT.format(
         trigger_prompt=workflow.trigger_prompt,
         slots_desc=slots_desc(workflow),
         episodes=render_episodes(episodes),
-        transcript=render_transcript(context, window, quoted),
+        transcript=render_transcript(context, window, quoted, names),
     )
 
 
 def build_recheck_prompt(
-    workflow: Workflow, episode: IntentEpisode, since: list[Message]
+    workflow: Workflow,
+    episode: IntentEpisode,
+    since: list[Message],
+    names: dict[int, str],
 ) -> str:
     return RECHECK_PROMPT.format(
         trigger_prompt=workflow.trigger_prompt,
         summary=episode.summary or "(no summary)",
         slots=render_slots(episode.slots or {}),
-        transcript="\n".join(_render_line(m) for m in since) or "(nothing)",
+        transcript="\n".join(_render_line(m, names) for m in since) or "(nothing)",
     )

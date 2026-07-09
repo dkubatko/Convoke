@@ -10,6 +10,7 @@ import {
   ImportJob,
   McpServer,
   MediaStatus,
+  Member,
   Message,
   MessageAttachment,
   Run,
@@ -40,7 +41,7 @@ import {
 } from '../components/ui'
 import { useUrlTab } from '../hooks/useUrlTab'
 
-const TABS = ['Memory', 'Workflows', 'Threads', 'Import history', 'Tools', 'Agent runs', 'Settings'] as const
+const TABS = ['Memory', 'Members', 'Workflows', 'Threads', 'Import history', 'Tools', 'Agent runs', 'Settings'] as const
 
 export default function ChatDetail() {
   const { chatId } = useParams()
@@ -78,6 +79,7 @@ export default function ChatDetail() {
       />
       <TabBar tabs={TABS} active={tab} onSelect={setTab} />
       {tab === 'Memory' && <MemoryTab chatId={id} />}
+      {tab === 'Members' && <MembersTab chatId={id} />}
       {tab === 'Workflows' && <WorkflowsTab chatId={id} />}
       {tab === 'Threads' && <ThreadsTab chatId={id} />}
       {tab === 'Import history' && <ImportTab chatId={id} />}
@@ -809,6 +811,170 @@ function ThreadsTab({ chatId }: { chatId: number }) {
           )
         })
       )}
+    </div>
+  )
+}
+
+/* ---------------- Members ---------------- */
+
+function MembersTab({ chatId }: { chatId: number }) {
+  const members = useQuery<Member[]>(() => api.get(`/api/chats/${chatId}/members`), [chatId])
+  const toast = useToast()
+  // Staged overrides keyed by sender_id; nothing is written until Save ('' =
+  // clear back to the auto name). `editing` is the one row whose input is open.
+  const [edits, setEdits] = useState<Record<number, string>>({})
+  const [editing, setEditing] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const list = members.data ?? []
+  const savedOverride = (m: Member) => m.override_name ?? ''
+  const valueOf = (m: Member) => (m.sender_id in edits ? edits[m.sender_id] : savedOverride(m))
+  const isChanged = (m: Member) =>
+    m.sender_id in edits && edits[m.sender_id].trim() !== savedOverride(m)
+  const dirty = list.filter(isChanged)
+  const stage = (id: number, v: string) => setEdits((p) => ({ ...p, [id]: v }))
+  const revert = (id: number) =>
+    setEdits((p) => {
+      const n = { ...p }
+      delete n[id]
+      return n
+    })
+
+  async function save() {
+    if (!dirty.length) return
+    setBusy(true)
+    try {
+      await api.put(
+        `/api/chats/${chatId}/members`,
+        dirty.map((m) => ({ sender_id: m.sender_id, display_name: edits[m.sender_id].trim() || null })),
+      )
+      toast('ok', `Saved ${dirty.length} — rebuilding memory under the new name${dirty.length > 1 ? 's' : ''}`)
+      // Refetch first, THEN drop the local edits, so nothing flashes old values.
+      await members.refetch()
+      setEdits({})
+    } catch (e) {
+      toast('err', e instanceof ApiError ? e.message : 'Couldn’t save')
+    } finally {
+      setBusy(false)
+    }
+  }
+  function cancel() {
+    setEdits({})
+    setEditing(null)
+  }
+
+  if (members.loading) return <TableSkeleton rows={5} />
+  if (members.error)
+    return <ErrorNote message={members.error} onRetry={() => void members.refetch()} />
+
+  return (
+    <div className="stack">
+      <p className="muted" style={{ fontSize: 12.5, margin: 0, maxWidth: 640 }}>
+        How the bot refers to each person — in the conversation it reads, in its memory, and in its
+        replies. The user id is fixed and the handle is filled in from Telegram when available. Click
+        a name to rename it; edits apply — and rebuild this chat’s memory under the new names — only
+        when you click Save.
+      </p>
+      <Card pad={false}>
+        {list.length === 0 ? (
+          <div className="card-pad">
+            <EmptyState title="No members yet" hint="Members appear here as messages arrive." />
+          </div>
+        ) : (
+          <>
+            <table className="data members-table">
+              <thead>
+                <tr>
+                  <th>User ID</th>
+                  <th>Handle</th>
+                  <th>Display name</th>
+                </tr>
+              </thead>
+              <tbody>
+                {list.map((m) => {
+                  const val = valueOf(m)
+                  const overridden = val.trim().length > 0
+                  const shownName = val.trim() || m.auto_name || 'Unknown'
+                  return (
+                    <tr
+                      key={m.sender_id}
+                      className={isChanged(m) ? 'member-row--changed' : undefined}
+                    >
+                      <td className="mono muted">{m.sender_id}</td>
+                      <td className="mono">
+                        {m.handle ? `@${m.handle}` : <span className="muted">—</span>}
+                      </td>
+                      <td>
+                        {editing === m.sender_id ? (
+                          // Auto-sizing input (hugs the text, resizes as you type),
+                          // pulled left so the text sits where the name was.
+                          <label className="name-field" data-value={val || m.auto_name || 'name'}>
+                            <input
+                              size={1}
+                              autoFocus
+                              value={val}
+                              placeholder={m.auto_name || 'name'}
+                              aria-label={`Display name for user ${m.sender_id}`}
+                              onChange={(e) => stage(m.sender_id, e.target.value)}
+                              onBlur={() => setEditing(null)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') setEditing(null)
+                                if (e.key === 'Escape') {
+                                  revert(m.sender_id)
+                                  setEditing(null)
+                                }
+                              }}
+                            />
+                          </label>
+                        ) : (
+                          <div className="member-edit">
+                            <button
+                              type="button"
+                              className="member-name"
+                              title="Click to rename"
+                              onClick={() => setEditing(m.sender_id)}
+                            >
+                              {shownName}
+                            </button>
+                            {overridden && (
+                              <button
+                                type="button"
+                                className="reset-btn"
+                                title="Reset to the Telegram name"
+                                aria-label="Reset to the Telegram name"
+                                onClick={() => stage(m.sender_id, '')}
+                              >
+                                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                                  <path d="M3 3v5h5" />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+            <div className="settings-actions">
+              <button
+                className="btn btn--primary"
+                disabled={busy || dirty.length === 0}
+                onClick={() => void save()}
+              >
+                {busy ? 'Saving…' : dirty.length ? `Save ${dirty.length}` : 'Saved'}
+              </button>
+              {dirty.length > 0 && (
+                <button type="button" className="btn btn--quiet" disabled={busy} onClick={cancel}>
+                  Cancel
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </Card>
     </div>
   )
 }

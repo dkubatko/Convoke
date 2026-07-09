@@ -12,12 +12,14 @@ from app.core.tasks import spawn
 from app.core.security import require_operator
 from app.ingest.history_import import delete_import, run_import
 from app.media.render import message_body
+from app.members import invalidate_chat_memory, load_member_names, set_override_name
 from app.memory.chunker import resolve_reply_targets
 from app.memory.runtime import ensure_embedder
 from app.memory.store import search_chat_history
 from app.models import (
     AgentRun,
     Chat,
+    ChatMember,
     ChatThread,
     ImportJob,
     MemoryGap,
@@ -137,6 +139,9 @@ async def _list_threads(
     }
     stats = {r.tk: r for r in rows}
     keys = set(stats) | set(meta)
+    # Previews show the same resolved names as every other surface — raw
+    # per-message sender_name would diverge from Members/Messages on a rename.
+    names = await load_member_names(session, chat_id)
     # Ordinal names for non-General threads by order of first appearance
     # (message-less named topics sort last).
     non_general = sorted(
@@ -170,7 +175,8 @@ async def _list_threads(
             )
             preview = [
                 ThreadPreviewMsg(
-                    sender_name=p.sender_name,
+                    sender_name=(names.get(p.sender_id) if p.sender_id is not None else None)
+                    or p.sender_name,
                     text=(message_body(p) or "").replace("\n", " ")[:160],
                     sent_at=p.sent_at,
                 )
@@ -219,6 +225,95 @@ async def update_thread(
     return await _list_threads(session, chat_id, 5)
 
 
+class MemberOut(BaseModel):
+    sender_id: int
+    handle: str | None
+    auto_name: str  # latest observed name (raw)
+    override_name: str | None  # operator/agent label
+    display_name: str  # effective: override_name or auto_name
+
+
+class MemberUpdate(BaseModel):
+    display_name: str | None  # blank/None clears the override back to auto_name
+
+
+class MemberOverride(BaseModel):
+    sender_id: int
+    display_name: str | None  # blank/None clears the override back to auto_name
+
+
+def _member_out(m: ChatMember) -> MemberOut:
+    return MemberOut(
+        sender_id=m.sender_id,
+        handle=m.handle,
+        auto_name=m.auto_name,
+        override_name=m.override_name,
+        display_name=m.display_name,
+    )
+
+
+async def _members_out(session: AsyncSession, chat_id: int) -> list[MemberOut]:
+    rows = (
+        (await session.execute(select(ChatMember).where(ChatMember.chat_id == chat_id)))
+        .scalars()
+        .all()
+    )
+    # Stable order — by the underlying Telegram name (which a UI rename doesn't
+    # touch), then id — so renaming a member never reshuffles the table.
+    return [_member_out(m) for m in sorted(rows, key=lambda r: (r.auto_name.lower(), r.sender_id))]
+
+
+@router.get("/chats/{chat_id}/members", response_model=list[MemberOut])
+async def list_chat_members(
+    chat_id: int, session: AsyncSession = Depends(get_session)
+) -> list[MemberOut]:
+    await _chat_or_404(session, chat_id)
+    return await _members_out(session, chat_id)
+
+
+@router.put("/chats/{chat_id}/members", response_model=list[MemberOut])
+async def update_chat_members(
+    chat_id: int,
+    body: list[MemberOverride],
+    session: AsyncSession = Depends(get_session),
+) -> list[MemberOut]:
+    """Batch-apply display-name overrides (the Members form saves all edits at
+    once). Memory is invalidated once, only if something actually changed."""
+    await _chat_or_404(session, chat_id)
+    changed_any = False
+    for o in body:
+        member, changed = await set_override_name(session, chat_id, o.sender_id, o.display_name)
+        if member is None:  # same contract as the single-member endpoint
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, f"No member {o.sender_id} in this chat"
+            )
+        changed_any = changed_any or changed
+    if changed_any:
+        await invalidate_chat_memory(session, chat_id)  # history embeds the old names
+    await session.commit()
+    return await _members_out(session, chat_id)
+
+
+@router.put("/chats/{chat_id}/members/{sender_id}", response_model=MemberOut)
+async def update_chat_member(
+    chat_id: int,
+    sender_id: int,
+    body: MemberUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> MemberOut:
+    await _chat_or_404(session, chat_id)
+    member, changed = await set_override_name(session, chat_id, sender_id, body.display_name)
+    if member is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such member in this chat")
+    out = _member_out(member)
+    if changed:
+        # History is rendered/embedded under the old name — rebuild it. Skip
+        # for a no-op save.
+        await invalidate_chat_memory(session, chat_id)
+    await session.commit()
+    return out
+
+
 @router.get("/chats/{chat_id}/messages", response_model=list[MessageOut])
 async def recent_messages(
     chat_id: int, limit: int = 50, session: AsyncSession = Depends(get_session)
@@ -239,6 +334,12 @@ async def recent_messages(
     # Resolve replied-to previews (usually within `rows`; one extra query
     # covers replies to older messages).
     targets = await resolve_reply_targets(session, chat_id, list(rows))
+    # Show the same (override/auto) names the Members tab and the bot use, so
+    # the Messages list doesn't diverge from the rest of the app after a rename.
+    names = await load_member_names(session, chat_id)
+
+    def display(m: Message) -> str:
+        return (names.get(m.sender_id) if m.sender_id is not None else None) or m.sender_name or "Unknown"
 
     def preview(m: Message) -> ReplyPreview | None:
         target = targets.get(m.reply_to_tg_message_id or 0)
@@ -246,13 +347,13 @@ async def recent_messages(
             return None
         text = message_body(target).replace("\n", " ")
         return ReplyPreview(
-            sender_name=target.sender_name or "Unknown",
+            sender_name=display(target),
             text=text[:140] + ("…" if len(text) > 140 else ""),
         )
 
     return [
         MessageOut(
-            id=m.id, tg_message_id=m.tg_message_id, sender_name=m.sender_name,
+            id=m.id, tg_message_id=m.tg_message_id, sender_name=display(m),
             text=m.text, sent_at=m.sent_at, source=m.source, reply_to=preview(m),
             attachment=AttachmentOut.model_validate(m.attachment) if m.attachment else None,
         )

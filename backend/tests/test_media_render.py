@@ -63,7 +63,7 @@ def test_failed_and_skipped_states():
 
 def test_render_message_carries_annotation():
     m = media_msg(status="described", description="two friends on a picnic blanket")
-    assert render_message(m) == (
+    assert render_message(m, {}) == (
         "Alice [2026-07-01 12:00] #1: [photo: two friends on a picnic blanket]"
     )
 
@@ -74,10 +74,10 @@ def test_render_thread_annotates_media_and_quoted_media_reply():
     photo = media_msg(status="described", description="movie tickets for Dune")
     reply = Message(chat_id=1, tg_message_id=2, sender_name="Bob", text="I'm in!",
                     sent_at=T0, reply_to_tg_message_id=1)
-    out = render_thread([reply], reply_targets={1: photo})
+    out = render_thread([reply], {1: photo}, {})
     assert '↳ replies to [#1] [2026-07-01 12:00] Alice: "[photo: movie tickets for Dune]"' in out
 
-    out = render_thread([photo, reply])
+    out = render_thread([photo, reply], {}, {})
     assert "[photo: movie tickets for Dune]" in out.splitlines()[0]
     assert "(replying to #1)" in out
 

@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.memory.chunker import render_thread, resolve_reply_targets
+from app.members import load_member_names
+from app.memory.chunker import render_for_chat
 from app.memory.embeddings import Embedder
 from app.models import Chunk, Message
 
@@ -15,9 +16,13 @@ class SearchHit:
     rendered: str
 
 
-async def render_chunk_from_raw(session: AsyncSession, chunk: Chunk) -> str:
-    """Render a hit from raw message rows (not the embedded text blob) so
-    edits are always reflected and speakers/timestamps are never stale."""
+async def render_chunk_from_raw(
+    session: AsyncSession, chunk: Chunk, names: dict[int, str] | None = None
+) -> str:
+    """Render a hit from raw message rows (not the embedded text blob) so edits
+    are always reflected and speakers/timestamps are never stale. Delegates to
+    render_for_chat for name + reply-linkage resolution; pass a preloaded
+    `names` map when rendering many chunks of one chat."""
     messages = (
         (
             await session.execute(
@@ -33,9 +38,7 @@ async def render_chunk_from_raw(session: AsyncSession, chunk: Chunk) -> str:
         .scalars()
         .all()
     )
-    msgs = list(messages)
-    targets = await resolve_reply_targets(session, chunk.chat_id, msgs)
-    return render_thread(msgs, targets)
+    return await render_for_chat(session, chunk.chat_id, list(messages), names)
 
 
 async def search_chat_history(
@@ -57,8 +60,13 @@ async def search_chat_history(
             .limit(k)
         )
     ).all()
+    names = await load_member_names(session, chat_id)  # one lookup for all hits
     return [
-        SearchHit(chunk_id=chunk.id, distance=float(dist), rendered=await render_chunk_from_raw(session, chunk))
+        SearchHit(
+            chunk_id=chunk.id,
+            distance=float(dist),
+            rendered=await render_chunk_from_raw(session, chunk, names),
+        )
         for chunk, dist in rows
     ]
 
@@ -102,8 +110,14 @@ async def embed_pending_chunks(
     if not chunks:
         return 0
     rendered: list[tuple[int, int, str, list]] = []  # (id, version_at_read, text, vector)
+    names_by_chat: dict[int, dict[int, str]] = {}  # chunks may span chats
     for c in chunks:
-        text = await render_chunk_from_raw(session, c) if c.stale else c.text
+        if c.stale:
+            if c.chat_id not in names_by_chat:
+                names_by_chat[c.chat_id] = await load_member_names(session, c.chat_id)
+            text = await render_chunk_from_raw(session, c, names_by_chat[c.chat_id])
+        else:
+            text = c.text
         rendered.append((c.id, c.content_version, text))
     vectors = await embedder.embed_passages([r[2] for r in rendered])
 

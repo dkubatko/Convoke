@@ -99,6 +99,43 @@ class ChatThread(Base):
     )
 
 
+class ChatMember(Base):
+    """Identity of a chat participant, keyed by their stable Telegram user id.
+
+    Every model-facing render resolves a message's sender through this row, so
+    the same person reads consistently across imported history and live traffic
+    no matter what name each individual message carried.
+
+    - `auto_name`: the latest observed display name (raw, from Telegram or the
+      export). `name_basis_at` is the sent_at of the message that set it, so a
+      later import of OLD history never clobbers a newer live-derived name.
+    - `override_name`: an operator/agent-set label; wins over auto_name.
+    - `handle`: the @username, captured from live messages when present (the
+      export carries none); null otherwise.
+    """
+
+    __tablename__ = "chat_members"
+
+    chat_id: Mapped[int] = mapped_column(
+        ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True
+    )
+    sender_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    auto_name: Mapped[str] = mapped_column(Text, default="")
+    override_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    handle: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name_basis_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    @property
+    def display_name(self) -> str:
+        return self.override_name or self.auto_name or "Unknown"
+
+
 class InboxUpdate(Base):
     """Transactional inbox: raw Telegram updates, persisted before the
     getUpdates offset is advanced. Downstream consumers are crash-safe."""

@@ -283,6 +283,14 @@ export interface ChatThread {
   preview: ThreadPreviewMsg[]
 }
 
+export interface Member {
+  sender_id: number
+  handle: string | null
+  auto_name: string
+  override_name: string | null
+  display_name: string
+}
+
 export interface AppSetting {
   key: string
   label: string

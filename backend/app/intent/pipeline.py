@@ -61,6 +61,7 @@ from app.intent.state import (
     normalize_slot_updates,
     render_slots,
 )
+from app.members import load_member_names
 from app.memory.chunker import resolve_reply_targets
 from app.memory.embeddings import Embedder
 from app.threads import unmonitored_threads
@@ -571,13 +572,16 @@ class IntentSweeper:
             self._mark(cursor, now, "evaluating", score=job.score)
             await session.commit()
 
+            names = await load_member_names(session, job.chat_id)
             if episodes:
                 prompt = build_attribution_prompt(
-                    wf, episodes, job.context, job.transcript_window, job.quoted
+                    wf, episodes, job.context, job.transcript_window, job.quoted, names
                 )
                 verdict = await self._model_call(session, prompt, AttributionVerdict)
             else:
-                prompt = build_detect_prompt(wf, job.context, job.transcript_window, job.quoted)
+                prompt = build_detect_prompt(
+                    wf, job.context, job.transcript_window, job.quoted, names
+                )
                 verdict = await self._model_call(session, prompt, DetectVerdict)
             if verdict is None:
                 # A FAILED call must not consume the window or spend the
@@ -809,8 +813,9 @@ class IntentSweeper:
                 if cursor is not None:
                     self._mark(cursor, now, "rechecking")
                     await session.commit()
+                names = await load_member_names(session, job.chat_id)
                 verdict = await self._model_call(
-                    session, build_recheck_prompt(wf, episode, since), RecheckVerdict
+                    session, build_recheck_prompt(wf, episode, since, names), RecheckVerdict
                 )
                 if verdict is None:
                     return False  # stay parked; retry next sweep

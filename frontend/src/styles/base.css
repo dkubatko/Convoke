@@ -1271,6 +1271,90 @@ td.mono {
   font-weight: 600;
   max-width: 260px;
 }
+/* Members table: items use the edit-box font size (15px), columns are equal,
+   and cells align with the card title (20px, matching .card-pad). */
+/* `table.` prefix so these out-specify the base `table.data th/td` rules. */
+table.members-table {
+  table-layout: fixed;
+}
+table.members-table th,
+table.members-table td {
+  padding-left: 20px; /* align with the card title (.card-pad is 20px) */
+  padding-right: 20px;
+}
+table.members-table td {
+  font-size: 15px; /* same size as the edit field */
+}
+/* Only the edited row is highlighted (matches the Settings form). */
+tr.member-row--changed td {
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
+}
+tr.member-row--changed td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+/* Display name is click-to-edit: plain text (flush under the DISPLAY NAME
+   header) with the custom chip + reset AFTER it, so they never offset the name.
+   Same height as the editor so opening one doesn't resize the row. */
+.member-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+}
+.member-name {
+  font: 600 15px var(--font-body);
+  height: 28px;
+  min-width: 0;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.member-name:hover {
+  color: var(--accent);
+}
+/* Auto-sizing input (shown while editing): a grid whose hidden ::after mirrors
+   the value (via data-value) and sets the width, so the box hugs the text
+   equally on both sides and grows/shrinks as you type. The negative margin
+   cancels the input's padding + border so its text sits exactly where the plain
+   name was — clicking to edit doesn't move it. */
+.name-field {
+  display: inline-grid;
+  align-items: center;
+  max-width: 100%;
+  margin-left: -9px;
+}
+.name-field::after,
+.name-field input {
+  grid-area: 1 / 1;
+  min-width: 3ch;
+  font: 600 15px var(--font-body);
+  height: 28px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border: 1px solid transparent; /* same 1px on both so widths match */
+  border-radius: var(--radius-s);
+}
+.name-field::after {
+  content: attr(data-value);
+  visibility: hidden;
+  white-space: pre;
+  width: max-content; /* the sizer: grid column tracks the text width */
+}
+.name-field input {
+  width: 100%; /* fill the ::after-sized cell (NOT the input's default 20ch) */
+  min-height: 0; /* cancel the 36px control height */
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+}
 .thread-preview {
   margin-top: 10px;
   padding-top: 10px;

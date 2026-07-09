@@ -168,7 +168,7 @@ def test_render_thread_quotes_out_of_transcript_reply_targets():
     c = msg(12, 62, text="what was that about?")
     c.reply_to_tg_message_id = 7  # target never stored
 
-    text = render_thread([a, b, c], {1: old, 10: a})
+    text = render_thread([a, b, c], {1: old, 10: a}, {})
     assert '↳ replies to [#1] [2026-07-01 12:00] Alice: "wanna hike Saturday at 10?"' in text
     assert text.count("↳") == 1  # the in-transcript reply is NOT expanded
     assert "(replying to #10)" in text  # …it is a pointer instead

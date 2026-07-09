@@ -22,7 +22,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
-from app.models import Chat, Chunk, ChunkState, ImportJob, Message, MessageAttachment
+from app.members import invalidate_chat_memory, refresh_members_from_messages
+from app.models import Bot, Chat, ImportJob, Message, MessageAttachment
 
 log = logging.getLogger("convoke.import")
 
@@ -372,10 +373,19 @@ async def _run_import(
                 )
             ).scalars()
         )
+        # The export can contain the bot's own past messages; keep it out of the
+        # member roster (mirrors the migration's bot exclusion).
+        bot_tg_id = await session.scalar(
+            select(Bot.tg_bot_id).join(Chat, Chat.bot_id == Bot.id).where(Chat.id == chat.id)
+        )
 
     total = ingested = 0
     batch: list[Message] = []
     referenced_files: set[Path] = set()
+    # sender_id -> (latest name, its sent_at), to refresh chat_members after
+    # ingest (the migration only backfills existing imports; this covers new
+    # ones). Includes duplicates so the true latest name is captured.
+    observed_members: dict[int, tuple[str, datetime]] = {}
 
     async def flush(batch: list[Message]) -> None:
         async with sessionmaker() as session:
@@ -387,6 +397,15 @@ async def _run_import(
 
     for m in iter_export_messages(path):
         total += 1
+        if m.sender_id is not None and m.sender_id != bot_tg_id:
+            name = (m.sender_name or "").strip()
+            prev = observed_members.get(m.sender_id)
+            if prev is None or m.sent_at >= prev[1]:
+                # Latest wins, but never let a null-named observation (deleted
+                # account trailing messages) shadow an older NAMED one — same
+                # named-first rule the migration's backfill applies.
+                if name or prev is None or not prev[0]:
+                    observed_members[m.sender_id] = (name, m.sent_at)
         if m.tg_message_id in existing_ids:
             continue
         existing_ids.add(m.tg_message_id)
@@ -421,6 +440,7 @@ async def _run_import(
 
     # Imported history predates the chunk cursor — rebuild memory for the chat.
     async with sessionmaker() as session:
+        await refresh_members_from_messages(session, chat.id, observed_members)
         await reset_chat_memory(session, chat.id)
         # The intent sweeper must never treat imported history as fresh
         # conversation: in a chat with no live traffic yet its cursor is 0,
@@ -499,8 +519,7 @@ def _prune_unreferenced(root: Path, referenced: set[Path]) -> None:
 
 async def reset_chat_memory(session: AsyncSession, chat_id: int) -> None:
     """Drop chunks + cursor so the memory loop re-chunks the full history."""
-    await session.execute(delete(Chunk).where(Chunk.chat_id == chat_id))
-    await session.execute(delete(ChunkState).where(ChunkState.chat_id == chat_id))
+    await invalidate_chat_memory(session, chat_id)
 
 
 async def delete_import(session: AsyncSession, job: ImportJob) -> int:

@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.media.render import message_body
+from app.members import load_member_names
 from app.models import Chunk, ChunkState, Message
 from app.threads import unmonitored_threads
 
@@ -25,16 +26,27 @@ class Segment:
     tg_id_end: int
 
 
-def render_message(m: Message) -> str:
+def _member_name(m: Message, names: dict[int, str]) -> str:
+    """The name to show for a message's sender: the chat-member mapping
+    (`sender_id -> name`) when present, else the raw per-message name — so one
+    person reads consistently across imported history and live traffic. `names`
+    is required (pass {} when there are none) so a caller can't silently leak
+    raw names by forgetting to resolve them."""
+    mapped = names.get(m.sender_id) if names and m.sender_id is not None else None
+    return mapped or m.sender_name or "Unknown"
+
+
+def render_message(m: Message, names: dict[int, str]) -> str:
     """One transcript line: 'Sender [ts] #id: body'. The #id is the real
     Telegram message id — every reader (agent context, chunks, search hits,
     the intent classifier) uses it identically: agents pass it to
-    get_messages, and reply annotations point at it."""
+    get_messages, and reply annotations point at it. `names` resolves the
+    sender via the chat-member map (see `_member_name`)."""
     ts = m.sent_at.strftime("%Y-%m-%d %H:%M")
-    return f"{m.sender_name or 'Unknown'} [{ts}] #{m.tg_message_id}: {message_body(m)}"
+    return f"{_member_name(m, names)} [{ts}] #{m.tg_message_id}: {message_body(m)}"
 
 
-def reply_quote(target: Message, limit: int = 120) -> str:
+def reply_quote(target: Message, names: dict[int, str], limit: int = 120) -> str:
     """The quoted-original line for a reply whose target isn't visible in the
     same transcript — rendered in the same 'Sender [ts] #id: body' shape as a
     normal line so it reads uniformly. Single source of the ↳ format."""
@@ -44,11 +56,16 @@ def reply_quote(target: Message, limit: int = 120) -> str:
         q = q[:limit] + "…"
     return (
         f'  ↳ replies to [#{target.tg_message_id}] [{ts}] '
-        f'{target.sender_name or "Unknown"}: "{q}"'
+        f'{_member_name(target, names)}: "{q}"'
     )
 
 
-def reply_annotation(m: Message, present: set[int], targets: dict[int, Message]) -> str:
+def reply_annotation(
+    m: Message,
+    present: set[int],
+    targets: dict[int, Message],
+    names: dict[int, str],
+) -> str:
     """The reply-linkage suffix for one transcript line — the single source of
     reply rendering, shared by every transcript (agent context, chunks, search
     hits, the intent classifier): a pure pointer when the target is visible in
@@ -61,19 +78,46 @@ def reply_annotation(m: Message, present: set[int], targets: dict[int, Message])
         return f" (replying to #{rid})"
     target = targets.get(rid)
     if target is not None and message_body(target):
-        return "\n" + reply_quote(target)
+        return "\n" + reply_quote(target, names)
     return f" (replying to #{rid} — message not stored)"
 
 
 def render_thread(
-    messages: list[Message], reply_targets: dict[int, Message] | None = None
+    messages: list[Message],
+    reply_targets: dict[int, Message],
+    names: dict[int, str],
 ) -> str:
     """Render messages as a transcript with reply linkage always explicit.
     Chunks embed this text, so both their embeddings and search_chat_history
-    hits carry the linkage."""
+    hits carry the linkage. `names` resolves senders via the chat-member map.
+
+    Prefer `render_for_chat` unless you already hold the names map + reply
+    targets (e.g. rendering many segments of one chat) — it loads both for you
+    so no caller has to remember to thread `names` through by hand."""
     present = {m.tg_message_id for m in messages}
     targets = reply_targets or {}
-    return "\n".join(render_message(m) + reply_annotation(m, present, targets) for m in messages)
+    return "\n".join(
+        render_message(m, names) + reply_annotation(m, present, targets, names)
+        for m in messages
+    )
+
+
+async def render_for_chat(
+    session: AsyncSession,
+    chat_id: int,
+    messages: list[Message],
+    names: dict[int, str] | None = None,
+) -> str:
+    """The one entry point for turning a chat's message rows into a model-facing
+    transcript: loads the member-name map (unless the caller already has it) and
+    resolves reply targets, then renders. Because callers never hand-thread
+    `names`, the class of "forgot to resolve names → raw names leak into memory"
+    bug can't recur here. `names` is an optional perf hint for batch callers that
+    render many chunks of one chat and load the map once."""
+    if names is None:
+        names = await load_member_names(session, chat_id)
+    targets = await resolve_reply_targets(session, chat_id, list(messages))
+    return render_thread(messages, targets, names)
 
 
 async def resolve_reply_targets(
@@ -208,6 +252,7 @@ async def chunk_chat(
         return 0
 
     targets = await resolve_reply_targets(session, chat_id, list(messages))
+    names = await load_member_names(session, chat_id)
 
     persisted = 0
     for seg in segments:
@@ -219,7 +264,7 @@ async def chunk_chat(
                 thread_id=seg.thread_id,
                 msg_tg_id_start=seg.tg_id_start,
                 msg_tg_id_end=seg.tg_id_end,
-                text=render_thread(seg.messages, targets),
+                text=render_thread(seg.messages, targets, names),
             )
         )
         persisted += 1
