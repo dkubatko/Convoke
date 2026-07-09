@@ -69,6 +69,19 @@ def test_normalize_drops_unknown_and_ambiguous():
     assert normalize_slot_updates(updates, two) == []
 
 
+def test_normalize_word_boundary_extension_only():
+    """The verified poisoning case: an invented 'timezone' must NOT land on a
+    declared 'time' slot — only `_`-delimited extensions remap."""
+    time_slot = [{"name": "time", "description": "when"}]
+    updates = [
+        SlotUpdate(name="timezone", value="PST", confidence=0.9),  # bare substring → drop
+        SlotUpdate(name="meeting_time", value="7pm", confidence=0.9),  # suffix word → remap
+        SlotUpdate(name="time_range", value="7-9", confidence=0.9),  # prefix word → remap
+    ]
+    out = normalize_slot_updates(updates, time_slot)
+    assert [(u.name, u.value) for u in out] == [("time", "7pm"), ("time", "7-9")]
+
+
 def test_normalize_passthrough_for_no_slot_workflows():
     updates = [SlotUpdate(name="anything", value="x", confidence=0.9)]
     assert normalize_slot_updates(updates, []) == updates
@@ -105,6 +118,19 @@ def test_reassertion_restores_full_strength():
     stored = apply_slot_updates(stored, [SlotUpdate(name="date", value="Tue", confidence=0.9)], NOW, 5)
     eff = effective_slots(stored, NOW, GRACE, PER_HOUR)
     assert eff["date"]["confidence"] == 0.9
+
+
+def test_effective_slots_tolerates_naive_and_garbage_ts():
+    """Imported/hand-edited rows: a naive ts is treated as UTC, an unparseable
+    one degrades to fresh — neither crashes convergence (was a TypeError loop)."""
+    naive = (NOW - timedelta(hours=1)).replace(tzinfo=None).isoformat()
+    slots = {
+        "a": {"value": "x", "confidence": 0.9, "ts": naive},
+        "b": {"value": "y", "confidence": 0.9, "ts": "not-a-date"},
+    }
+    eff = effective_slots(slots, NOW, GRACE, PER_HOUR)
+    assert eff["a"]["confidence"] == 0.9  # within grace once coerced to UTC
+    assert eff["b"]["confidence"] == 0.9
 
 
 # ---------- convergence ----------

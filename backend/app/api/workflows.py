@@ -1,14 +1,16 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Annotated
 
 from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session, get_sessionmaker
 from app.core.security import require_operator
 from app.core.tasks import spawn
+from app.intent.episodes import close_episode, revert_fired
 from app.intent.examples import generate_examples
 from app.memory.runtime import ensure_embedder
 from app.threads import visible_thread_keys
@@ -24,6 +26,7 @@ from app.models import (
     Workflow,
     WorkflowAssignment,
 )
+from app.models.workflows import LIVE_FIRE_STATUSES, PRE_FIRE_EPISODE_STATUSES
 
 router = APIRouter(dependencies=[Depends(require_operator)])
 
@@ -34,7 +37,7 @@ class SlotSpec(BaseModel):
 
 
 class WorkflowIn(BaseModel):
-    name: str
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
     type: str  # scheduled | intent
     action_prompt: str
     enabled: bool = True
@@ -44,9 +47,9 @@ class WorkflowIn(BaseModel):
     confirm: bool = True
     # 0 = no rate limit. A topic converging during the cooldown parks and is
     # rechecked when it lifts — never dropped. Episode dedup governs re-firing.
-    cooldown_seconds: int = 0
+    cooldown_seconds: int = Field(0, ge=0)
     # How long a handled topic stays open as dedup memory (prefilter-gated).
-    dedup_window_hours: int = 12
+    dedup_window_hours: int = Field(12, ge=1)
     chat_ids: list[int] = []
 
 
@@ -124,7 +127,57 @@ async def _seed_cursor(session: AsyncSession, workflow_id: int, chat_id: int) ->
     )
 
 
+async def _close_live_state(session: AsyncSession, workflow_id: int, chat_id: int) -> None:
+    """Unassignment ends the pair's live trigger state: open pre-fire episodes
+    would render in the UI forever and a live fire could still execute after
+    the operator removed the workflow from the chat."""
+    now = datetime.now(timezone.utc)
+    fires = (
+        (
+            await session.execute(
+                select(PendingFire).where(
+                    PendingFire.workflow_id == workflow_id,
+                    PendingFire.chat_id == chat_id,
+                    PendingFire.status.in_(LIVE_FIRE_STATUSES),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for fire in fires:
+        fire.status = "cancelled"
+        fire.error = "workflow unassigned"
+        fire.finished_at = now
+        # Reverts the fired episode to `candidate` so the close below catches it.
+        await revert_fired(session, fire.episode_id, now)
+    episodes = (
+        (
+            await session.execute(
+                select(IntentEpisode).where(
+                    IntentEpisode.workflow_id == workflow_id,
+                    IntentEpisode.chat_id == chat_id,
+                    IntentEpisode.status.in_(PRE_FIRE_EPISODE_STATUSES),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for ep in episodes:
+        close_episode(ep, "superseded", now)
+
+
 async def _set_assignments(session: AsyncSession, wf: Workflow, chat_ids: list[int]) -> None:
+    existing = set(
+        (
+            await session.execute(
+                select(WorkflowAssignment.chat_id).where(WorkflowAssignment.workflow_id == wf.id)
+            )
+        ).scalars()
+    )
+    for cid in existing - set(chat_ids):
+        await _close_live_state(session, wf.id, cid)
     await session.execute(
         delete(WorkflowAssignment).where(WorkflowAssignment.workflow_id == wf.id)
     )
@@ -595,6 +648,17 @@ async def set_chat_workflows(
     """Per-chat assignment control, symmetric with the per-workflow chat list."""
     if await session.get(Chat, chat_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat not found")
+    existing = set(
+        (
+            await session.execute(
+                select(WorkflowAssignment.workflow_id).where(
+                    WorkflowAssignment.chat_id == chat_id
+                )
+            )
+        ).scalars()
+    )
+    for wid in existing - set(workflow_ids):
+        await _close_live_state(session, wid, chat_id)
     await session.execute(
         delete(WorkflowAssignment).where(WorkflowAssignment.chat_id == chat_id)
     )

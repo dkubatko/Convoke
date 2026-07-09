@@ -442,6 +442,7 @@ async def test_poison_fire_is_isolated_not_queue_wedging(db_sessionmaker):
                        cooldown_seconds=0, threshold=0.1, examples_status="ready")
         s.add(wf2)
         await s.flush()
+        s.add(WorkflowAssignment(workflow_id=wf2.id, chat_id=chat2.id))  # kill switch needs the pair live
         s.add(PendingFire(workflow_id=wf_id, chat_id=chat.id, slots={}))  # needs confirm → send fails
         s.add(PendingFire(workflow_id=wf2.id, chat_id=chat2.id, slots={}))  # healthy
         await s.commit()

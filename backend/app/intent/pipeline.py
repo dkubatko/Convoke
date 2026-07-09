@@ -39,7 +39,6 @@ from app.intent.episodes import (
     load_open_episodes,
     make_room,
     open_episode,
-    pre_fire_episodes,
     recent_duplicate,
     touch,
 )
@@ -69,6 +68,7 @@ from app.models import (
     AgentRun,
     Chat,
     ChatThread,
+    ImportJob,
     IntentCursor,
     IntentEpisode,
     Message,
@@ -141,11 +141,6 @@ class RecheckJob:
         return (self.workflow.id, self.chat_id, self.thread_key)
 
 
-@dataclass
-class _ChatPlan:
-    jobs: list = field(default_factory=list)
-
-
 class IntentSweeper:
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], embedder: Embedder) -> None:
         self.sessionmaker = sessionmaker
@@ -183,9 +178,23 @@ class IntentSweeper:
                 .scalars()
                 .all()
             )
+            # A running import back-fills history under the cursors; planning
+            # against that moving tail would evaluate months-old messages.
+            # Skip the chat until the import settles.
+            importing = set(
+                (
+                    await session.execute(
+                        select(ImportJob.chat_id).where(
+                            ImportJob.status.in_(("pending", "validating", "ingesting"))
+                        )
+                    )
+                ).scalars()
+            )
 
         jobs: list[EvalJob | RecheckJob] = []
         for chat_id in chat_ids:
+            if chat_id in importing:
+                continue
             try:
                 jobs.extend(await self._plan_chat(chat_id, now))
             except Exception:  # noqa: BLE001 — one bad chat must not stop the sweep
@@ -306,32 +315,40 @@ class IntentSweeper:
             unmonitored = await unmonitored_threads(session, chat_id)
 
             jobs: list[EvalJob | RecheckJob] = []
-            for wf in workflows:
-                thread_keys = set(by_thread) | {
-                    key[2] for key in episodes_by_key if key[0] == wf.id
-                }
-                for thread_key in thread_keys:
-                    if thread_key in unmonitored:
-                        continue
-                    if (wf.id, chat_id, thread_key) in self._in_flight:
-                        continue
-                    job = await self._plan_key(
-                        session,
-                        wf,
-                        chat_id,
-                        thread_key,
-                        by_thread.get(thread_key, []),
-                        cursor_by_key,
-                        episodes_by_key.get((wf.id, chat_id, thread_key), []),
-                        direct_invocations,
-                        max_win,
-                        lull,
-                        now,
-                    )
-                    if job is not None:
-                        jobs.append(job)
-                        self._in_flight.add(job.key)
-            await session.commit()
+            try:
+                for wf in workflows:
+                    thread_keys = set(by_thread) | {
+                        key[2] for key in episodes_by_key if key[0] == wf.id
+                    }
+                    for thread_key in thread_keys:
+                        if thread_key in unmonitored:
+                            continue
+                        if (wf.id, chat_id, thread_key) in self._in_flight:
+                            continue
+                        job = await self._plan_key(
+                            session,
+                            wf,
+                            chat_id,
+                            thread_key,
+                            by_thread.get(thread_key, []),
+                            cursor_by_key,
+                            episodes_by_key.get((wf.id, chat_id, thread_key), []),
+                            direct_invocations,
+                            max_win,
+                            lull,
+                            now,
+                        )
+                        if job is not None:
+                            jobs.append(job)
+                            self._in_flight.add(job.key)
+                await session.commit()
+            except BaseException:
+                # A failed plan must not strand keys registered so far — a
+                # leaked key means that (workflow, chat, thread) is never
+                # evaluated again until restart.
+                for job in jobs:
+                    self._in_flight.discard(job.key)
+                raise
             return jobs
 
     async def _close_expired_episodes(
@@ -416,7 +433,7 @@ class IntentSweeper:
         # A parked episode whose cooldown lifted gets rechecked/fired even if
         # the chat has been silent since.
         parked = [e for e in episodes if e.status == "converged"]
-        if parked and not self._cooldown_active(wf, episodes, now):
+        if parked and not await self._cooldown_active(session, wf, chat_id, now):
             return RecheckJob(
                 workflow=wf, chat_id=chat_id, thread_key=thread_key, episode_id=parked[0].id
             )
@@ -434,6 +451,13 @@ class IntentSweeper:
         if len(unevaluated) < max_win and (now - last_at).total_seconds() < lull:
             return None  # window still open
         window = unevaluated[-max_win:]
+        if len(unevaluated) > max_win:
+            # Overflow is consumed unclassified — surface it, or a burst that
+            # buried an intent looks like a silent miss.
+            log.warning(
+                "intent window overflow wf=%s chat=%s thread=%s: %d messages dropped unclassified",
+                wf.id, chat_id, thread_key, len(unevaluated) - max_win,
+            )
 
         # Media in the window still being described: hold the window briefly
         # so the classifier judges the description, not a pending placeholder.
@@ -510,15 +534,27 @@ class IntentSweeper:
             quoted=reply_targets,
         )
 
-    def _cooldown_active(
-        self, wf: Workflow, episodes: list[IntentEpisode], now: datetime
+    async def _cooldown_active(
+        self, session: AsyncSession, wf: Workflow, chat_id: int, now: datetime
     ) -> bool:
+        """The UI promises workflow-level "at most once per N" per chat, so
+        the anchor is the chat-wide max(fired_at) over ALL of the workflow's
+        episodes — open or closed. Anchoring on open episodes of one thread
+        would lift the cooldown early when a satisfied episode closes, and
+        would never cool down a sibling thread."""
         if not wf.cooldown_seconds:
             return False
-        fired = [as_utc(e.fired_at) for e in episodes if e.fired_at is not None]
-        if not fired:
+        last = as_utc(
+            await session.scalar(
+                select(func.max(IntentEpisode.fired_at)).where(
+                    IntentEpisode.workflow_id == wf.id,
+                    IntentEpisode.chat_id == chat_id,
+                )
+            )
+        )
+        if last is None:
             return False
-        return now < max(fired) + timedelta(seconds=wf.cooldown_seconds)
+        return now < last + timedelta(seconds=wf.cooldown_seconds)
 
     async def _prior_context(
         self, session: AsyncSession, chat_id: int, thread_key: int, first: Message
@@ -612,10 +648,23 @@ class IntentSweeper:
                 (verdict.topic_summary or "")[:120],
             )
             cursor.last_llm_at = now
-            if episodes:
-                stage = await self._apply_attribution(session, job, episodes, verdict, now)
-            else:
-                stage = await self._apply_detect(session, job, verdict, now)
+            try:
+                if episodes:
+                    stage = await self._apply_attribution(session, job, episodes, verdict, now)
+                else:
+                    stage = await self._apply_detect(session, job, verdict, now)
+            except Exception:  # noqa: BLE001 — a bad apply must not become a crash loop
+                # Roll back the partial episode mutations, but the LLM stamp
+                # and error mark must survive: losing them re-runs a full
+                # classifier call on the same window every sweep, forever.
+                await session.rollback()
+                cursor = await session.get(IntentCursor, (wf.id, job.chat_id, job.thread_key))
+                if cursor is not None:
+                    cursor.last_llm_at = now
+                    self._mark(cursor, now, "classifier_error", score=job.score)
+                    await session.commit()
+                log.exception("intent apply failed for %s", job.key)
+                return False
             cursor.last_tg_message_id = window[-1].tg_message_id
             self._mark(cursor, now, stage, score=job.score, confidence=verdict.confidence)
             await session.commit()
@@ -741,8 +790,11 @@ class IntentSweeper:
         # Fingerprint dedup only means something over actual values — for a
         # no-slot workflow every episode would collide on the empty hash, and
         # its dedup is the classifier's continuation verdict alone.
-        if episode.slots:
-            episode.fingerprint = fingerprint(episode.slots)
+        # Fingerprint (and the fire payload below) come from the SAME
+        # effective dict the convergence decision used — raw episode.slots may
+        # still hold decayed values that didn't count.
+        if effective:
+            episode.fingerprint = fingerprint(effective)
             duplicate = await recent_duplicate(
                 session, wf, job.chat_id, episode.fingerprint, now, exclude_id=episode.id
             )
@@ -750,16 +802,21 @@ class IntentSweeper:
                 close_episode(episode, "duplicate", now)
                 return "duplicate"
 
-        others = await load_open_episodes(session, wf.id, job.chat_id, job.thread_key)
-        if self._cooldown_active(wf, others, now):
+        if await self._cooldown_active(session, wf, job.chat_id, now):
             episode.status = "converged"
             episode.parked_at_tg_message_id = job.window[-1].tg_message_id
             return "parked"
-        self._fire(session, wf, episode, now)
+        await session.flush()  # a just-opened episode needs its id on the fire row
+        self._fire(session, wf, episode, now, slots=effective)
         return "fired"
 
     def _fire(
-        self, session: AsyncSession, wf: Workflow, episode: IntentEpisode, now: datetime
+        self,
+        session: AsyncSession,
+        wf: Workflow,
+        episode: IntentEpisode,
+        now: datetime,
+        slots: dict | None = None,
     ) -> None:
         session.add(
             PendingFire(
@@ -767,7 +824,7 @@ class IntentSweeper:
                 chat_id=episode.chat_id,
                 thread_key=episode.thread_key,
                 episode_id=episode.id,
-                slots=dict(episode.slots or {}),
+                slots=dict(slots if slots is not None else episode.slots or {}),
                 status="pending",
             )
         )
@@ -798,6 +855,11 @@ class IntentSweeper:
                         .where(
                             Message.chat_id == job.chat_id,
                             Message.tg_message_id > (episode.parked_at_tg_message_id or 0),
+                            # The episode's OWN thread only — chatter elsewhere
+                            # in the chat is not evidence about this topic.
+                            Message.thread_id.is_(None)
+                            if job.thread_key == 0
+                            else Message.thread_id == job.thread_key,
                         )
                         .order_by(Message.tg_message_id.desc())
                         .limit(30)
@@ -809,8 +871,18 @@ class IntentSweeper:
             since = list(reversed(since))
             if since:
                 # Something was said while parked — one cheap check that the
-                # group still wants this before acting late.
+                # group still wants this before acting late. Same circuit
+                # breaker as the eval path: rechecks must never outpace it.
                 if cursor is not None:
+                    last_llm = as_utc(cursor.last_llm_at)
+                    if (
+                        last_llm is not None
+                        and (now - last_llm).total_seconds()
+                        < self.settings.intent_min_llm_interval_seconds
+                    ):
+                        self._mark(cursor, now, "throttled")
+                        await session.commit()
+                        return False
                     self._mark(cursor, now, "rechecking")
                     await session.commit()
                 names = await load_member_names(session, job.chat_id)
@@ -818,7 +890,17 @@ class IntentSweeper:
                     session, build_recheck_prompt(wf, episode, since, names), RecheckVerdict
                 )
                 if verdict is None:
-                    return False  # stay parked; retry next sweep
+                    # Stay parked, but never leave the "rechecking" spinner
+                    # live; the stamp paces retries at the min-LLM interval
+                    # (unlike an eval failure, there is no new evidence a
+                    # prompt retry would pick up next sweep).
+                    if cursor is not None:
+                        cursor.last_llm_at = now
+                        self._mark(cursor, now, "classifier_error")
+                        await session.commit()
+                    return False
+                if cursor is not None:
+                    cursor.last_llm_at = now
                 log.info(
                     "verdict wf=%s chat=%s thread=%s mode=recheck still_wanted=%s conf=%.2f reason=%r",
                     wf.id, job.chat_id, job.thread_key,

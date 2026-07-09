@@ -16,7 +16,7 @@ cliff — and without ambient chatter silently re-validating old values.
 
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.intent.schemas import SlotUpdate
 
@@ -43,7 +43,12 @@ def effective_slots(
     out = {}
     for name, info in slots.items():
         ts = info.get("ts")
-        written_at = datetime.fromisoformat(ts) if ts else now
+        try:
+            written_at = datetime.fromisoformat(ts) if ts else now
+        except (TypeError, ValueError):  # imported/hand-edited rows: not ISO
+            written_at = now
+        if written_at.tzinfo is None:  # naive stored ts — treat as UTC
+            written_at = written_at.replace(tzinfo=timezone.utc)
         confidence = info.get("confidence", 0) * decay_factor(written_at, now, grace, per_hour)
         if confidence >= MIN_SLOT_CONFIDENCE:
             out[name] = {**info, "confidence": confidence}
@@ -52,6 +57,16 @@ def effective_slots(
 
 def _canon(name: str) -> str:
     return "".join(c for c in name.lower() if c.isalnum())
+
+
+def _extends(longer: str, shorter: str) -> bool:
+    """True when `longer` is `shorter` plus `_`-delimited words on either end
+    ('location_update' extends 'location'; 'timezone' does NOT extend 'time')."""
+    lw = [w for w in longer.lower().split("_") if w]
+    sw = [w for w in shorter.lower().split("_") if w]
+    if not sw or len(lw) <= len(sw):
+        return False
+    return lw[: len(sw)] == sw or lw[-len(sw):] == sw
 
 
 def normalize_slot_updates(
@@ -71,11 +86,15 @@ def normalize_slot_updates(
         if update.name in declared:
             out.append(update)
             continue
-        canon = _canon(update.name)
-        exact = by_canon.get(canon)
+        exact = by_canon.get(_canon(update.name))
         if exact is None:
-            # unique substring match either way ('locationupdate' ⊃ 'location')
-            matches = [n for c, n in by_canon.items() if c in canon or canon in c]
+            # Word-boundary extension only ('location_update' ⊇ 'location');
+            # a bare substring fallback mapped 'timezone' onto a 'time' slot.
+            matches = [
+                s["name"]
+                for s in required_slots
+                if _extends(update.name, s["name"]) or _extends(s["name"], update.name)
+            ]
             exact = matches[0] if len(matches) == 1 else None
         if exact is None:
             continue  # unknown name — drop rather than store a phantom slot

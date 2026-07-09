@@ -19,11 +19,19 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import get_settings
 from app.core.crypto import decrypt
+from app.core.runtime_settings import effective_settings
 from app.intent.episodes import revert_fired
 from app.intent.state import render_slots
-from app.models import AgentRun, Bot, Chat, IntentEpisode, PendingFire, Workflow
+from app.models import (
+    AgentRun,
+    Bot,
+    Chat,
+    IntentEpisode,
+    PendingFire,
+    Workflow,
+    WorkflowAssignment,
+)
 from app.telegram.client import BotCache
 from app.telegram.limiter import SendLimiter
 from app.telegram.sender import send_and_persist
@@ -90,7 +98,16 @@ class FireExecutor:
                     continue
                 wf = await session.get(Workflow, fire.workflow_id)
                 chat = await session.get(Chat, fire.chat_id)
-                if wf is None or chat is None:
+                # Kill switch honored late: a workflow disabled or unassigned
+                # from the chat while the fire waited must cancel, not execute.
+                live = (
+                    wf is not None
+                    and chat is not None
+                    and wf.enabled
+                    and await session.get(WorkflowAssignment, (fire.workflow_id, fire.chat_id))
+                    is not None
+                )
+                if not live:
                     fire.status = "cancelled"
                     fire.finished_at = now
                     await revert_fired(session, fire.episode_id, now)
@@ -185,7 +202,8 @@ class FireExecutor:
         fire.confirm_tg_message_id = sent.message_id
 
     async def _expire_stale_confirmations(self, session: AsyncSession, now: datetime) -> None:
-        timeout = timedelta(minutes=get_settings().confirm_timeout_minutes)
+        # Runtime-tunable (Workflows page), not the env default.
+        timeout = timedelta(minutes=(await effective_settings(session)).confirm_timeout_minutes)
         stale = (
             (
                 await session.execute(
@@ -222,9 +240,26 @@ async def handle_confirm_callback(
         return
     chat = await session.get(Chat, fire.chat_id)
     if decision == "y":
-        fire.status = "confirmed"
-        await bot.answer_callback_query(cb_id, text="Confirmed ✅")
-        outcome = f"✅ Confirmed by {html.escape(from_user_name)}."
+        # Same kill switch as the executor tick: a confirmation clicked after
+        # the workflow was disabled/unassigned cancels instead of firing.
+        wf = await session.get(Workflow, fire.workflow_id)
+        live = (
+            wf is not None
+            and wf.enabled
+            and await session.get(WorkflowAssignment, (fire.workflow_id, fire.chat_id))
+            is not None
+        )
+        if not live:
+            fire.status = "cancelled"
+            fire.error = "workflow disabled or unassigned"
+            fire.finished_at = datetime.now(timezone.utc)
+            await revert_fired(session, fire.episode_id, fire.finished_at)
+            await bot.answer_callback_query(cb_id, text="This workflow is no longer active here.")
+            outcome = "❌ Cancelled — the workflow was disabled or unassigned."
+        else:
+            fire.status = "confirmed"
+            await bot.answer_callback_query(cb_id, text="Confirmed ✅")
+            outcome = f"✅ Confirmed by {html.escape(from_user_name)}."
     else:
         fire.status = "cancelled"
         fire.finished_at = datetime.now(timezone.utc)

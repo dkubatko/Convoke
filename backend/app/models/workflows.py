@@ -107,7 +107,8 @@ class IntentCursor(Base):
     consume messages another never got to evaluate; each advances alone.
     Stages a gate can record: evaluating_prefilter | prefilter_skip |
     throttled | evaluating | classifier_error | no_match | candidate |
-    accumulating | suppressed | parked | rechecking | fired
+    accumulating | cap_full | suppressed | concluded | duplicate | parked |
+    rechecking | stale | fired
     """
 
     __tablename__ = "intent_cursors"
