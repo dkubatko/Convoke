@@ -7,7 +7,7 @@ from app.models.base import Base
 from app.models.memory import EmbeddingVariant
 from app.models.telegram import JSONVariant
 
-RUN_STATUSES = ("pending", "running", "done", "error")
+RUN_STATUSES = ("pending", "running", "done", "declined", "error")
 
 # Execution roles a connected model can be assigned to. Embeddings is not a
 # role: chat memory embeds locally (sentence-transformers) by design.

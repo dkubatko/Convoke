@@ -31,6 +31,9 @@ log = logging.getLogger("convoke.agent")
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 MAX_REPLY_PARTS = 3
+# Hard cap on one model run. It executes holding the chat lock and a global
+# concurrency slot — unbounded, a wedged provider could stall the whole loop.
+AGENT_RUN_DEADLINE_S = 900
 
 # Names the model sees for our own (non-MCP) tools; used to label their captured
 # calls with the "built-in" provider rather than an MCP server.
@@ -106,36 +109,38 @@ async def execute_run(
         run.started_at = datetime.now(timezone.utc)
         await session.commit()
 
-        try:
-            provider = await get_provider(session, "agent")
-        except ProviderNotConfigured:
-            await _fail(
-                session,
-                run,
-                "No agent model configured",
-                bot,
-                limiter,
-                bot_row,
-                chat,
-                notify="I'm not fully set up yet — the operator needs to configure "
-                "an agent model in Convoke.",
-            )
-            return
-
     is_workflow = run.trigger == "workflow"
     is_reply = run.trigger == "reply"
     thread_id = run.thread_id
     trigger_message_id = run.trigger_tg_message_id
     request_text = run.request_text
 
-    # Everything past the 'running' commit is guarded: a failure in context
-    # assembly, MCP setup, the model call, OR the reply send must mark the run
-    # error and (best-effort) notify — otherwise it shows 'running' forever.
+    # Everything past the 'running' commit is guarded: a failure in provider
+    # resolution, context assembly, MCP setup, the model call, OR the reply
+    # send must mark the run error and (best-effort) notify — otherwise it
+    # shows 'running' forever.
+    provider = None
     try:
         async with sessionmaker() as session:
             # chat/bot_row from the first block are detached but readable;
             # re-attach chat for the queries these helpers run.
             chat = await session.get(Chat, chat.id)
+            try:
+                provider = await get_provider(session, "agent")
+            except ProviderNotConfigured:
+                run = await session.get(AgentRun, run_id)
+                await _fail(
+                    session,
+                    run,
+                    "No agent model configured",
+                    bot,
+                    limiter,
+                    bot_row,
+                    chat,
+                    notify="I'm not fully set up yet — the operator needs to configure "
+                    "an agent model in Convoke.",
+                )
+                return
             prompt_context = await assemble_context(
                 session, embedder, chat, request_text, thread_id=thread_id
             )
@@ -198,9 +203,6 @@ async def execute_run(
         user_prompt = prompt_context
         if is_workflow:
             user_prompt = f"{prompt_context}\n\n## Task\n{request_text}"
-        agent = build_agent(
-            build_model(provider), instructions, mcp_toolsets + list(extra_toolsets or [])
-        )
         deps = AgentDeps(
             sessionmaker=sessionmaker,
             embedder=embedder,
@@ -214,10 +216,36 @@ async def execute_run(
         except Exception:  # noqa: BLE001 — cosmetic
             pass
 
-        # MCP connections open for exactly the duration of the run.
+        # MCP connections open for exactly the duration of the run. Toolsets
+        # are entered one by one so a single unreachable server drops out of
+        # the run instead of erroring it (Agent.__aenter__ connects them
+        # all-or-nothing). MCPToolset.__aenter__ is refcounted in pydantic-ai,
+        # so the agent re-entering a survivor just bumps the count — no
+        # double-connect.
         async with AsyncExitStack() as stack:
+            live_toolsets = []
+            for toolset in mcp_toolsets + list(extra_toolsets or []):
+                try:
+                    await stack.enter_async_context(toolset)
+                    live_toolsets.append(toolset)
+                except Exception:  # noqa: BLE001 — run without the dead server
+                    log.warning(
+                        "MCP server %s unreachable, running without it",
+                        getattr(toolset, "label", toolset),
+                        exc_info=True,
+                    )
+            agent = build_agent(build_model(provider), instructions, live_toolsets)
             await stack.enter_async_context(agent)
-            result = await agent.run(user_prompt, deps=deps)
+            # Deadline: a wedged provider or tool must not hold the chat lock
+            # and a concurrency slot indefinitely; expiry takes the normal
+            # error path (run → error, episode reverts, user is notified).
+            try:
+                async with asyncio.timeout(AGENT_RUN_DEADLINE_S):
+                    result = await agent.run(user_prompt, deps=deps)
+            except TimeoutError:
+                raise TimeoutError(
+                    f"run exceeded the {AGENT_RUN_DEADLINE_S}s deadline"
+                ) from None
         reply_text = (result.output or "").strip() or "(no reply)"
         # The agent's structured way to stand down: a NO_ACTION reply posts
         # nothing to the chat; the run records the decision as `declined` and
@@ -241,20 +269,54 @@ async def execute_run(
                 )
                 await session.commit()
                 return
-            for part in split_reply(reply_text):
-                await limiter.acquire(chat.bot_id, chat.tg_chat_id)
-                await _send(
-                    session, bot, chat, part,
-                    reply_to=trigger_message_id, thread_id=thread_id,
-                )
+            # Commit the outcome BEFORE delivering: the run's tool side-effects
+            # already happened, so a send failure must not revert the episode
+            # (re-firing a workflow whose action was performed), and the reply
+            # text must reach the bot's memory even if delivery dies halfway —
+            # bots can't re-read their own sends.
             run.status = "done"
             # Feedback loop: the episode that fired this run becomes
             # `satisfied`, carrying what was done.
             await finish_run_episode(session, run_id, reply_text, run.finished_at)
             await session.commit()
+            delivered = 0
+            try:
+                for part in split_reply(reply_text):
+                    await limiter.acquire(chat.bot_id, chat.tg_chat_id)
+                    await _send(
+                        session, bot, chat, part,
+                        reply_to=trigger_message_id, thread_id=thread_id,
+                    )
+                    # Per-part commit: a part that landed is never lost to a
+                    # failure sending the next one.
+                    await session.commit()
+                    delivered += 1
+            except Exception as e:  # noqa: BLE001 — the outcome is already recorded
+                log.exception(
+                    "agent run %s: delivery failed after %d part(s)", run_id, delivered
+                )
+                run.error = (
+                    f"delivery failed after {delivered} part(s): {type(e).__name__}: {e}"
+                )
+                if delivered == 0:
+                    # Nothing landed — silence reads as a crash, leave a trace.
+                    try:
+                        await limiter.acquire(chat.bot_id, chat.tg_chat_id)
+                        await _send(
+                            session, bot, chat,
+                            "Something went wrong and I couldn't finish that. "
+                            "The details are in Convoke's run log.",
+                            reply_to=trigger_message_id, thread_id=thread_id,
+                        )
+                    except Exception:  # noqa: BLE001 — recording matters more
+                        log.warning(
+                            "could not send failure notice to chat %s", chat.tg_chat_id
+                        )
+                await session.commit()
     except Exception as e:  # noqa: BLE001 — any failure ends the run cleanly
         log.exception("agent run %s failed", run_id)
-        evict_model(provider)  # a poisoned pooled client must not survive the retry
+        if provider is not None:  # may fail before resolution
+            evict_model(provider)  # a poisoned pooled client must not survive the retry
         async with sessionmaker() as session:
             run = await session.get(AgentRun, run_id)
             if run is not None and run.status == "running":

@@ -36,8 +36,11 @@ async def test_toolsets_only_for_enabled_assigned_servers(db_sessionmaker):
 
 
 def test_safe_prefix():
-    assert _safe_prefix("My Calendar!") == "my_calendar_"
-    assert _safe_prefix("...") == "___"
+    assert _safe_prefix("My Calendar!", 7) == "my_calendar__7"
+    assert _safe_prefix("...", 3) == "____3"
+    # Names that clean to the same text still get distinct prefixes — a shared
+    # prefix would duplicate tool names across servers and fail the run.
+    assert _safe_prefix("My-Server", 1) != _safe_prefix("My Server!", 2)
 
 
 def test_sanitize_tool_name():

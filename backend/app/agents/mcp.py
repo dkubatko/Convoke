@@ -98,12 +98,16 @@ def build_toolset(server: McpServer, extra_headers: dict | None = None) -> MCPTo
     # aggregator names may contain rejected characters (Smithery:
     # 'server:tool'), and prefix+name may exceed the 64-char limit
     # OpenAI-compatible APIs enforce on function names (a 400 mid-run).
-    return SanitizedToolset(toolset.prefixed(_safe_prefix(server.name)))
+    return SanitizedToolset(toolset.prefixed(_safe_prefix(server.name, server.id)))
 
 
-def _safe_prefix(name: str) -> str:
-    """Prefix tool names per server so two servers' tools can't collide."""
-    return "".join(ch if ch.isalnum() else "_" for ch in name.lower())[:24] or "mcp"
+def _safe_prefix(name: str, server_id: int) -> str:
+    """Prefix tool names per server so two servers' tools can't collide. The
+    id keeps prefixes distinct even when two names clean to the same text
+    ("My-Server" / "My Server!") — a shared prefix would duplicate tool names
+    across servers (failing the run) and collapse the prefix→server map."""
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in name.lower())[:20] or "mcp"
+    return f"{cleaned}_{server_id}"
 
 
 MAX_TOOL_NAME_LEN = 64  # OpenAI-compatible hard limit on function names
@@ -279,15 +283,11 @@ async def chat_server_prefixes(session: AsyncSession, chat_id: int) -> dict[str,
     same prefix `build_toolset` stamps onto every tool) to the server's display
     name. Lets captured tool calls be grouped back to their provider — the model
     only ever sees the prefixed name (e.g. `movieratings_search`)."""
-    names = (
-        (
-            await session.execute(
-                select(McpServer.name)
-                .join(ChatMcpServer, ChatMcpServer.mcp_server_id == McpServer.id)
-                .where(ChatMcpServer.chat_id == chat_id, McpServer.enabled.is_(True))
-            )
+    rows = (
+        await session.execute(
+            select(McpServer.id, McpServer.name)
+            .join(ChatMcpServer, ChatMcpServer.mcp_server_id == McpServer.id)
+            .where(ChatMcpServer.chat_id == chat_id, McpServer.enabled.is_(True))
         )
-        .scalars()
-        .all()
-    )
-    return {_safe_prefix(name): name for name in names}
+    ).all()
+    return {_safe_prefix(name, sid): name for sid, name in rows}

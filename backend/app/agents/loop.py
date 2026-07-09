@@ -86,8 +86,15 @@ class AgentLoop:
     async def _run_locked(self, run_id: int, chat_id: int, bot: AiogramBot) -> None:
         lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
         try:
-            async with self._semaphore, lock:
-                await execute_run(self.sessionmaker, self.embedder, self.limiter, bot, run_id)
+            # Ordering matters: chat lock BEFORE the global slot. Runs queued
+            # behind a busy chat must wait without holding a concurrency slot,
+            # or one chatty chat's backlog can occupy every slot and starve
+            # the other chats.
+            async with lock:
+                async with self._semaphore:
+                    await execute_run(
+                        self.sessionmaker, self.embedder, self.limiter, bot, run_id
+                    )
         except Exception:  # noqa: BLE001 — loop must survive
             log.exception("agent run %s crashed", run_id)
         finally:
