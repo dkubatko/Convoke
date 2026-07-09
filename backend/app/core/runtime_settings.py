@@ -136,6 +136,14 @@ TUNABLES: list[Tunable] = [
         "minutes", 1, 1440, "global", "workflows", group="Firing",
     ),
     Tunable(
+        "chunk_target_tokens", "Memory chunk size",
+        "How much conversation one searchable memory chunk holds, in embedding-model tokens. "
+        "Smaller finds specific facts more precisely; larger keeps more surrounding context "
+        "per hit. Always capped at the memory model's input window. Applies to newly closed "
+        "chunks — rebuild the memory index (Models page) to re-cut existing history.",
+        "tokens", 64, 1024, "global", "models", group="Memory",
+    ),
+    Tunable(
         "media_describe_concurrency", "Parallel media descriptions",
         "Photos/voice notes/videos described at once. Higher drains a backlog faster; keep "
         "modest for local vision/whisper models.",

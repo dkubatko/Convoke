@@ -75,11 +75,11 @@ async def remember(ctx: RunContext[AgentDeps], fact: str, key: str | None = None
                     )
                 )
             ).scalar_one_or_none()
-        # During an embedding-model swap the vector column may not match this
+        # During a memory-model swap the vector column may not match this
         # embedder yet — save unembedded; the re-embed job backfills.
-        from app.models import EmbeddingState
+        from app.memory.runtime import embedding_state_for
 
-        state = await session.get(EmbeddingState, 1)
+        state = await embedding_state_for(session, "memory")
         reembedding = state is not None and state.status == "reembedding"
         embedding = None if reembedding else (await ctx.deps.embedder.embed_passages([fact]))[0]
         if note is None:
@@ -96,9 +96,9 @@ async def remember(ctx: RunContext[AgentDeps], fact: str, key: str | None = None
 async def recall(ctx: RunContext[AgentDeps], query: str) -> str:
     """Search previously remembered notes for this chat."""
     async with ctx.deps.sessionmaker() as session:
-        from app.models import EmbeddingState
+        from app.memory.runtime import embedding_state_for
 
-        state = await session.get(EmbeddingState, 1)
+        state = await embedding_state_for(session, "memory")
         base = select(Note).where(Note.chat_id == ctx.deps.chat_id, Note.deleted.is_(False))
         if session.bind.dialect.name == "postgresql" and not (
             state is not None and state.status == "reembedding"

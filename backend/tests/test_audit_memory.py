@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 import app.memory.embeddings as embeddings
 from app.memory.chunker import chunk_chat
+from app.memory.embeddings import FakeEmbedder
 from app.memory.store import render_chunk_from_raw
 from app.models import Bot, Chat, ChatThread, Chunk, Message
 
@@ -55,7 +56,7 @@ async def test_render_chunk_excludes_interleaved_other_threads(db_sessionmaker):
 
     now = T0 + timedelta(minutes=200)  # everything cold
     async with db_sessionmaker() as s:
-        assert await chunk_chat(s, chat_id, now, LULL, 24, 0) == 1
+        assert await chunk_chat(s, chat_id, FakeEmbedder(), now, LULL, 100_000, 24, 0) == 1
         await s.commit()
 
     async with db_sessionmaker() as s:

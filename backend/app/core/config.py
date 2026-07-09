@@ -21,11 +21,16 @@ class Settings(BaseSettings):
     # built from this. Override when hosting beyond localhost.
     public_url: str = "http://localhost:8080"
 
-    # Memory / embeddings. The model itself is operator-configurable at
-    # runtime (embedding_state table, Models page); migration 020 seeds the
-    # default. Only the batch size is env config.
+    # Memory / embeddings. The models are operator-configurable at runtime
+    # (embedding_state table, one row per role, Models page); migrations seed
+    # the defaults. Only the batch size is env config.
     embedding_batch_size: int = 64
-    # A conversation segment closes after this much silence (or at max size).
+    # A conversation segment closes after this much silence, at the token
+    # budget, or at max size. The token budget is the retrieval sweet spot AND
+    # the truncation guard — it is always clamped to the memory model's input
+    # window. Operator-tunable on the Models page; applies to new chunks, a
+    # rebuild re-cuts history.
+    chunk_target_tokens: int = 512
     chunk_lull_seconds: int = 30 * 60
     chunk_max_messages: int = 24
     chunk_overlap_messages: int = 4

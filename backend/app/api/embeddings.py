@@ -1,7 +1,12 @@
-"""Embedding model selection + swap progress.
+"""Embedding model selection + swap progress, per embedder role.
 
-POST hands the worker's re-embed job a target; the current config is only
-overwritten once the model proves loadable. GET drives the Models-page card."""
+Two roles: 'intent' (the prefilter gate over workflow examples) and 'memory'
+(chat-history retrieval over chunks + notes), each with its own registry,
+state row, and re-embed lifecycle. POST hands the worker's re-embed job a
+target; the current config is only overwritten once the model proves
+loadable. Re-POSTing the current model is the supported way to REBUILD a
+role's index (memory re-cuts chunks against the chunk-size setting). GET
+drives the Models-page cards."""
 
 from datetime import datetime, timezone
 
@@ -11,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
 from app.core.security import require_operator
-from app.memory.embeddings import EMBEDDING_REGISTRY
-from app.memory.runtime import spec_for
+from app.memory.embeddings import ROLES, registry_for
+from app.memory.runtime import embedding_state_for, spec_for
 from app.models import EmbeddingState
 
 router = APIRouter(dependencies=[Depends(require_operator)])
@@ -27,6 +32,7 @@ class RegistryEntryOut(BaseModel):
 class EmbeddingStateOut(BaseModel):
     model_id: str
     dim: int
+    max_tokens: int
     status: str
     phase: str | None
     total: int
@@ -38,6 +44,7 @@ class EmbeddingStateOut(BaseModel):
 
 
 class EmbeddingsOut(BaseModel):
+    role: str
     current: EmbeddingStateOut
     registry: list[RegistryEntryOut]
 
@@ -48,8 +55,14 @@ class SwitchIn(BaseModel):
     dim: int | None = None
 
 
-async def _state_or_503(session: AsyncSession) -> EmbeddingState:
-    state = await session.get(EmbeddingState, 1)
+def _role_or_404(role: str) -> str:
+    if role not in ROLES:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown embedder role {role!r}")
+    return role
+
+
+async def _state_or_503(session: AsyncSession, role: str) -> EmbeddingState:
+    state = await embedding_state_for(session, role)
     if state is None:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, "Embedding state not initialized (migrations pending?)"
@@ -59,9 +72,11 @@ async def _state_or_503(session: AsyncSession) -> EmbeddingState:
 
 def _out(state: EmbeddingState) -> EmbeddingsOut:
     return EmbeddingsOut(
+        role=state.role,
         current=EmbeddingStateOut(
             model_id=state.model_id,
             dim=state.dim,
+            max_tokens=state.max_tokens,
             status=state.status,
             phase=state.phase,
             total=state.total,
@@ -73,27 +88,35 @@ def _out(state: EmbeddingState) -> EmbeddingsOut:
         ),
         registry=[
             RegistryEntryOut(id=s.id, label=s.label, dim=s.dim)
-            for s in EMBEDDING_REGISTRY.values()
+            for s in registry_for(state.role).values()
         ],
     )
 
 
-@router.get("/embeddings", response_model=EmbeddingsOut)
-async def get_embeddings(session: AsyncSession = Depends(get_session)) -> EmbeddingsOut:
-    return _out(await _state_or_503(session))
-
-
-@router.post("/embeddings/model", response_model=EmbeddingsOut, status_code=status.HTTP_202_ACCEPTED)
-async def switch_model(
-    body: SwitchIn, session: AsyncSession = Depends(get_session)
+@router.get("/embeddings/{role}", response_model=EmbeddingsOut)
+async def get_embeddings(
+    role: str, session: AsyncSession = Depends(get_session)
 ) -> EmbeddingsOut:
-    """Queue a model swap. The worker's re-embed job probes the model, resizes
-    the vector columns, re-embeds everything, and recalibrates workflow
-    thresholds. Search and the intent prefilter degrade gracefully meanwhile."""
-    state = await _state_or_503(session)
+    return _out(await _state_or_503(session, _role_or_404(role)))
+
+
+@router.post(
+    "/embeddings/{role}/model",
+    response_model=EmbeddingsOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def switch_model(
+    role: str, body: SwitchIn, session: AsyncSession = Depends(get_session)
+) -> EmbeddingsOut:
+    """Queue a model swap (or, with the current model, a rebuild). The
+    worker's re-embed job probes the model, resizes the role's vector
+    columns, rebuilds its vectors (memory: re-chunks history first), and for
+    intent recalibrates workflow thresholds. Search and the prefilter degrade
+    gracefully meanwhile."""
+    state = await _state_or_503(session, _role_or_404(role))
     if state.status == "reembedding":
         raise HTTPException(status.HTTP_409_CONFLICT, "A re-embed is already running")
-    spec = spec_for(body.model_id, body.dim)
+    spec = spec_for(role, body.model_id, body.dim)
     state.target = {
         "model_id": spec.id,
         "dim": spec.dim,

@@ -64,7 +64,7 @@ class MessageOut(BaseModel):
 
 class SearchHitOut(BaseModel):
     chunk_id: int
-    distance: float
+    score: float  # fused hybrid-retrieval score; ranks hits within one response
     rendered: str
 
 
@@ -415,9 +415,9 @@ async def search(
     chat_id: int, q: str, k: int = 5, session: AsyncSession = Depends(get_session)
 ) -> list[SearchHitOut]:
     await _chat_or_404(session, chat_id)
-    embedder = await ensure_embedder(session)
+    embedder = await ensure_embedder(session, "memory")
     hits = await search_chat_history(session, embedder, chat_id, q, k=max(1, min(k, 20)))
-    return [SearchHitOut(chunk_id=h.chunk_id, distance=h.distance, rendered=h.rendered) for h in hits]
+    return [SearchHitOut(chunk_id=h.chunk_id, score=h.score, rendered=h.rendered) for h in hits]
 
 
 @router.post(

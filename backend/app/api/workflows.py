@@ -221,7 +221,7 @@ async def create_workflow(
     await _set_assignments(session, wf, body.chat_ids)
     await session.commit()
     if needs_examples:
-        spawn(generate_examples(get_sessionmaker(), await ensure_embedder(session), wf.id), name=f"examples-{wf.id}")
+        spawn(generate_examples(get_sessionmaker(), await ensure_embedder(session, "intent"), wf.id), name=f"examples-{wf.id}")
     return await _out(session, wf)
 
 
@@ -245,7 +245,7 @@ async def update_workflow(
     await _set_assignments(session, wf, body.chat_ids)
     await session.commit()
     if needs_examples:
-        spawn(generate_examples(get_sessionmaker(), await ensure_embedder(session), wf.id), name=f"examples-{wf.id}")
+        spawn(generate_examples(get_sessionmaker(), await ensure_embedder(session, "intent"), wf.id), name=f"examples-{wf.id}")
     return await _out(session, wf)
 
 

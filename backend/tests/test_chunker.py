@@ -3,10 +3,19 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app.memory.chunker import chunk_chat, segment_messages
+from app.memory.embeddings import FakeEmbedder
 from app.models import Bot, Chat, Chunk, ChunkState, Message
 
 LULL = timedelta(minutes=30)
 T0 = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+# Roomy defaults so the pre-existing lull/size tests exercise their own rule,
+# not the token budget.
+BIG = 100_000
+EMB = FakeEmbedder()
+
+
+def flat_costs(messages, per: int = 10) -> dict[int, int]:
+    return {m.tg_message_id: per for m in messages}
 
 
 def msg(tg_id: int, minutes: float, text: str = "hi", thread: int | None = None) -> Message:
@@ -24,21 +33,21 @@ def msg(tg_id: int, minutes: float, text: str = "hi", thread: int | None = None)
 def test_lull_splits_segments():
     messages = [msg(1, 0), msg(2, 1), msg(3, 90), msg(4, 91)]
     now = T0 + timedelta(minutes=200)
-    segs = segment_messages(messages, now, LULL, max_messages=24, overlap=0)
+    segs = segment_messages(messages, flat_costs(messages), now, LULL, max_tokens=BIG, max_messages=24, overlap=0)
     assert [(s.tg_id_start, s.tg_id_end) for s in segs] == [(1, 2), (3, 4)]
 
 
 def test_active_tail_stays_unchunked():
     messages = [msg(1, 0), msg(2, 1), msg(3, 90), msg(4, 91)]
     now = T0 + timedelta(minutes=95)  # last burst still "hot"
-    segs = segment_messages(messages, now, LULL, max_messages=24, overlap=0)
+    segs = segment_messages(messages, flat_costs(messages), now, LULL, max_tokens=BIG, max_messages=24, overlap=0)
     assert [(s.tg_id_start, s.tg_id_end) for s in segs] == [(1, 2)]
 
 
 def test_max_size_closes_segment():
     messages = [msg(i, i * 0.1) for i in range(1, 30)]
     now = T0 + timedelta(minutes=1)  # still active — only the size-full segment closes
-    segs = segment_messages(messages, now, LULL, max_messages=10, overlap=0)
+    segs = segment_messages(messages, flat_costs(messages), now, LULL, max_tokens=BIG, max_messages=10, overlap=0)
     assert len(segs) == 2
     assert (segs[0].tg_id_start, segs[0].tg_id_end) == (1, 10)
     assert (segs[1].tg_id_start, segs[1].tg_id_end) == (11, 20)
@@ -47,7 +56,7 @@ def test_max_size_closes_segment():
 def test_overlap_carries_context():
     messages = [msg(i, i * 0.1) for i in range(1, 21)]
     now = T0 + timedelta(minutes=1)
-    segs = segment_messages(messages, now, LULL, max_messages=10, overlap=3)
+    segs = segment_messages(messages, flat_costs(messages), now, LULL, max_tokens=BIG, max_messages=10, overlap=3)
     assert len(segs[1].messages) == 13  # 10 + 3 overlap
     assert segs[1].tg_id_start == 11  # covered range excludes the overlap
 
@@ -55,7 +64,7 @@ def test_overlap_carries_context():
 def test_threads_segment_independently():
     messages = [msg(1, 0, thread=100), msg(2, 1, thread=200), msg(3, 2, thread=100)]
     now = T0 + timedelta(minutes=120)
-    segs = segment_messages(messages, now, LULL, max_messages=24, overlap=0)
+    segs = segment_messages(messages, flat_costs(messages), now, LULL, max_tokens=BIG, max_messages=24, overlap=0)
     assert {s.thread_id for s in segs} == {100, 200}
 
 
@@ -81,7 +90,7 @@ async def test_chunk_chat_advances_cursor(db_sessionmaker):
 
     now = T0 + timedelta(minutes=95)
     async with db_sessionmaker() as s:
-        n = await chunk_chat(s, chat_id, now, LULL, 24, 0)
+        n = await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 24, 0)
         await s.commit()
     assert n == 1
 
@@ -94,7 +103,7 @@ async def test_chunk_chat_advances_cursor(db_sessionmaker):
     # later, the second burst goes cold and gets chunked exactly once
     now = T0 + timedelta(minutes=200)
     async with db_sessionmaker() as s:
-        n = await chunk_chat(s, chat_id, now, LULL, 24, 0)
+        n = await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 24, 0)
         await s.commit()
     assert n == 1
     async with db_sessionmaker() as s:
@@ -115,7 +124,7 @@ async def test_chunk_chat_skips_unmonitored_thread(db_sessionmaker):
 
     now = T0 + timedelta(minutes=200)  # everything cold
     async with db_sessionmaker() as s:
-        n = await chunk_chat(s, chat_id, now, LULL, 24, 0)
+        n = await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 24, 0)
         await s.commit()
     assert n == 1  # only the General-thread segment; thread 55 is ignored
 
@@ -124,7 +133,7 @@ async def test_chunk_chat_skips_unmonitored_thread(db_sessionmaker):
         assert len(chunks) == 1 and chunks[0].thread_id is None
         # The cursor still advanced past the unmonitored tail — not stuck at 2.
         assert (await s.get(ChunkState, chat_id)).last_tg_message_id == 4
-        n = await chunk_chat(s, chat_id, now, LULL, 24, 0)
+        n = await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 24, 0)
         assert n == 0  # idempotent
 
 
@@ -141,12 +150,12 @@ async def test_forum_cursor_does_not_skip_active_thread(db_sessionmaker):
     # No: all are old — but thread 200 keeps getting messages later.
     now = T0 + timedelta(minutes=20)  # nothing cold yet
     async with db_sessionmaker() as s:
-        assert await chunk_chat(s, chat_id, now, LULL, 24, 0) == 0
+        assert await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 24, 0) == 0
         await s.commit()
 
     now = T0 + timedelta(minutes=120)  # both threads cold now
     async with db_sessionmaker() as s:
-        n = await chunk_chat(s, chat_id, now, LULL, 24, 0)
+        n = await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 24, 0)
         await s.commit()
     assert n == 2
     async with db_sessionmaker() as s:
@@ -175,14 +184,14 @@ async def test_interleaved_closed_segment_is_not_lost_behind_cursor(db_sessionma
     # hot tail — the cursor must stay below id 10, not land at 19.
     now = T0 + timedelta(minutes=120)
     async with db_sessionmaker() as s:
-        assert await chunk_chat(s, chat_id, now, LULL, 50, 0) == 0
+        assert await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 50, 0) == 0
         await s.commit()
         assert (await s.get(ChunkState, chat_id)).last_tg_message_id < 10
 
     # pass 2: everything cold — both segments close, covering every message.
     now = T0 + timedelta(minutes=240)
     async with db_sessionmaker() as s:
-        assert await chunk_chat(s, chat_id, now, LULL, 50, 0) == 2
+        assert await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 50, 0) == 2
         await s.commit()
 
     async with db_sessionmaker() as s:
@@ -211,14 +220,14 @@ async def test_full_batch_does_not_force_lull_close(db_sessionmaker):
     now = T0 + timedelta(minutes=300)  # everything long cold
     async with db_sessionmaker() as s:
         # limit=4 truncates mid-burst-B: only burst A may close, not [3,4]
-        assert await chunk_chat(s, chat_id, now, LULL, 24, 0, limit=4) == 1
+        assert await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 24, 0, limit=4) == 1
         await s.commit()
         chunks = (await s.execute(select(Chunk))).scalars().all()
         assert [(c.msg_tg_id_start, c.msg_tg_id_end) for c in chunks] == [(1, 2)]
 
     async with db_sessionmaker() as s:
         # the untruncated pass closes burst B whole — no boundary at id 4
-        assert await chunk_chat(s, chat_id, now, LULL, 24, 0) == 1
+        assert await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 24, 0) == 1
         await s.commit()
         chunks = (await s.execute(select(Chunk).order_by(Chunk.id))).scalars().all()
         assert [(c.msg_tg_id_start, c.msg_tg_id_end) for c in chunks] == [(1, 2), (3, 7)]
@@ -244,3 +253,54 @@ def test_render_thread_quotes_out_of_transcript_reply_targets():
     assert "(replying to #10)" in text  # …it is a pointer instead
     assert "(replying to #7 — message not stored)" in text
     assert "#10:" in text  # every line carries its real Telegram id
+
+
+# --- token budget: the rule that keeps chunks inside the encoder's window ---
+
+
+def test_token_budget_closes_segment():
+    # 6 rapid messages, 10 tokens each, budget 30 → close every 3 messages.
+    messages = [msg(i, i * 0.1) for i in range(1, 7)]
+    now = T0 + timedelta(minutes=200)
+    segs = segment_messages(
+        messages, flat_costs(messages), now, LULL, max_tokens=30, max_messages=24, overlap=0
+    )
+    assert [(s.tg_id_start, s.tg_id_end) for s in segs] == [(1, 3), (4, 6)]
+
+
+def test_token_budget_counts_overlap_and_trims_it():
+    # Budget 30, overlap 2: the carried tail (20 tokens) leaves room for only
+    # one 10-token message per later segment...
+    messages = [msg(i, i * 0.1) for i in range(1, 7)]
+    now = T0 + timedelta(minutes=200)
+    segs = segment_messages(
+        messages, flat_costs(messages), now, LULL, max_tokens=30, max_messages=24, overlap=2
+    )
+    for s in segs:
+        total = sum(10 for _ in s.messages)
+        assert total <= 30  # overlap included in the budget
+    covered = [(s.tg_id_start, s.tg_id_end) for s in segs]
+    assert covered[0] == (1, 3)
+    # every message is covered exactly once despite the overlap prefixes
+    flat = [m for a, b in covered for m in range(a, b + 1)]
+    assert flat == list(range(1, 7))
+
+
+def test_oversized_single_message_gets_its_own_segment():
+    messages = [msg(1, 0), msg(2, 0.1), msg(3, 0.2)]
+    costs = {1: 10, 2: 500, 3: 10}  # message 2 alone exceeds the budget
+    now = T0 + timedelta(minutes=200)
+    segs = segment_messages(messages, costs, now, LULL, max_tokens=50, max_messages=24, overlap=0)
+    assert [(s.tg_id_start, s.tg_id_end) for s in segs] == [(1, 1), (2, 2), (3, 3)]
+
+
+def test_chunk_token_budget_clamps_to_model_window():
+    from types import SimpleNamespace
+
+    from app.memory.chunker import chunk_token_budget
+
+    settings = SimpleNamespace(chunk_target_tokens=512)
+    assert chunk_token_budget(settings, None) == 512
+    assert chunk_token_budget(settings, SimpleNamespace(max_tokens=0)) == 512  # unknown window
+    assert chunk_token_budget(settings, SimpleNamespace(max_tokens=128)) == 128  # distiluse-style clamp
+    assert chunk_token_budget(settings, SimpleNamespace(max_tokens=8192)) == 512  # setting wins

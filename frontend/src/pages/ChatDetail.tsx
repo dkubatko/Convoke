@@ -186,9 +186,11 @@ function MemoryTab({ chatId }: { chatId: number }) {
                 very recent messages may not be searchable yet.
               </p>
             ) : (
-              hits.map((h) => (
+              hits.map((h, i) => (
                 <pre key={h.chunk_id} className="transcript">
-                  <span className="muted">match {(1 - h.distance).toFixed(2)}</span>
+                  {/* RRF scores rank hits but aren't a human-meaningful 0–1
+                      similarity — show the rank, not a fake percentage. */}
+                  <span className="muted">match #{i + 1}</span>
                   {'\n'}
                   {h.rendered}
                 </pre>

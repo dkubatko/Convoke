@@ -20,7 +20,7 @@ from app.intent.pipeline import IntentSweeper
 from app.media.loop import MediaLoop
 from app.memory.loop import MemoryLoop
 from app.memory.reembed import ReembedJob
-from app.memory.runtime import ensure_embedder
+from app.memory.runtime import backfill_window, ensure_embedder
 from app.scheduler.loop import ScheduleLoop
 from app.telegram.consumer import InboxConsumer
 from app.telegram.gateway import Gateway
@@ -62,32 +62,40 @@ async def main() -> None:
     try:
         async with sessionmaker() as session:
             # A completed swap outlives env defaults — follow embedding_state.
-            embedder = await ensure_embedder(session)
+            # Two roles, two resident models: the intent gate embeds short
+            # windows, memory retrieval embeds queries + chunks.
+            intent_embedder = await ensure_embedder(session, "intent")
+            memory_embedder = await ensure_embedder(session, "memory")
+            # Rows migrated before window probing exist with max_tokens=0;
+            # the chunker needs the real window to budget against.
+            await backfill_window(session, "intent")
+            await backfill_window(session, "memory")
         limiter = SendLimiter()
 
         async def sweep_forever() -> None:
             from app.intent.examples import regenerate_unready
 
-            sweeper = IntentSweeper(sessionmaker, embedder)
+            sweeper = IntentSweeper(sessionmaker, intent_embedder)
             ticks = 0
             while True:
                 try:
                     await sweeper.sweep()
                     ticks += 1
                     if ticks % 24 == 0:  # ~every 2 minutes
-                        await regenerate_unready(sessionmaker, embedder)
+                        await regenerate_unready(sessionmaker, intent_embedder)
                 except Exception:  # noqa: BLE001 — the loop must survive
                     log.exception("intent sweep failed")
                 # sweep() refreshes settings with operator overrides each pass
                 await asyncio.sleep(sweeper.settings.intent_sweep_interval_seconds)
 
+        handles = {"intent": intent_embedder, "memory": memory_embedder}
         async with asyncio.TaskGroup() as tg:
             tg.create_task(Gateway(sessionmaker).run(), name="gateway")
             tg.create_task(InboxConsumer(sessionmaker).run(), name="inbox-consumer")
-            tg.create_task(MemoryLoop(sessionmaker, embedder).run(), name="memory-loop")
-            tg.create_task(ReembedJob(sessionmaker, embedder).run(), name="reembed-job")
+            tg.create_task(MemoryLoop(sessionmaker, memory_embedder).run(), name="memory-loop")
+            tg.create_task(ReembedJob(sessionmaker, handles).run(), name="reembed-job")
             tg.create_task(MediaLoop(sessionmaker).run(), name="media-loop")
-            tg.create_task(AgentLoop(sessionmaker, embedder, limiter).run(), name="agent-loop")
+            tg.create_task(AgentLoop(sessionmaker, memory_embedder, limiter).run(), name="agent-loop")
             tg.create_task(sweep_forever(), name="intent-sweeper")
             tg.create_task(ScheduleLoop(sessionmaker).run(), name="schedule-loop")
             tg.create_task(FireExecutor(sessionmaker, limiter).run(), name="fire-executor")

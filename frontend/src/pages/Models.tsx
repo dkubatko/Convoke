@@ -1,7 +1,7 @@
 import { FormEvent, useState } from 'react'
 import { api, ApiError } from '../lib/api'
 import { timeAgo } from '../lib/format'
-import { ConnectedModel, EmbeddingsInfo, ModelTestResult, RoleAssignment } from '../lib/types'
+import { ConnectedModel, EmbedderRole, EmbeddingsInfo, ModelTestResult, RoleAssignment } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
@@ -405,7 +405,8 @@ function RoleAssignments({
   const byRole = new Map((roles.data ?? []).map((r) => [r.role, r]))
   return (
     <div className="stack">
-      <EmbeddingsCard />
+      <EmbeddingsCard role="memory" />
+      <EmbeddingsCard role="intent" />
       {ROLES.map((meta) => (
         <RoleCard
           key={meta.role}
@@ -421,10 +422,43 @@ function RoleAssignments({
 
 const CUSTOM_MODEL = '__custom__'
 
-function EmbeddingsCard() {
+const EMBEDDING_COPY: Record<
+  EmbedderRole,
+  { title: string; blurb: string; confirmBody: string }
+> = {
+  memory: {
+    title: 'Embeddings — chat memory',
+    blurb:
+      'Chat history search and remembered notes. Hybrid retrieval: this model powers the ' +
+      'semantic channel; exact words and names are also matched lexically. Retrieval-trained ' +
+      'multilingual models belong here. Switching (or re-picking the current model) re-cuts ' +
+      'history into chunks sized by the “Memory chunk size” setting and rebuilds every vector.',
+    confirmBody:
+      'History is re-chunked for the selected model and every memory vector is rebuilt. ' +
+      'Memory search and note recall return nothing until the rebuild finishes — on CPU ' +
+      'this can take a while for a large history.',
+  },
+  intent: {
+    title: 'Embeddings — intent prefilter',
+    blurb:
+      'The cheap gate that decides which conversation windows reach the intent classifier. ' +
+      'Paraphrase/similarity models belong here — retrieval models rank topics poorly for ' +
+      'this job. Switching rebuilds workflow example vectors and recalibrates thresholds.',
+    confirmBody:
+      'Workflow example vectors are rebuilt and every workflow threshold recalibrated. ' +
+      'This is quick; meanwhile windows fall through to the classifier, so nothing is missed.',
+  },
+}
+
+function EmbeddingsCard({ role }: { role: EmbedderRole }) {
   const toast = useToast()
   const confirm = useConfirm()
-  const info = useQuery<EmbeddingsInfo>(() => api.get('/api/embeddings'), [], { pollMs: 5000 })
+  const copy = EMBEDDING_COPY[role]
+  const info = useQuery<EmbeddingsInfo>(
+    () => api.get(`/api/embeddings/${role}`),
+    [role],
+    { pollMs: 5000 },
+  )
   const [selected, setSelected] = useState('')
   const [customId, setCustomId] = useState('')
   const [busy, setBusy] = useState(false)
@@ -446,21 +480,14 @@ function EmbeddingsCard() {
   const targetId = effective === CUSTOM_MODEL ? customId.trim() : effective
   const changed = targetId !== '' && targetId !== cur?.model_id
 
-  async function switchModel() {
-    if (!cur || !targetId) return
-    const ok = await confirm({
-      title: `Switch embeddings to ${targetId}?`,
-      body:
-        'Every memory vector is rebuilt with the new model. Semantic search and the ' +
-        'intent prefilter degrade until the rebuild finishes — workflow windows fall ' +
-        'through to the classifier meanwhile, so nothing is missed.',
-      actionLabel: 'Switch & re-embed',
-    })
+  async function startRebuild(modelId: string, title: string, actionLabel: string) {
+    if (!cur) return
+    const ok = await confirm({ title, body: copy.confirmBody, actionLabel })
     if (!ok) return
     setBusy(true)
     try {
-      await api.post('/api/embeddings/model', { model_id: targetId })
-      toast('ok', `Re-embedding everything with ${targetId}…`)
+      await api.post(`/api/embeddings/${role}/model`, { model_id: modelId })
+      toast('ok', `Rebuilding ${role} embeddings with ${modelId}…`)
       setSelected('')
       setCustomId('')
       void info.refetch()
@@ -474,7 +501,7 @@ function EmbeddingsCard() {
   return (
     <Card>
       <div className="page-head-row" style={{ marginBottom: 10 }}>
-        <h3 style={{ fontSize: 16 }}>Embeddings — the memory</h3>
+        <h3 style={{ fontSize: 16 }}>{copy.title}</h3>
         {cur ? (
           reembedding ? (
             <span className="pill pill--warn pill--live">
@@ -492,11 +519,7 @@ function EmbeddingsCard() {
           <span className="pill pill--idle">loading…</span>
         )}
       </div>
-      <p className="muted" style={{ marginBottom: 14 }}>
-        Chat memory, notes, and the intent prefilter all run on locally computed embeddings
-        (CPU, inside the worker). Switching models rebuilds every stored vector and
-        recalibrates workflow thresholds.
-      </p>
+      <p className="muted" style={{ marginBottom: 14 }}>{copy.blurb}</p>
       <div className="row" style={{ alignItems: 'flex-end' }}>
         <div style={{ flex: '0 1 420px' }}>
           <Field label="Model">
@@ -505,17 +528,35 @@ function EmbeddingsCard() {
               options={modelOptions}
               disabled={reembedding}
               onChange={setSelected}
-              ariaLabel="Embedding model"
+              ariaLabel={`${role} embedding model`}
             />
           </Field>
         </div>
         <button
           className="btn btn--primary"
           disabled={!changed || reembedding || busy}
-          onClick={() => void switchModel()}
+          onClick={() =>
+            void startRebuild(targetId, `Switch ${role} embeddings to ${targetId}?`, 'Switch & re-embed')
+          }
         >
           {reembedding ? 'Rebuilding…' : 'Switch & re-embed'}
         </button>
+        {role === 'memory' && cur && (
+          <button
+            className="btn"
+            disabled={changed || reembedding || busy}
+            onClick={() =>
+              void startRebuild(
+                cur.model_id,
+                'Rebuild the memory index?',
+                'Rebuild',
+              )
+            }
+            title="Re-cut history with the current chunk-size setting and re-embed, keeping the same model"
+          >
+            Rebuild index
+          </button>
+        )}
       </div>
       {/* Hint outside the 420px column so it uses the card's full width. */}
       <div className="field-hint" style={{ marginTop: 6 }}>

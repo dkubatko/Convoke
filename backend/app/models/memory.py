@@ -21,8 +21,10 @@ from app.models.base import Base
 # re-embed job re-types the columns for a new model. The live dimension is
 # owned by the DB typmod (set by migrations, changed by the swap DDL) and
 # recorded in embedding_state. SQLite variant (JSON) exists only for unit
-# tests and is dim-agnostic.
-EmbeddingVariant = Vector().with_variant(JSON(), "sqlite")
+# tests and is dim-agnostic; none_as_null makes an ORM-inserted None a SQL
+# NULL there, so the embed loop's `embedding IS NULL` predicate sees fresh
+# chunks the same way it does on Postgres.
+EmbeddingVariant = Vector().with_variant(JSON(none_as_null=True), "sqlite")
 
 IMPORT_STATUSES = ("pending", "validating", "ingesting", "done", "failed", "rejected")
 
@@ -77,16 +79,22 @@ class ChunkState(Base):
 
 
 class EmbeddingState(Base):
-    """Singleton (id=1): which embedding model owns the stored vectors, and
-    the progress of an in-flight model swap. Spec fields (prefixes) are
-    persisted so a custom HF model survives restarts without a registry
-    entry."""
+    """One row per embedder role: which model owns that role's stored vectors,
+    and the progress of an in-flight model swap. 'intent' owns
+    workflow_examples (the prefilter gate); 'memory' owns chunks + notes
+    (history search / recall). Spec fields (prefixes) are persisted so a
+    custom HF model survives restarts without a registry entry."""
 
     __tablename__ = "embedding_state"
 
-    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    role: Mapped[str] = mapped_column(Text, unique=True)  # intent | memory
     model_id: Mapped[str] = mapped_column(Text)
     dim: Mapped[int] = mapped_column(Integer)  # 0 = probe at swap time
+    # The model's input window in tokens, probed at swap time (0 = unknown,
+    # legacy rows). The chunker clamps its token budget to this so no chunk
+    # is ever silently truncated by the encoder again.
+    max_tokens: Mapped[int] = mapped_column(Integer, default=0)
     doc_prefix: Mapped[str] = mapped_column(Text, default="")
     query_prefix: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(Text, default="ready")  # ready | reembedding

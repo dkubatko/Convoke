@@ -1,11 +1,16 @@
 """Segmentation of chat messages into embeddable conversation chunks.
 
-Segments close on a conversation lull or at max size, per thread (forum
-supergroups interleave unrelated topics). A trailing overlap from the previous
-segment keeps context across boundaries. The active (unclosed) tail of a chat
-is never chunked — recent messages always enter agent context verbatim.
+Segments close on a conversation lull, at max size, or at the embedding
+model's TOKEN BUDGET, per thread (forum supergroups interleave unrelated
+topics). The token budget is the load-bearing rule: a chunk that outgrows the
+encoder's input window gets silently truncated at embed time, making its tail
+invisible to search — the exact failure that once broke memory retrieval.
+A trailing overlap from the previous segment keeps context across boundaries.
+The active (unclosed) tail of a chat is never chunked — recent messages
+always enter agent context verbatim.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -14,8 +19,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.media.render import message_body
 from app.members import load_member_names
+from app.memory.embeddings import Embedder
 from app.models import Chunk, ChunkState, Message
 from app.threads import unmonitored_threads
+
+log = logging.getLogger("convoke.memory")
+
+
+def chunk_token_budget(settings, state) -> int:
+    """The effective per-chunk token budget: the operator's setting, clamped
+    to the memory model's probed input window (embedding_state.max_tokens,
+    0 = unknown/legacy) so no chunk is cut beyond what the encoder can see."""
+    budget = settings.chunk_target_tokens
+    if state is not None and state.max_tokens:
+        budget = min(budget, state.max_tokens)
+    return budget
 
 
 @dataclass
@@ -151,20 +169,29 @@ async def resolve_reply_targets(
 
 def segment_messages(
     messages: list[Message],
+    costs: dict[int, int],
     now: datetime,
     lull: timedelta,
+    max_tokens: int,
     max_messages: int,
     overlap: int,
     truncated: bool = False,
 ) -> list[Segment]:
     """Split new messages (ascending tg_message_id) into CLOSED segments.
 
-    A segment is closed when followed by a gap > lull, when it reaches
-    max_messages, or when the chat has been silent past the lull. Trailing
-    messages in a still-active conversation stay unchunked. `truncated` means
-    the batch was cut short of the chat's real tail — the silence rule can't
-    tell a lull from the batch edge then, so it is skipped and the tail waits
-    for a later pass.
+    A segment is closed when adding the next message would exceed the token
+    budget (`costs` maps tg_message_id → rendered-line tokens, counted by the
+    embedding model's own tokenizer), when followed by a gap > lull, when it
+    reaches max_messages, or when the chat has been silent past the lull.
+    The budget covers the overlap prefix too; overlap is trimmed from the
+    oldest side when it would crowd out new content. A single message larger
+    than the whole budget becomes its own segment — the embedder truncates
+    its tail and warns, rather than dragging neighbours into the blind spot.
+
+    Trailing messages in a still-active conversation stay unchunked.
+    `truncated` means the batch was cut short of the chat's real tail — the
+    silence rule can't tell a lull from the batch edge then, so it is skipped
+    and the tail waits for a later pass.
     """
     by_thread: dict[int | None, list[Message]] = {}
     for m in messages:
@@ -173,9 +200,36 @@ def segment_messages(
     segments: list[Segment] = []
     for thread_id, msgs in by_thread.items():
         current: list[Message] = []
+        cur_tokens = 0
         prev_tail: list[Message] = []
+
+        def close(upto: list[Message]) -> tuple[list[Message], int]:
+            segments.append(
+                Segment(
+                    thread_id=thread_id,
+                    messages=prev_tail + upto,
+                    tg_id_start=upto[0].tg_message_id,
+                    tg_id_end=upto[-1].tg_message_id,
+                )
+            )
+            tail = upto[-overlap:] if overlap else []
+            return tail, sum(costs[t.tg_message_id] for t in tail)
+
+        tail_tokens = 0
         for i, m in enumerate(msgs):
+            cost = costs[m.tg_message_id]
+            if current and cur_tokens + cost > max_tokens:
+                prev_tail, tail_tokens = close(current)
+                current = []
+                cur_tokens = tail_tokens
+            if not current:
+                # Overlap is context, not content: shed the oldest tail lines
+                # rather than let them crowd the incoming message out.
+                while prev_tail and cur_tokens + cost > max_tokens:
+                    cur_tokens -= costs[prev_tail[0].tg_message_id]
+                    prev_tail = prev_tail[1:]
             current.append(m)
+            cur_tokens += cost
             is_last = i == len(msgs) - 1
             next_gap = None if is_last else msgs[i + 1].sent_at - m.sent_at
             closed = (
@@ -184,15 +238,7 @@ def segment_messages(
                 or (is_last and not truncated and (now - m.sent_at) > lull)
             )
             if closed:
-                segments.append(
-                    Segment(
-                        thread_id=thread_id,
-                        messages=prev_tail + current,
-                        tg_id_start=current[0].tg_message_id,
-                        tg_id_end=current[-1].tg_message_id,
-                    )
-                )
-                prev_tail = current[-overlap:] if overlap else []
+                prev_tail, cur_tokens = close(current)
                 current = []
     return segments
 
@@ -200,13 +246,18 @@ def segment_messages(
 async def chunk_chat(
     session: AsyncSession,
     chat_id: int,
+    embedder: Embedder,
     now: datetime,
     lull: timedelta,
+    max_tokens: int,
     max_messages: int,
     overlap: int,
     limit: int = 2000,
 ) -> int:
-    """Advance the chat's chunk cursor over newly closed segments."""
+    """Advance the chat's chunk cursor over newly closed segments.
+
+    `embedder` supplies the token counter (the memory model's own tokenizer)
+    and `max_tokens` the per-chunk budget — see segment_messages."""
     state = await session.get(ChunkState, chat_id)
     if state is None:
         state = ChunkState(chat_id=chat_id, last_tg_message_id=0)
@@ -238,13 +289,33 @@ async def chunk_chat(
     unmonitored = await unmonitored_threads(session, chat_id)
     chunkable = [m for m in messages if (m.thread_id or 0) not in unmonitored]
 
+    targets = await resolve_reply_targets(session, chat_id, list(messages))
+    names = await load_member_names(session, chat_id)
+
+    # Per-message token cost of the line as it will be rendered into a chunk.
+    # The reply annotation is costed in its long (quoted) form even when the
+    # target lands in the same chunk and renders as a short pointer — a small
+    # overestimate is safe; an underestimate reopens the truncation hole.
+    present: set[int] = set()
+    lines = [
+        render_message(m, names) + reply_annotation(m, present, targets, names)
+        for m in chunkable
+    ]
+    costs = dict(zip((m.tg_message_id for m in chunkable), await embedder.count_tokens(lines)))
+    oversize = sum(1 for c in costs.values() if c > max_tokens)
+    if oversize:
+        log.warning(
+            "chat %d: %d message(s) alone exceed the %d-token chunk budget; "
+            "each becomes its own (truncated) chunk", chat_id, oversize, max_tokens,
+        )
+
     # A full batch means more messages exist beyond it — the batch-final
     # message is not chat-final, so the silence rule must not close its
     # segment at an arbitrary boundary (import re-chunk would cut every
     # `limit` messages otherwise).
     truncated = len(messages) == limit
     segments = segment_messages(
-        chunkable, normalized_now, lull, max_messages, overlap, truncated
+        chunkable, costs, normalized_now, lull, max_tokens, max_messages, overlap, truncated
     )
 
     # The cursor is shared across threads, so it may only advance past
@@ -271,9 +342,6 @@ async def chunk_chat(
         new_cursor = min(skipped) - 1
     if new_cursor <= state.last_tg_message_id:
         return 0
-
-    targets = await resolve_reply_targets(session, chat_id, list(messages))
-    names = await load_member_names(session, chat_id)
 
     persisted = 0
     for seg in segments:

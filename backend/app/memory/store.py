@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.members import load_member_names
@@ -8,12 +8,37 @@ from app.memory.chunker import render_for_chat
 from app.memory.embeddings import Embedder
 from app.models import Chunk, Message
 
+# Hybrid retrieval: three first-stage retrievers over the same chunks, fused
+# by Reciprocal Rank Fusion. Dense vectors carry meaning and cross-lingual
+# matches; the two lexical channels carry what dense famously misses — exact
+# quotes, names, dates ("Даня, с днем рождения"). Language-agnostic on
+# purpose: FTS uses the 'simple' config (no stemmer to pick per language) and
+# pg_trgm word-similarity covers inflected forms and typos in any alphabetic
+# script. RRF_K=60 is the standard constant from the original RRF paper.
+RRF_K = 60
+CHANNEL_POOL = 30  # candidates each channel contributes before fusion
+# Explicit floor for the <% word-similarity match (the GUC default 0.6 is
+# tuned for near-exact single words; multiword conversational queries land
+# lower). Applied per-query via SET LOCAL, never globally.
+TRGM_WORD_SIM_THRESHOLD = 0.3
+
 
 @dataclass
 class SearchHit:
     chunk_id: int
-    distance: float
+    score: float  # fused RRF score — comparable within one result list only
     rendered: str
+
+
+def rrf_merge(rankings: list[list[int]], k: int = RRF_K) -> dict[int, float]:
+    """Reciprocal Rank Fusion: id → Σ 1/(k + rank). Operates on ranks, so
+    channels with incomparable raw scores (cosine vs ts_rank vs trigram)
+    fuse without calibration."""
+    scores: dict[int, float] = {}
+    for ranking in rankings:
+        for rank, chunk_id in enumerate(ranking, start=1):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank)
+    return scores
 
 
 async def render_chunk_from_raw(
@@ -46,33 +71,101 @@ async def render_chunk_from_raw(
     return await render_for_chat(session, chunk.chat_id, list(messages), names)
 
 
+async def _dense_ids(
+    session: AsyncSession, embedder: Embedder, chat_id: int, query: str
+) -> list[int]:
+    qvec = await embedder.embed_query(query)
+    return list(
+        (
+            await session.execute(
+                select(Chunk.id)
+                .where(Chunk.chat_id == chat_id, Chunk.embedding.is_not(None))
+                .order_by(Chunk.embedding.cosine_distance(qvec))
+                .limit(CHANNEL_POOL)
+            )
+        ).scalars()
+    )
+
+
+async def _fts_ids(session: AsyncSession, chat_id: int, query: str) -> list[int]:
+    """Exact-token matches, language-neutral ('simple': no stemming) and
+    accent-folded. websearch_to_tsquery is total on arbitrary user text."""
+    return list(
+        (
+            await session.execute(
+                text(
+                    "SELECT id FROM chunks "
+                    "WHERE chat_id = :chat_id AND to_tsvector('simple', f_unaccent(text)) "
+                    "      @@ websearch_to_tsquery('simple', f_unaccent(:q)) "
+                    "ORDER BY ts_rank(to_tsvector('simple', f_unaccent(text)), "
+                    "                 websearch_to_tsquery('simple', f_unaccent(:q))) DESC "
+                    "LIMIT :pool"
+                ),
+                {"chat_id": chat_id, "q": query, "pool": CHANNEL_POOL},
+            )
+        ).scalars()
+    )
+
+
+async def _trgm_ids(session: AsyncSession, chat_id: int, query: str) -> list[int]:
+    """Fuzzy word-level matches: inflected forms ('день рождения' ↔ 'Днем
+    Рождения'), typos, partial names. <% is index-backed; the threshold GUC
+    is scoped to this transaction only."""
+    # SET LOCAL can't take bind parameters; set_config(..., is_local=true) is
+    # its function form — scoped to the enclosing transaction.
+    await session.execute(
+        text("SELECT set_config('pg_trgm.word_similarity_threshold', :t, true)"),
+        {"t": str(TRGM_WORD_SIM_THRESHOLD)},
+    )
+    return list(
+        (
+            await session.execute(
+                text(
+                    "SELECT id FROM chunks "
+                    "WHERE chat_id = :chat_id AND f_unaccent(:q) <% f_unaccent(text) "
+                    "ORDER BY word_similarity(f_unaccent(:q), f_unaccent(text)) DESC "
+                    "LIMIT :pool"
+                ),
+                {"chat_id": chat_id, "q": query, "pool": CHANNEL_POOL},
+            )
+        ).scalars()
+    )
+
+
 async def search_chat_history(
     session: AsyncSession, embedder: Embedder, chat_id: int, query: str, k: int = 6
 ) -> list[SearchHit]:
     if session.bind.dialect.name != "postgresql":
-        return []  # vector search is Postgres-only; unit tests hit this path
-    from app.models import EmbeddingState
+        return []  # hybrid search is Postgres-only; unit tests hit this path
+    from app.memory.runtime import embedding_state_for
 
-    state = await session.get(EmbeddingState, 1)
+    state = await embedding_state_for(session, "memory")
     if state is not None and state.status == "reembedding":
         return []  # vectors are being rebuilt; query dim may not match yet
-    qvec = await embedder.embed_query(query)
-    rows = (
-        await session.execute(
-            select(Chunk, Chunk.embedding.cosine_distance(qvec).label("dist"))
-            .where(Chunk.chat_id == chat_id, Chunk.embedding.is_not(None))
-            .order_by(Chunk.embedding.cosine_distance(qvec))
-            .limit(k)
-        )
-    ).all()
+    rankings = [
+        await _dense_ids(session, embedder, chat_id, query),
+        await _fts_ids(session, chat_id, query),
+        await _trgm_ids(session, chat_id, query),
+    ]
+    fused = rrf_merge(rankings)
+    top = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:k]
+    if not top:
+        return []
+    chunks = {
+        c.id: c
+        for c in (
+            await session.execute(select(Chunk).where(Chunk.id.in_([cid for cid, _ in top])))
+        ).scalars()
+    }
     names = await load_member_names(session, chat_id)  # one lookup for all hits
     return [
         SearchHit(
-            chunk_id=chunk.id,
-            distance=float(dist),
-            rendered=await render_chunk_from_raw(session, chunk, names),
+            chunk_id=cid,
+            score=score,
+            rendered=await render_chunk_from_raw(session, chunks[cid], names),
         )
-        for chunk, dist in rows
+        for cid, score in top
+        if cid in chunks
     ]
 
 

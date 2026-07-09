@@ -50,7 +50,8 @@ export interface Message {
 
 export interface SearchHit {
   chunk_id: number
-  distance: number
+  // Fused hybrid-retrieval (RRF) score — orders hits within one response.
+  score: number
   rendered: string
 }
 
@@ -130,10 +131,14 @@ export interface ModelTestResult {
   transcription: CapabilityProbe
 }
 
+export type EmbedderRole = 'intent' | 'memory'
+
 export interface EmbeddingsInfo {
+  role: EmbedderRole
   current: {
     model_id: string
     dim: number
+    max_tokens: number
     status: string // ready | reembedding
     phase: string | null
     total: number
