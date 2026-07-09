@@ -15,7 +15,7 @@ import json
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 revision: str = "018"
 down_revision: str | None = "017"
@@ -56,7 +56,12 @@ def upgrade() -> None:
     )
 
     # Carry over existing role configs: one library entry per distinct
-    # endpoint, assigned to the role(s) that used it.
+    # endpoint, assigned to the role(s) that used it. Skipped under
+    # `alembic upgrade --sql`: offline mode can't read rows (and a fresh
+    # database rendered offline has none to copy anyway).
+    if context.is_offline_mode():
+        op.drop_table("model_providers")
+        return
     conn = op.get_bind()
     rows = conn.execute(
         sa.text(
@@ -112,6 +117,8 @@ def downgrade() -> None:
             "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
+    # Same offline-mode caveat as upgrade: the copy-back is a plain INSERT ..
+    # SELECT, which does render offline, so no guard is needed here.
     conn = op.get_bind()
     conn.execute(
         sa.text(

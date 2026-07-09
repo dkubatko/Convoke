@@ -23,6 +23,8 @@ services:
       CONVOKE_SECRET_KEY: ${CONVOKE_SECRET_KEY:?set in .env}
       CONVOKE_FERNET_KEY: ${CONVOKE_FERNET_KEY:?set in .env}
       CONVOKE_PUBLIC_URL: ${CONVOKE_PUBLIC_URL:-http://localhost:${CONVOKE_PORT:-8080}}
+      # Set true when serving over HTTPS so the session cookie is Secure-only
+      CONVOKE_COOKIE_SECURE: ${CONVOKE_COOKIE_SECURE:-false}
       # Optional: unlocks gated Hugging Face models (e.g. EmbeddingGemma)
       HF_TOKEN: ${HF_TOKEN:-}
       # Multipart uploads (history imports) spool to a temp file before the
@@ -40,7 +42,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      # Startup runs alembic migrations before serving; give a slow migration
+      # (e.g. a re-chunk/backfill on a large history) time to finish before
+      # failures count, or the worker's service_healthy dependency aborts.
+      start_period: 120s
 
   worker:
     build: ./backend
