@@ -18,17 +18,21 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 import ijson
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.members import invalidate_chat_memory, refresh_members_from_messages
-from app.models import Bot, Chat, ImportJob, Message, MessageAttachment
+from app.models import Bot, Chat, ImportJob, IntentCursor, Message, MessageAttachment
 
 log = logging.getLogger("convoke.import")
 
 INSERT_BATCH = 500
 MIN_LIVE_FOR_OVERLAP_CHECK = 20
+# Zip-bomb guard: generous even for years of media exports; a bomb's declared
+# sizes are orders of magnitude beyond this.
+MAX_EXTRACT_BYTES = 50 * 2**30
 
 # Telegram export media_type → attachment kind ("photo" arrives as a separate key).
 _EXPORT_MEDIA_KINDS = {
@@ -69,6 +73,9 @@ class ExportMessage:
     thread_id: int | None = None
     reply_to_tg_message_id: int | None = None
     media: ExportMedia | None = None
+    # from_id was "userN" — channel/anonymous-admin posts ("channelN") live in
+    # a different id space and must never become chat_members rows.
+    sender_is_user: bool = False
 
 
 @dataclass
@@ -109,7 +116,11 @@ def _export_file_path(raw) -> str | None:
 
 def parse_export_media(item: dict) -> ExportMedia | None:
     duration = item.get("duration_seconds")
-    duration = int(duration) if isinstance(duration, (int, float, str)) and str(duration).isdigit() else None
+    try:
+        # via float: exports can carry fractional durations (e.g. 12.7)
+        duration = int(float(duration)) if isinstance(duration, (int, float, str)) else None
+    except ValueError:
+        duration = None
     if "photo" in item:
         return ExportMedia(
             kind="photo",
@@ -155,10 +166,12 @@ def parse_export_message(item: dict) -> ExportMessage | None:
     else:
         return None
     reply_to = item.get("reply_to_message_id")
+    from_id = item.get("from_id")
     return ExportMessage(
         tg_message_id=msg_id,
         sender_name=str(item.get("from") or ""),
-        sender_id=parse_sender_id(item.get("from_id")),
+        sender_id=parse_sender_id(from_id),
+        sender_is_user=isinstance(from_id, str) and from_id.startswith("user"),
         text=text,
         sent_at=sent_at,
         reply_to_tg_message_id=int(reply_to) if isinstance(reply_to, int) else None,
@@ -192,7 +205,12 @@ def iter_export_messages(path: Path):
 def normalized_id_candidates(export_chat_id: int) -> set[int]:
     """Export ids are bare internal ids; Bot API sees -100-prefixed supergroup
     ids and negated basic-group ids."""
-    return {export_chat_id, -export_chat_id, int(f"-100{export_chat_id}")}
+    candidates = {export_chat_id, -export_chat_id}
+    if export_chat_id > 0:
+        # A (crafted) negative export id has no -100 form — int("-100-500")
+        # would raise and kill the job with an ugly detail.
+        candidates.add(int(f"-100{export_chat_id}"))
+    return candidates
 
 
 @dataclass
@@ -210,7 +228,7 @@ def scan_export(path: Path, live_by_id: dict[int, tuple[str, int | None]]) -> Ex
     scan = ExportScan()
     for m in iter_export_messages(path):
         scan.total += 1
-        if m.sender_id is not None and len(scan.senders) < 100_000:
+        if m.sender_id is not None and m.sender_is_user and len(scan.senders) < 100_000:
             scan.senders.add(m.sender_id)
         live = live_by_id.get(m.tg_message_id)
         if live is None or not live[0] or not m.text:
@@ -257,7 +275,14 @@ def validate_export(
         result.score += 2
         result.reasons.append("chat id matches")
     elif meta.chat_id is not None:
-        result.reasons.append(f"export chat id {meta.chat_id} does not match this chat")
+        # An embedded id that positively CONTRADICTS the target chat is a hard
+        # reject — title/participant points must never outvote it (that's how
+        # an accidental cross-chat upload would slip in when live history is
+        # small). Absence of an id stays a soft signal.
+        result.reasons.append(
+            f"export chat id {meta.chat_id} does not match this chat — rejected"
+        )
+        return result
 
     if meta.name and chat.title:
         ratio = SequenceMatcher(None, meta.name.lower(), chat.title.lower()).ratio()
@@ -307,6 +332,14 @@ def extract_export_zip(path: Path, job_id: int) -> tuple[Path, Path]:
     ZipFile.extract sanitizes absolute/traversal member names."""
     root = job_media_dir(job_id)
     with zipfile.ZipFile(path) as z:
+        # Sum the declared sizes before extracting (ZipExtFile caps each read
+        # at the declared size, so a lying header can't exceed this check).
+        declared = sum(info.file_size for info in z.infolist())
+        if declared > MAX_EXTRACT_BYTES:
+            raise ValueError(
+                f"export would extract to {declared / 2**30:.1f} GB — above the "
+                f"{MAX_EXTRACT_BYTES // 2**30} GB cap"
+            )
         z.extractall(root)
     candidates = sorted(root.rglob("result.json"), key=lambda p: len(p.parts))
     if not candidates:
@@ -388,78 +421,97 @@ async def _run_import(
     observed_members: dict[int, tuple[str, datetime]] = {}
 
     async def flush(batch: list[Message]) -> None:
+        nonlocal ingested
         async with sessionmaker() as session:
             session.add_all(batch)
+            try:
+                await session.flush()
+            except IntegrityError:
+                # Dedup race: a live handler can insert one of these ids after
+                # the existing_ids snapshot, and the (chat_id, tg_message_id)
+                # unique constraint then kills the whole batch. Retry row by
+                # row, re-checking existence and skipping the collided rows.
+                await session.rollback()
+                for row in batch:
+                    exists = await session.scalar(
+                        select(Message.id).where(
+                            Message.chat_id == row.chat_id,
+                            Message.tg_message_id == row.tg_message_id,
+                        )
+                    )
+                    if exists is not None:
+                        ingested -= 1
+                        continue
+                    session.add(row)
             job_row = await session.get(ImportJob, job_id)
             job_row.messages_total = total
             job_row.messages_ingested = ingested
             await session.commit()
 
-    for m in iter_export_messages(path):
-        total += 1
-        if m.sender_id is not None and m.sender_id != bot_tg_id:
-            name = (m.sender_name or "").strip()
-            prev = observed_members.get(m.sender_id)
-            if prev is None or m.sent_at >= prev[1]:
-                # Latest wins, but never let a null-named observation (deleted
-                # account trailing messages) shadow an older NAMED one — same
-                # named-first rule the migration's backfill applies.
-                if name or prev is None or not prev[0]:
-                    observed_members[m.sender_id] = (name, m.sent_at)
-        if m.tg_message_id in existing_ids:
-            continue
-        existing_ids.add(m.tg_message_id)
-        ingested += 1
-        row = Message(
-            chat_id=chat.id,
-            tg_message_id=m.tg_message_id,
-            reply_to_tg_message_id=m.reply_to_tg_message_id,
-            sender_id=m.sender_id,
-            sender_name=m.sender_name,
-            text=m.text,
-            sent_at=m.sent_at,
-            source="import",
-            import_job_id=job_id,
-        )
-        if m.media is not None:
-            row.attachment = _import_attachment(
-                m.media, chat.id, m.tg_message_id, job_id, media_root, referenced_files
+    try:
+        for m in iter_export_messages(path):
+            total += 1
+            if m.sender_id is not None and m.sender_is_user and m.sender_id != bot_tg_id:
+                name = (m.sender_name or "").strip()
+                prev = observed_members.get(m.sender_id)
+                if prev is None or m.sent_at >= prev[1]:
+                    # Latest wins, but never let a null-named observation (deleted
+                    # account trailing messages) shadow an older NAMED one — same
+                    # named-first rule the migration's backfill applies.
+                    if name or prev is None or not prev[0]:
+                        observed_members[m.sender_id] = (name, m.sent_at)
+            if m.tg_message_id in existing_ids:
+                continue
+            existing_ids.add(m.tg_message_id)
+            ingested += 1
+            row = Message(
+                chat_id=chat.id,
+                tg_message_id=m.tg_message_id,
+                reply_to_tg_message_id=m.reply_to_tg_message_id,
+                sender_id=m.sender_id,
+                sender_name=m.sender_name,
+                text=m.text,
+                sent_at=m.sent_at,
+                source="import",
+                import_job_id=job_id,
             )
-        batch.append(row)
-        if len(batch) >= INSERT_BATCH:
+            if m.media is not None:
+                row.attachment = _import_attachment(
+                    m.media, chat.id, m.tg_message_id, job_id, media_root, referenced_files
+                )
+            batch.append(row)
+            if len(batch) >= INSERT_BATCH:
+                await flush(batch)
+                batch = []
+                await asyncio.sleep(0)  # keep the event loop responsive
+        if batch:
             await flush(batch)
-            batch = []
-            await asyncio.sleep(0)  # keep the event loop responsive
-    if batch:
-        await flush(batch)
+    except Exception:
+        # Mid-ingest failure: already-committed batches stay (the operator can
+        # surgically delete the import), but the chat must not be left
+        # half-armed — mark the job failed, then run the same finalization
+        # safety net over whatever landed. run_import records the failure
+        # detail when this re-raises.
+        async with sessionmaker() as session:
+            job_row = await session.get(ImportJob, job_id)
+            job_row.status = "failed"
+            job_row.finished_at = datetime.now(timezone.utc)
+            job_row.messages_total = total
+            job_row.messages_ingested = ingested
+            await session.commit()
+        async with sessionmaker() as session:
+            await _fence_history(session, chat.id)
+            await session.commit()
+        raise
 
     # The extracted export also holds files nothing references (result.json,
     # not-imported media, contact photos…) — keep only what attachments need.
     if media_root is not None:
         await asyncio.to_thread(_prune_unreferenced, job_media_dir(job_id), referenced_files)
 
-    # Imported history predates the chunk cursor — rebuild memory for the chat.
     async with sessionmaker() as session:
         await refresh_members_from_messages(session, chat.id, observed_members)
-        await reset_chat_memory(session, chat.id)
-        # The intent sweeper must never treat imported history as fresh
-        # conversation: in a chat with no live traffic yet its cursor is 0,
-        # and without this bump every historical window would be evaluated —
-        # potentially firing workflows on conversations from months ago.
-        from sqlalchemy import func as sa_func
-
-        from app.models import ChatEvalState
-
-        max_tg_id = (
-            await session.execute(
-                select(sa_func.max(Message.tg_message_id)).where(Message.chat_id == chat.id)
-            )
-        ).scalar() or 0
-        eval_state = await session.get(ChatEvalState, chat.id)
-        if eval_state is None:
-            session.add(ChatEvalState(chat_id=chat.id, last_tg_message_id=max_tg_id))
-        else:
-            eval_state.last_tg_message_id = max(eval_state.last_tg_message_id, max_tg_id)
+        await _fence_history(session, chat.id)
         job_row = await session.get(ImportJob, job_id)
         job_row.status = "done"
         job_row.messages_total = total
@@ -468,6 +520,33 @@ async def _run_import(
         await session.commit()
     log.info("import job %s done: %d/%d messages ingested", job_id, ingested, total)
     return True
+
+
+async def _fence_history(session: AsyncSession, chat_id: int) -> None:
+    """Post-ingest safety net — runs on success AND after a mid-ingest failure,
+    since committed batches stay either way. Imported history predates the
+    chunk cursor, so memory is rebuilt for the chat; and the intent sweeper
+    must never treat imported history as fresh conversation: in a chat with
+    little live traffic its cursors sit low, and without this bump every
+    historical window would be evaluated — potentially firing workflows on
+    conversations from months ago. The sweeper reads IntentCursor (the
+    ChatEvalState write that used to live here guarded nothing — no code reads
+    that table), so advance every existing cursor for this chat past the
+    imported tail. Keys with no cursor yet are already safe: the sweeper seeds
+    new cursors at the chat's current max."""
+    await reset_chat_memory(session, chat_id)
+    max_tg_id = (
+        await session.execute(
+            select(func.max(Message.tg_message_id)).where(Message.chat_id == chat_id)
+        )
+    ).scalar() or 0
+    cursors = (
+        (await session.execute(select(IntentCursor).where(IntentCursor.chat_id == chat_id)))
+        .scalars()
+        .all()
+    )
+    for cursor in cursors:
+        cursor.last_tg_message_id = max(cursor.last_tg_message_id, max_tg_id)
 
 
 def _import_attachment(
@@ -493,7 +572,14 @@ def _import_attachment(
         sticker_emoji=media.sticker_emoji,
     )
     file = (media_root / media.path).resolve() if media_root and media.path else None
-    if file is not None and file.is_file():
+    if file is not None and not file.is_relative_to(job_media_dir(job_id).resolve()):
+        # The export JSON is untrusted: a "../job_N_media/…" or absolute path
+        # would reach — and, via describe-then-discard, later DELETE — another
+        # job's files. Anything resolving outside this job's own media dir is
+        # skipped, never followed and never fatal to the import.
+        att.status = "skipped"
+        att.error = "media path escapes the export directory"
+    elif file is not None and file.is_file():
         imports_dir = Path(get_settings().imports_dir).resolve()
         att.import_path = str(file.relative_to(imports_dir))
         att.size_bytes = file.stat().st_size

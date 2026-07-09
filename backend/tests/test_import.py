@@ -132,8 +132,8 @@ async def test_no_overlap_but_id_matches_accepts(db_sessionmaker, tmp_path):
 
 
 async def test_no_overlap_and_wrong_id_still_rejects(db_sessionmaker, tmp_path):
-    """Wrong-chat protection stands: zero overlap against substantial live
-    history with a chat id that does NOT match is still a hard reject."""
+    """Wrong-chat protection stands: a chat id that positively contradicts the
+    target is now a hard reject on its own (before overlap is even weighed)."""
     chat = await make_chat(db_sessionmaker, with_live=30)
     messages = [export_msg(i, f"old {i}") for i in range(1, 10)]
     p = write_export(tmp_path, export_payload(chat_id=999, messages=messages))
@@ -143,7 +143,7 @@ async def test_no_overlap_and_wrong_id_still_rejects(db_sessionmaker, tmp_path):
     scan = scan_export(p, live_by_id)
     verdict = validate_export(chat, meta, scan, len(live_by_id), live_senders)
     assert not verdict.ok
-    assert any("no overlap" in r for r in verdict.reasons)
+    assert any("does not match this chat — rejected" in r for r in verdict.reasons)
 
 
 async def test_matching_overlap_passes(db_sessionmaker, tmp_path):
