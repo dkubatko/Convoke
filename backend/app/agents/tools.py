@@ -5,15 +5,21 @@ from datetime import datetime, timezone
 from pydantic_ai import RunContext
 from sqlalchemy import select
 
+from sqlalchemy import func
+
 from app.agents.deps import AgentDeps
 from app.members import refresh_chat_memory_names, set_override_name
 from app.memory.chunker import render_for_chat
 from app.memory.store import search_chat_history as store_search
 from app.models import ChatMember, IntentEpisode, Message, Note
+from app.threads import unmonitored_threads
 
 MAX_NOTES_RETURNED = 8
 MAX_PAST_ACTIONS = 6
 MAX_MESSAGES_FETCHED = 30
+# A context window is same-thread by construction; the cap keeps one call's
+# render bounded (~41 messages) while still covering a whole conversation burst.
+MAX_CONTEXT_RADIUS = 20
 
 
 async def search_chat_history(ctx: RunContext[AgentDeps], query: str) -> str:
@@ -34,13 +40,16 @@ async def search_chat_history(ctx: RunContext[AgentDeps], query: str) -> str:
 async def get_messages(ctx: RunContext[AgentDeps], message_ids: list[int]) -> str:
     """Fetch specific messages from this chat by id — the #id labels shown in
     transcripts and in "(replying to #id)" annotations. Use it to read a reply
-    target or any cited message verbatim (up to 30 ids per call)."""
+    target or any cited message verbatim (up to 30 ids per call). To read the
+    conversation AROUND one message, use get_conversation_context instead."""
     ids = list(dict.fromkeys(message_ids))[:MAX_MESSAGES_FETCHED]
     if not ids:
         return "No message ids given."
     async with ctx.deps.sessionmaker() as session:
-        rows = (
-            (
+        unmonitored = await unmonitored_threads(session, ctx.deps.chat_id)
+        rows = [
+            m
+            for m in (
                 await session.execute(
                     select(Message)
                     .where(
@@ -49,18 +58,76 @@ async def get_messages(ctx: RunContext[AgentDeps], message_ids: list[int]) -> st
                     )
                     .order_by(Message.tg_message_id)
                 )
-            )
-            .scalars()
-            .all()
-        )
+            ).scalars()
+            # Unmonitored threads are excluded from memory everywhere else;
+            # an id-guess must not read them either. Rendered identically to
+            # a missing id so their existence isn't leaked.
+            if (m.thread_id or 0) not in unmonitored
+        ]
         out: list[str] = []
         if rows:
-            out.append(await render_for_chat(session, ctx.deps.chat_id, list(rows)))
+            out.append(await render_for_chat(session, ctx.deps.chat_id, rows))
         found = {m.tg_message_id for m in rows}
         for mid in ids:
             if mid not in found:
                 out.append(f"#{mid}: not in Convoke's stored history for this chat.")
     return "\n".join(out)
+
+
+async def get_conversation_context(
+    ctx: RunContext[AgentDeps], message_id: int, radius: int = 10
+) -> str:
+    """Read the conversation around one message: up to `radius` stored
+    messages before and after it (same thread), rendered as one transcript.
+    Use it when a search hit or fetched message ends mid-conversation and you
+    need what was said around it — e.g. who a greeting was addressed to, or
+    what decision followed a question. radius defaults to 10, max 20."""
+    radius = max(1, min(radius, MAX_CONTEXT_RADIUS))
+    async with ctx.deps.sessionmaker() as session:
+        anchor = (
+            await session.execute(
+                select(Message).where(
+                    Message.chat_id == ctx.deps.chat_id,
+                    Message.tg_message_id == message_id,
+                )
+            )
+        ).scalar_one_or_none()
+        not_stored = f"#{message_id}: not in Convoke's stored history for this chat."
+        if anchor is None:
+            return not_stored
+        thread = anchor.thread_id or 0
+        if thread in await unmonitored_threads(session, ctx.deps.chat_id):
+            return not_stored  # unmonitored threads stay outside memory
+        same_thread = (
+            Message.chat_id == ctx.deps.chat_id,
+            func.coalesce(Message.thread_id, 0) == thread,
+        )
+        before = (
+            (
+                await session.execute(
+                    select(Message)
+                    .where(*same_thread, Message.tg_message_id < message_id)
+                    .order_by(Message.tg_message_id.desc())
+                    .limit(radius)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        after = (
+            (
+                await session.execute(
+                    select(Message)
+                    .where(*same_thread, Message.tg_message_id > message_id)
+                    .order_by(Message.tg_message_id)
+                    .limit(radius)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        rows = list(reversed(before)) + [anchor] + list(after)
+        return await render_for_chat(session, ctx.deps.chat_id, rows)
 
 
 async def remember(ctx: RunContext[AgentDeps], fact: str, key: str | None = None) -> str:
@@ -227,6 +294,7 @@ async def set_member_name(ctx: RunContext[AgentDeps], user_id: int, name: str) -
 AGENT_TOOLS = [
     search_chat_history,
     get_messages,
+    get_conversation_context,
     remember,
     recall,
     past_workflow_actions,

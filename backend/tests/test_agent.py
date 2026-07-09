@@ -398,3 +398,60 @@ def test_extract_tool_calls_resolves_provider_and_flags_retries():
     assert extract_tool_calls(FakeResult(unknown), {}, set()) == [
         {"tool": "mystery_do", "provider": "tool", "args": "{}", "ok": True}
     ]
+
+
+async def test_get_conversation_context_windows_same_thread(db_sessionmaker):
+    from types import SimpleNamespace
+
+    from app.agents.deps import AgentDeps
+    from app.agents.tools import get_conversation_context, get_messages
+    from app.models import ChatThread
+
+    async with db_sessionmaker() as s:
+        bot = Bot(tg_bot_id=1, username="b", name="b", token_encrypted="x",
+                  can_read_all_group_messages=True)
+        s.add(bot)
+        await s.flush()
+        chat = Chat(bot_id=bot.id, tg_chat_id=-100, type="supergroup", status="authorized")
+        s.add(chat)
+        await s.flush()
+        chat_id = chat.id
+        t0 = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        # Main thread: ids 1..9 odd/even mixed with thread 55 (ids 4,6 belong
+        # to the unmonitored thread — a context window must skip them).
+        for tg in (1, 2, 3, 5, 7, 8, 9):
+            s.add(Message(chat_id=chat_id, tg_message_id=tg, sender_name="A",
+                          text=f"main-{tg}", sent_at=t0 + timedelta(minutes=tg)))
+        for tg in (4, 6):
+            s.add(Message(chat_id=chat_id, tg_message_id=tg, thread_id=55, sender_name="A",
+                          text=f"SECRET-{tg}", sent_at=t0 + timedelta(minutes=tg)))
+        s.add(ChatThread(chat_id=chat_id, thread_key=55, monitored=False))
+        await s.commit()
+
+    deps = AgentDeps(sessionmaker=db_sessionmaker, embedder=FakeEmbedder(),
+                     chat_id=chat_id, run_id=1, workflow_id=None)
+    ctx = SimpleNamespace(deps=deps)
+
+    # radius=2 around #5: two same-thread neighbours each side, thread 55 skipped
+    out = await get_conversation_context(ctx, 5, radius=2)
+    assert [f"main-{i}" in out for i in (2, 3, 5, 7, 8)] == [True] * 5
+    assert "main-1" not in out and "main-9" not in out
+    assert "SECRET" not in out
+
+    # anchor in an unmonitored thread reads as not stored (no existence leak)
+    out = await get_conversation_context(ctx, 4, radius=2)
+    assert out == "#4: not in Convoke's stored history for this chat."
+
+    # unknown anchor
+    out = await get_conversation_context(ctx, 999, radius=2)
+    assert "not in Convoke's stored history" in out
+
+    # radius is clamped to the cap (asking for 500 must not blow up)
+    out = await get_conversation_context(ctx, 5, radius=500)
+    assert "main-1" in out and "main-9" in out and "SECRET" not in out
+
+    # get_messages: unmonitored-thread ids render exactly like missing ones
+    out = await get_messages(ctx, [3, 4, 6])
+    assert "main-3" in out and "SECRET" not in out
+    assert "#4: not in Convoke's stored history for this chat." in out
+    assert "#6: not in Convoke's stored history for this chat." in out
