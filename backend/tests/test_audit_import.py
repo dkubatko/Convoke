@@ -105,7 +105,7 @@ async def test_mid_ingest_failure_still_fences_chat(db_sessionmaker, tmp_path, m
     real_iter = hi.iter_export_messages
     calls = {"n": 0}
 
-    def flaky_iter(path):
+    def flaky_iter(path, resolver=None):
         calls["n"] += 1
         if calls["n"] < 2:  # validation scan pass stays intact
             yield from real_iter(path)

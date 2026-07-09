@@ -24,7 +24,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.members import invalidate_chat_memory, refresh_members_from_messages
-from app.models import Bot, Chat, ImportJob, IntentCursor, Message, MessageAttachment
+from app.models import (
+    Bot,
+    Chat,
+    ChatThread,
+    ImportJob,
+    IntentCursor,
+    Message,
+    MessageAttachment,
+)
 
 log = logging.getLogger("convoke.import")
 
@@ -179,6 +187,57 @@ def parse_export_message(item: dict) -> ExportMessage | None:
     )
 
 
+class ThreadResolver:
+    """Reconstructs forum-topic membership from an export stream.
+
+    Exports carry no explicit topic field. A topic is born as a `topic_created`
+    service message, and every message inside it reaches that root through the
+    reply chain — Telegram fills `reply_to_message_id` with the topic root even
+    for messages that aren't explicit replies. So, fed every raw item in file
+    order (ids ascend, replies point backwards), the chain memoized per id
+    yields the topic. A chain that ends anywhere else — or breaks at a deleted
+    message — is the General thread (None), matching live ingest, which only
+    stores a thread_id for forum-topic messages.
+    """
+
+    def __init__(self) -> None:
+        self._roots: set[int] = set()
+        self.titles: dict[int, str] = {}  # topic root id -> latest title seen
+        self._thread_by_id: dict[int, int] = {}  # topic messages only
+
+    def observe(self, item: dict) -> int | None:
+        """Feed one raw export item; returns the topic root id (thread_id) for
+        a topic message, None for General/service items."""
+        try:
+            msg_id = int(item["id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if item.get("type") == "service":
+            action = item.get("action")
+            title = item.get("title")
+            if action == "topic_created":
+                self._roots.add(msg_id)
+                if isinstance(title, str) and title:
+                    self.titles[msg_id] = title
+            elif action == "topic_edit" and isinstance(title, str) and title:
+                # The edit event sits inside its topic; resolve like a message.
+                root = self._resolve(item.get("reply_to_message_id"))
+                if root is not None:
+                    self.titles[root] = title
+            return None
+        thread = self._resolve(item.get("reply_to_message_id"))
+        if thread is not None:
+            self._thread_by_id[msg_id] = thread
+        return thread
+
+    def _resolve(self, reply_to) -> int | None:
+        if not isinstance(reply_to, int):
+            return None
+        if reply_to in self._roots:
+            return reply_to
+        return self._thread_by_id.get(reply_to)
+
+
 def read_export_meta(path: Path) -> ExportMeta:
     meta = ExportMeta()
     with path.open("rb") as f:
@@ -194,11 +253,18 @@ def read_export_meta(path: Path) -> ExportMeta:
     return meta
 
 
-def iter_export_messages(path: Path):
+def iter_export_messages(path: Path, resolver: ThreadResolver | None = None):
+    """Yield parsed messages, stamping each with its reconstructed forum
+    thread_id. Every raw item (including the service messages parse drops)
+    feeds the resolver — topic roots only exist as service messages."""
+    if resolver is None:
+        resolver = ThreadResolver()
     with path.open("rb") as f:
         for item in ijson.items(f, "messages.item"):
+            thread_id = resolver.observe(item)
             parsed = parse_export_message(item)
             if parsed is not None:
+                parsed.thread_id = thread_id
                 yield parsed
 
 
@@ -448,8 +514,9 @@ async def _run_import(
             job_row.messages_ingested = ingested
             await session.commit()
 
+    resolver = ThreadResolver()
     try:
-        for m in iter_export_messages(path):
+        for m in iter_export_messages(path, resolver):
             total += 1
             if m.sender_id is not None and m.sender_is_user and m.sender_id != bot_tg_id:
                 name = (m.sender_name or "").strip()
@@ -467,6 +534,7 @@ async def _run_import(
             row = Message(
                 chat_id=chat.id,
                 tg_message_id=m.tg_message_id,
+                thread_id=m.thread_id,
                 reply_to_tg_message_id=m.reply_to_tg_message_id,
                 sender_id=m.sender_id,
                 sender_name=m.sender_name,
@@ -511,6 +579,7 @@ async def _run_import(
 
     async with sessionmaker() as session:
         await refresh_members_from_messages(session, chat.id, observed_members)
+        await seed_thread_titles(session, chat.id, resolver.titles)
         await _fence_history(session, chat.id)
         job_row = await session.get(ImportJob, job_id)
         job_row.status = "done"
@@ -520,6 +589,20 @@ async def _run_import(
         await session.commit()
     log.info("import job %s done: %d/%d messages ingested", job_id, ingested, total)
     return True
+
+
+async def seed_thread_titles(
+    session: AsyncSession, chat_id: int, titles: dict[int, str]
+) -> None:
+    """Name the topics the export revealed. Historical titles never overwrite
+    an existing one — a live capture or operator rename is always fresher than
+    the export."""
+    for thread_key, title in titles.items():
+        row = await session.get(ChatThread, (chat_id, thread_key))
+        if row is None:
+            session.add(ChatThread(chat_id=chat_id, thread_key=thread_key, title=title))
+        elif not row.title:
+            row.title = title
 
 
 async def _fence_history(session: AsyncSession, chat_id: int) -> None:

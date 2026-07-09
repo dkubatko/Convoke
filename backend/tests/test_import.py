@@ -359,3 +359,93 @@ async def test_delete_import_removes_attachments_and_media_dir(db_sessionmaker, 
         assert removed == 1
         assert (await s.execute(select(MessageAttachment))).scalars().all() == []
     assert not job_media_dir(job_id).exists()
+
+
+def topic_created(mid: int, title: str, unixtime=1_750_000_000) -> dict:
+    return {
+        "id": mid, "type": "service", "date": "2026-06-15T12:00:00",
+        "date_unixtime": str(unixtime + mid), "actor": "Alice",
+        "actor_id": "user42", "action": "topic_created", "title": title,
+    }
+
+
+def test_thread_resolver_reconstructs_topics_from_reply_chains():
+    from app.ingest.history_import import ThreadResolver, iter_export_messages
+
+    # Topic root 10; direct "reply" to the root (how Telegram marks non-reply
+    # topic messages), a chained reply, a General message, and a broken chain.
+    payload = export_payload(messages=[
+        export_msg(1, "general before topics"),
+        topic_created(10, "Gacha"),
+        {**export_msg(11, "in topic"), "reply_to_message_id": 10},
+        {**export_msg(12, "reply within topic"), "reply_to_message_id": 11},
+        export_msg(13, "general after topics"),
+        {**export_msg(14, "reply to deleted"), "reply_to_message_id": 999},
+        {  # topic_edit renames the topic via its own reply linkage
+            "id": 15, "type": "service", "date": "2026-06-15T12:00:00",
+            "date_unixtime": "1750000015", "actor": "Alice", "actor_id": "user42",
+            "action": "topic_edit", "title": "Gacha v2", "reply_to_message_id": 10,
+        },
+    ])
+    import json as _json
+    from pathlib import Path as _Path
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = _Path(td) / "export.json"
+        p.write_text(_json.dumps(payload))
+        resolver = ThreadResolver()
+        by_id = {m.tg_message_id: m for m in iter_export_messages(p, resolver)}
+    assert by_id[1].thread_id is None
+    assert by_id[11].thread_id == 10
+    assert by_id[12].thread_id == 10  # chained reply resolves through 11
+    assert by_id[13].thread_id is None
+    assert by_id[14].thread_id is None  # broken chain falls back to General
+    assert resolver.titles == {10: "Gacha v2"}  # edit wins over create
+
+
+async def test_import_populates_thread_ids_and_titles(db_sessionmaker, tmp_path):
+    from app.models import ChatThread
+
+    chat = await make_chat(db_sessionmaker)
+    messages = [
+        export_msg(1, "general"),
+        topic_created(10, "Gacha"),
+        {**export_msg(11, "roll"), "reply_to_message_id": 10},
+        {**export_msg(12, "re: roll"), "reply_to_message_id": 11},
+    ]
+    p = write_export(tmp_path, export_payload(messages=messages))
+    async with db_sessionmaker() as s:
+        # An operator-titled thread row must survive the import untouched.
+        s.add(ChatThread(chat_id=chat.id, thread_key=10, title="My Name"))
+        job = ImportJob(chat_id=chat.id, filename="export.json")
+        s.add(job)
+        await s.commit()
+        job_id = job.id
+
+    await run_import(db_sessionmaker, job_id, p)
+
+    async with db_sessionmaker() as s:
+        job = await s.get(ImportJob, job_id)
+        assert job.status == "done", job.detail
+        rows = (
+            await s.execute(select(Message).where(Message.source == "import"))
+        ).scalars().all()
+        threads = {m.tg_message_id: m.thread_id for m in rows}
+        assert threads == {1: None, 11: 10, 12: 10}
+        assert (await s.get(ChatThread, (chat.id, 10))).title == "My Name"
+
+
+async def test_import_seeds_topic_title_when_absent(db_sessionmaker, tmp_path):
+    from app.models import ChatThread
+
+    chat = await make_chat(db_sessionmaker)
+    messages = [topic_created(10, "Gacha"), {**export_msg(11, "hi"), "reply_to_message_id": 10}]
+    p = write_export(tmp_path, export_payload(messages=messages))
+    async with db_sessionmaker() as s:
+        job = ImportJob(chat_id=chat.id, filename="export.json")
+        s.add(job)
+        await s.commit()
+        job_id = job.id
+    await run_import(db_sessionmaker, job_id, p)
+    async with db_sessionmaker() as s:
+        assert (await s.get(ChatThread, (chat.id, 10))).title == "Gacha"
