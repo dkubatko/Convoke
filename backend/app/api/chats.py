@@ -1,11 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.bots import ChatOut
 from app.core.config import get_settings
 from app.core.db import get_session, get_sessionmaker
 from app.core.tasks import spawn
@@ -88,6 +89,13 @@ async def _chat_or_404(session: AsyncSession, chat_id: int) -> Chat:
     return chat
 
 
+@router.get("/chats/{chat_id}", response_model=ChatOut)
+async def get_chat(chat_id: int, session: AsyncSession = Depends(get_session)) -> Chat:
+    """Single chat — lets the detail header poll for status changes (e.g. the
+    admin authorizing in Telegram) instead of fetching the whole list once."""
+    return await _chat_or_404(session, chat_id)
+
+
 # ---------- threads (per-thread monitoring) ----------
 
 
@@ -110,7 +118,8 @@ class ThreadOut(BaseModel):
 
 class ThreadUpdate(BaseModel):
     monitored: bool | None = None
-    title: str | None = None  # "" or whitespace clears back to the default
+    # "" or whitespace clears back to the default
+    title: str | None = Field(default=None, max_length=128)
 
 
 async def _list_threads(
@@ -215,6 +224,19 @@ async def update_thread(
     await _chat_or_404(session, chat_id)
     row = await session.get(ChatThread, (chat_id, thread_key))
     if row is None:
+        # Only keys _list_threads would discover are real: 0 (General) always,
+        # otherwise the thread must have messages. Anything else would mint a
+        # phantom topic row for an arbitrary integer.
+        if thread_key != 0:
+            has_messages = (
+                await session.execute(
+                    select(Message.id)
+                    .where(Message.chat_id == chat_id, Message.thread_id == thread_key)
+                    .limit(1)
+                )
+            ).first()
+            if has_messages is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "No such thread in this chat")
         row = ChatThread(chat_id=chat_id, thread_key=thread_key)
         session.add(row)
     if body.monitored is not None:
@@ -234,12 +256,14 @@ class MemberOut(BaseModel):
 
 
 class MemberUpdate(BaseModel):
-    display_name: str | None  # blank/None clears the override back to auto_name
+    # blank/None clears the override back to auto_name
+    display_name: str | None = Field(max_length=64)
 
 
 class MemberOverride(BaseModel):
     sender_id: int
-    display_name: str | None  # blank/None clears the override back to auto_name
+    # blank/None clears the override back to auto_name
+    display_name: str | None = Field(max_length=64)
 
 
 def _member_out(m: ChatMember) -> MemberOut:
@@ -422,11 +446,20 @@ async def start_import(
     # A bare result.json or a full export ZIP (with media) — sniffed, not
     # extension-matched, by run_import.
     dest = imports_dir / f"job_{job.id}.upload"
-    with dest.open("wb") as out:
-        while chunk := await file.read(1 << 20):
-            out.write(chunk)
-
-    spawn(run_import(get_sessionmaker(), job.id, dest), name=f"import-{job.id}")
+    try:
+        with dest.open("wb") as out:
+            while chunk := await file.read(1 << 20):
+                out.write(chunk)
+        spawn(run_import(get_sessionmaker(), job.id, dest), name=f"import-{job.id}")
+    except Exception:
+        # A mid-upload disconnect would otherwise strand the job as `pending`
+        # forever, and the 409 guard above blocks every future import.
+        dest.unlink(missing_ok=True)
+        job.status = "failed"
+        job.detail = "Upload interrupted before the file arrived"
+        job.finished_at = datetime.now(timezone.utc)
+        await session.commit()
+        raise
     return job
 
 

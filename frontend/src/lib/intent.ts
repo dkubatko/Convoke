@@ -68,7 +68,20 @@ export function statusChip(
     return { label: 'watching a possible topic', tone: 'accent' }
   if (open.some((e) => e.status === 'satisfied'))
     return { label: 'handled — watching for follow-ups', tone: 'ok' }
-  const stage = cursors[0]?.last_stage
+  // A forum chat has one cursor per thread — surface an error in ANY thread,
+  // otherwise fall back to wherever the detector last actually looked.
+  const cursor =
+    cursors.find((c) => c.last_stage === 'classifier_error') ??
+    cursors.reduce<CursorInfo | undefined>(
+      (latest, c) =>
+        c.last_evaluated_at &&
+        (!latest?.last_evaluated_at || c.last_evaluated_at > latest.last_evaluated_at)
+          ? c
+          : latest,
+      undefined,
+    ) ??
+    cursors[0]
+  const stage = cursor?.last_stage
   switch (stage) {
     case 'classifier_error':
       return { label: 'model error', tone: 'err' }
@@ -153,17 +166,19 @@ export function funnel(
   const classifier: FunnelStep =
     stage === 'evaluating' || stage === 'rechecking'
       ? { name: 'Classifier', status: 'wait', detail: 'running…' }
-      : stage === 'suppressed'
-        ? { name: 'Classifier', status: 'stop', detail: 'continues a handled topic' }
-        : stage === 'concluded'
-          ? { name: 'Classifier', status: 'stop', detail: 'group dropped it' }
-          : reachedClassifier
-            ? {
-                name: 'Classifier',
-                status: stage === 'no_match' ? 'fail' : 'pass',
-                detail: conf != null ? `conf ${conf.toFixed(2)}` : undefined,
-              }
-            : { name: 'Classifier', status: 'skip' }
+      : stage === 'classifier_error'
+        ? { name: 'Classifier', status: 'fail', detail: 'model error' }
+        : stage === 'suppressed'
+          ? { name: 'Classifier', status: 'stop', detail: 'continues a handled topic' }
+          : stage === 'concluded'
+            ? { name: 'Classifier', status: 'stop', detail: 'group dropped it' }
+            : reachedClassifier
+              ? {
+                  name: 'Classifier',
+                  status: stage === 'no_match' ? 'fail' : 'pass',
+                  detail: conf != null ? `conf ${conf.toFixed(2)}` : undefined,
+                }
+              : { name: 'Classifier', status: 'skip' }
 
   const active = open.find((e) => e.status === 'candidate')
   // Count REQUIRED names present — never raw keys, so a stray slot the model

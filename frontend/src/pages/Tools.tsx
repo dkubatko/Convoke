@@ -178,9 +178,13 @@ export default function Tools() {
       danger: true,
     })
     if (!ok) return
-    await api.delete(`/api/mcp-servers/${server.id}`)
-    toast('ok', `Removed ${server.name}`)
-    void servers.refetch()
+    try {
+      await api.delete(`/api/mcp-servers/${server.id}`)
+      toast('ok', `Removed ${server.name}`)
+      void servers.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : `Couldn’t remove ${server.name}`)
+    }
   }
 
   return (

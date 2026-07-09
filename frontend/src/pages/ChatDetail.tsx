@@ -48,14 +48,12 @@ export default function ChatDetail() {
   const id = Number(chatId)
   const [tab, setTab] = useUrlTab(TABS, 'Memory')
 
-  const chat = useQuery<Chat | undefined>(
-    async () => (await api.get<Chat[]>('/api/chats')).find((c) => c.id === id),
-    [id],
-  )
+  // Polled so the header follows status changes — a chat waiting on admin
+  // authorization flips to live without a manual reload.
+  const chat = useQuery<Chat>(() => api.get(`/api/chats/${id}`), [id], { pollMs: 5000 })
 
   if (chat.loading) return <CardSkeleton lines={5} />
-  if (chat.error) return <ErrorNote message={chat.error} onRetry={() => void chat.refetch()} />
-  if (!chat.data) {
+  if (chat.error === 'Chat not found' || (!chat.error && !chat.data)) {
     return (
       <EmptyState
         title="Chat not found"
@@ -63,6 +61,9 @@ export default function ChatDetail() {
         action={<Link className="btn btn--quiet" to="/chats">Back to chats</Link>}
       />
     )
+  }
+  if (chat.error || !chat.data) {
+    return <ErrorNote message={chat.error!} onRetry={() => void chat.refetch()} />
   }
 
   const c = chat.data
@@ -1032,10 +1033,11 @@ function ImportTab({ chatId }: { chatId: number }) {
           Bots can't read messages from before they joined — that history has to come from a chat
           export. Ask a chat admin to open the chat in <b>Telegram Desktop</b> → ⋯ →{' '}
           <b>Export chat history</b> → format <b>JSON</b>, then upload the <code>result.json</code>{' '}
-          here. The file is checked against live history before anything is trusted.
+          — or the whole export ZIP to include media — here. The file is checked against live
+          history before anything is trusted.
         </p>
         <div className="row">
-          <input ref={fileRef} type="file" accept=".json,application/json" style={{ flex: '1 1 280px' }} />
+          <input ref={fileRef} type="file" accept=".json,.zip,application/json,application/zip" style={{ flex: '1 1 280px' }} />
           <button className="btn btn--primary" onClick={() => void upload()} disabled={uploading}>
             {uploading ? 'Uploading…' : 'Upload export'}
           </button>
@@ -1070,7 +1072,8 @@ function ImportTab({ chatId }: { chatId: number }) {
                   </td>
                   <td className="muted" style={{ maxWidth: 340 }}>{j.detail}</td>
                   <td style={{ textAlign: 'right' }}>
-                    {j.status === 'done' && (
+                    {/* A failed job can still hold committed partial rows — offer the same cleanup. */}
+                    {(j.status === 'done' || (j.status === 'failed' && j.messages_ingested > 0)) && (
                       <button className="btn btn--danger btn--sm" onClick={() => void removeImport(j)}>
                         Delete import
                       </button>

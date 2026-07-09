@@ -11,7 +11,17 @@ async function parseError(resp: Response): Promise<ApiError> {
   let detail = resp.statusText || `Request failed (${resp.status})`
   try {
     const body = await resp.json()
-    if (typeof body.detail === 'string') detail = body.detail
+    if (typeof body.detail === 'string') {
+      detail = body.detail
+    } else if (Array.isArray(body.detail)) {
+      // FastAPI 422 validation errors: [{loc, msg, …}, …] → readable text.
+      const msgs = body.detail
+        .map((d: { msg?: string; loc?: (string | number)[] }) =>
+          d?.msg ? [d.loc?.slice(1).join('.'), d.msg].filter(Boolean).join(': ') : null,
+        )
+        .filter(Boolean)
+      if (msgs.length) detail = msgs.join('; ')
+    }
   } catch {
     // non-JSON error body
   }
