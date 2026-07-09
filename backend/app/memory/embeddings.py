@@ -9,9 +9,13 @@ paraphrase models need none, but a custom model can carry its own.
 """
 
 import asyncio
+import logging
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from typing import Protocol
+
+log = logging.getLogger("convoke.embeddings")
 
 _model = None  # per-subprocess singleton
 _model_name: str | None = None
@@ -102,7 +106,17 @@ class LocalEmbedder:
         out: list[list[float]] = []
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i : i + self.batch_size]
-            out.extend(await loop.run_in_executor(self._pool, _encode, self.spec.id, batch))
+            try:
+                vecs = await loop.run_in_executor(self._pool, _encode, self.spec.id, batch)
+            except BrokenProcessPool:
+                # The subprocess died (typically OOM loading a heavy model).
+                # A broken pool rejects every later job, so recreate it and
+                # retry once rather than wedging all embedding until restart.
+                log.warning("embedding subprocess died; recreating pool and retrying once")
+                self._pool.shutdown(wait=False, cancel_futures=True)
+                self._pool = ProcessPoolExecutor(max_workers=1)
+                vecs = await loop.run_in_executor(self._pool, _encode, self.spec.id, batch)
+            out.extend(vecs)
         return out
 
     async def embed_passages(self, texts: list[str]) -> list[list[float]]:

@@ -154,6 +154,76 @@ async def test_forum_cursor_does_not_skip_active_thread(db_sessionmaker):
         assert state.last_tg_message_id == 3
 
 
+async def test_interleaved_closed_segment_is_not_lost_behind_cursor(db_sessionmaker):
+    """Forum threads interleave in tg-id space: a closed segment held back by
+    another thread's active tail may START below the safe cursor point. The
+    cursor must clamp under it so its early messages are re-covered on the
+    next pass — not stranded behind the cursor forever."""
+    chat_id = await _setup_chat(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        # thread 2: one conversation spanning ids 10-14 and 30-32 (gaps < lull)
+        rows = [msg(mid, i, thread=2) for i, mid in enumerate(range(10, 15))]
+        rows += [msg(mid, 10 + i, thread=2) for i, mid in enumerate(range(30, 33))]
+        # thread 1: ACTIVE tail at ids 20-22, wedged between thread 2's halves
+        rows += [msg(mid, 117 + i, thread=1) for i, mid in enumerate(range(20, 23))]
+        for m in rows:
+            m.chat_id = chat_id
+            s.add(m)
+        await s.commit()
+
+    # pass 1: thread 2's segment [10..32] is closed but held back by thread 1's
+    # hot tail — the cursor must stay below id 10, not land at 19.
+    now = T0 + timedelta(minutes=120)
+    async with db_sessionmaker() as s:
+        assert await chunk_chat(s, chat_id, now, LULL, 50, 0) == 0
+        await s.commit()
+        assert (await s.get(ChunkState, chat_id)).last_tg_message_id < 10
+
+    # pass 2: everything cold — both segments close, covering every message.
+    now = T0 + timedelta(minutes=240)
+    async with db_sessionmaker() as s:
+        assert await chunk_chat(s, chat_id, now, LULL, 50, 0) == 2
+        await s.commit()
+
+    async with db_sessionmaker() as s:
+        chunks = (await s.execute(select(Chunk))).scalars().all()
+        for m in rows:  # every message lands in exactly one chunk of its thread
+            covering = [
+                c for c in chunks
+                if c.thread_id == m.thread_id
+                and c.msg_tg_id_start <= m.tg_message_id <= c.msg_tg_id_end
+            ]
+            assert len(covering) == 1, f"message {m.tg_message_id} in {len(covering)} chunks"
+
+
+async def test_full_batch_does_not_force_lull_close(db_sessionmaker):
+    """When the fetch batch is full, the batch-final message is not chat-final:
+    the silence rule must not cut a segment at the batch edge. The tail stays
+    unclosed and joins the rest of its conversation on a later pass."""
+    chat_id = await _setup_chat(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        # burst A (ids 1-2), lull, burst B (ids 3-7) — one conversation each
+        for m in [msg(1, 0), msg(2, 1)] + [msg(i, 97 + i) for i in range(3, 8)]:
+            m.chat_id = chat_id
+            s.add(m)
+        await s.commit()
+
+    now = T0 + timedelta(minutes=300)  # everything long cold
+    async with db_sessionmaker() as s:
+        # limit=4 truncates mid-burst-B: only burst A may close, not [3,4]
+        assert await chunk_chat(s, chat_id, now, LULL, 24, 0, limit=4) == 1
+        await s.commit()
+        chunks = (await s.execute(select(Chunk))).scalars().all()
+        assert [(c.msg_tg_id_start, c.msg_tg_id_end) for c in chunks] == [(1, 2)]
+
+    async with db_sessionmaker() as s:
+        # the untruncated pass closes burst B whole — no boundary at id 4
+        assert await chunk_chat(s, chat_id, now, LULL, 24, 0) == 1
+        await s.commit()
+        chunks = (await s.execute(select(Chunk).order_by(Chunk.id))).scalars().all()
+        assert [(c.msg_tg_id_start, c.msg_tg_id_end) for c in chunks] == [(1, 2), (3, 7)]
+
+
 def test_render_thread_quotes_out_of_transcript_reply_targets():
     """A reply whose target is off-screen gets the quoted original appended;
     a reply to a visible message gets a pure pointer; a reply to a message

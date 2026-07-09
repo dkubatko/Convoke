@@ -155,12 +155,16 @@ def segment_messages(
     lull: timedelta,
     max_messages: int,
     overlap: int,
+    truncated: bool = False,
 ) -> list[Segment]:
     """Split new messages (ascending tg_message_id) into CLOSED segments.
 
     A segment is closed when followed by a gap > lull, when it reaches
     max_messages, or when the chat has been silent past the lull. Trailing
-    messages in a still-active conversation stay unchunked.
+    messages in a still-active conversation stay unchunked. `truncated` means
+    the batch was cut short of the chat's real tail — the silence rule can't
+    tell a lull from the batch edge then, so it is skipped and the tail waits
+    for a later pass.
     """
     by_thread: dict[int | None, list[Message]] = {}
     for m in messages:
@@ -177,7 +181,7 @@ def segment_messages(
             closed = (
                 len(current) >= max_messages
                 or (next_gap is not None and next_gap > lull)
-                or (is_last and (now - m.sent_at) > lull)
+                or (is_last and not truncated and (now - m.sent_at) > lull)
             )
             if closed:
                 segments.append(
@@ -200,6 +204,7 @@ async def chunk_chat(
     lull: timedelta,
     max_messages: int,
     overlap: int,
+    limit: int = 2000,
 ) -> int:
     """Advance the chat's chunk cursor over newly closed segments."""
     state = await session.get(ChunkState, chat_id)
@@ -213,7 +218,7 @@ async def chunk_chat(
                 select(Message)
                 .where(Message.chat_id == chat_id, Message.tg_message_id > state.last_tg_message_id)
                 .order_by(Message.tg_message_id)
-                .limit(2000)
+                .limit(limit)
             )
         )
         .scalars()
@@ -233,12 +238,22 @@ async def chunk_chat(
     unmonitored = await unmonitored_threads(session, chat_id)
     chunkable = [m for m in messages if (m.thread_id or 0) not in unmonitored]
 
-    segments = segment_messages(chunkable, normalized_now, lull, max_messages, overlap)
+    # A full batch means more messages exist beyond it — the batch-final
+    # message is not chat-final, so the silence rule must not close its
+    # segment at an arbitrary boundary (import re-chunk would cut every
+    # `limit` messages otherwise).
+    truncated = len(messages) == limit
+    segments = segment_messages(
+        chunkable, normalized_now, lull, max_messages, overlap, truncated
+    )
 
     # The cursor is shared across threads, so it may only advance past
     # messages every monitored thread has closed — otherwise an active thread's
-    # unchunked tail would be skipped forever. Segments beyond the safe
-    # point are recomputed (identically) on a later pass.
+    # unchunked tail would be skipped forever. Threads interleave in tg-id
+    # space, so a closed segment held back this way may still START at or
+    # below that point; clamp under any such segment (to a fixpoint) so it is
+    # recomputed in full on a later pass instead of losing its early messages
+    # behind the cursor.
     closed_end: dict[int | None, int] = {}
     for seg in segments:
         closed_end[seg.thread_id] = max(closed_end.get(seg.thread_id, 0), seg.tg_id_end)
@@ -248,6 +263,12 @@ async def chunk_chat(
         if m.tg_message_id > closed_end.get(m.thread_id, 0)
     ]
     new_cursor = min(unclosed) - 1 if unclosed else messages[-1].tg_message_id
+    while skipped := [
+        s.tg_id_start
+        for s in segments
+        if s.tg_id_end > new_cursor and s.tg_id_start <= new_cursor
+    ]:
+        new_cursor = min(skipped) - 1
     if new_cursor <= state.last_tg_message_id:
         return 0
 

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.members import load_member_names
@@ -29,6 +29,11 @@ async def render_chunk_from_raw(
                 select(Message)
                 .where(
                     Message.chat_id == chunk.chat_id,
+                    # Threads interleave in tg-id space, so the id range alone
+                    # would pull in other threads' messages (including
+                    # unmonitored ones). Match the chunker's thread keying:
+                    # NULL == 0 == the General/main thread.
+                    func.coalesce(Message.thread_id, 0) == (chunk.thread_id or 0),
                     Message.tg_message_id >= chunk.msg_tg_id_start,
                     Message.tg_message_id <= chunk.msg_tg_id_end,
                 )
