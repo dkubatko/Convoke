@@ -21,7 +21,11 @@ async def search_chat_history(ctx: RunContext[AgentDeps], query: str) -> str:
     imported history from before you joined). Use for anything that happened
     earlier than the recent messages you were shown."""
     async with ctx.deps.sessionmaker() as session:
-        hits = await store_search(session, ctx.deps.embedder, ctx.deps.chat_id, query, k=4)
+        # k=6, not 4: conversations ABOUT a fact (incl. with the bot) often
+        # outscore the fact itself — measured live, the true answer sits at
+        # fused rank 5-6 under that pressure. The model is good at picking
+        # the right excerpt from a slightly bigger pile; two more are cheap.
+        hits = await store_search(session, ctx.deps.embedder, ctx.deps.chat_id, query, k=6)
     if not hits:
         return "No matching history found."
     return "\n\n---\n\n".join(h.rendered for h in hits)
