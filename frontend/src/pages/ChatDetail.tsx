@@ -707,7 +707,7 @@ function ThreadsTab({ chatId }: { chatId: number }) {
 
   return (
     <div className="stack">
-      <p className="muted" style={{ fontSize: 12.5, margin: 0, maxWidth: 620 }}>
+      <p className="muted tab-desc">
         Turn a thread off and Convoke ignores it completely — no workflows, nothing added to memory,
         and no replies, even to a direct mention. Names are yours to set, for display only.
       </p>
@@ -869,7 +869,7 @@ function MembersTab({ chatId }: { chatId: number }) {
 
   return (
     <div className="stack">
-      <p className="muted" style={{ fontSize: 12.5, margin: 0, maxWidth: 640 }}>
+      <p className="muted tab-desc">
         How the bot refers to each person — in the conversation it reads, in its memory, and in its
         replies. The user id is fixed and the handle is filled in from Telegram when available. Click
         a name to rename it; edits apply — and rebuild this chat’s memory under the new names — only

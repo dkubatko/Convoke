@@ -489,6 +489,12 @@ td.muted,
 .muted {
   color: var(--ink-2);
 }
+/* Intro/description line at the top of a tab — full width (matches the card
+   below), no inline styling needed at the call site. */
+.tab-desc {
+  margin: 0;
+  font-size: 12.5px;
+}
 
 td.mono {
   font-family: var(--font-mono);
