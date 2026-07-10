@@ -13,7 +13,12 @@ from app.core.tasks import spawn
 from app.core.security import require_operator
 from app.ingest.history_import import delete_import, run_import
 from app.media.render import message_body
-from app.members import load_member_names, refresh_chat_memory_names, set_override_name
+from app.members import (
+    load_member_names,
+    refresh_chat_memory_names,
+    set_bot_flag,
+    set_override_name,
+)
 from app.memory.chunker import resolve_reply_targets
 from app.memory.runtime import ensure_embedder
 from app.memory.store import search_chat_history
@@ -253,17 +258,20 @@ class MemberOut(BaseModel):
     auto_name: str  # latest observed name (raw)
     override_name: str | None  # operator/agent label
     display_name: str  # effective: override_name or auto_name
+    is_bot: bool  # messages render [bot] and are excluded from memory scoring
 
 
 class MemberUpdate(BaseModel):
     # blank/None clears the override back to auto_name
     display_name: str | None = Field(max_length=64)
+    is_bot: bool | None = None  # None: leave unchanged
 
 
 class MemberOverride(BaseModel):
     sender_id: int
     # blank/None clears the override back to auto_name
     display_name: str | None = Field(max_length=64)
+    is_bot: bool | None = None  # None: leave unchanged
 
 
 def _member_out(m: ChatMember) -> MemberOut:
@@ -273,6 +281,7 @@ def _member_out(m: ChatMember) -> MemberOut:
         auto_name=m.auto_name,
         override_name=m.override_name,
         display_name=m.display_name,
+        is_bot=m.is_bot,
     )
 
 
@@ -311,6 +320,9 @@ async def update_chat_members(
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, f"No member {o.sender_id} in this chat"
             )
+        if o.is_bot is not None:
+            _, flag_changed = await set_bot_flag(session, chat_id, o.sender_id, o.is_bot)
+            changed = changed or flag_changed
         changed_any = changed_any or changed
     if changed_any:
         # History embeds the old names — refresh in place, no memory outage.
@@ -330,6 +342,11 @@ async def update_chat_member(
     member, changed = await set_override_name(session, chat_id, sender_id, body.display_name)
     if member is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such member in this chat")
+    if body.is_bot is not None:
+        # The flag changes both the [bot] tag in renders and the embedding
+        # input, so it shares the rename contract: real change -> refresh.
+        _, flag_changed = await set_bot_flag(session, chat_id, sender_id, body.is_bot)
+        changed = changed or flag_changed
     out = _member_out(member)
     if changed:
         # History is rendered/embedded under the old name — refresh it in

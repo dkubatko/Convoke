@@ -294,6 +294,8 @@ export interface Member {
   auto_name: string
   override_name: string | null
   display_name: string
+  // Messages render tagged [bot] and are excluded from memory scoring.
+  is_bot: boolean
 }
 
 export interface AppSetting {

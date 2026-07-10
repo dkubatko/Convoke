@@ -127,16 +127,10 @@ def render_transcript(
     for i, m in enumerate(msgs):
         if i == len(context):
             lines.append("--- new messages to classify ---")
-        lines.append(_render_line(m, names) + reply_annotation(m, present, targets, names))
+        # render_message tags bot-authored lines [bot] itself (source='self'
+        # covers the operating bot — the only bot that appears in live windows).
+        lines.append(render_message(m, names) + reply_annotation(m, present, targets, names))
     return "\n".join(lines)
-
-
-def _render_line(m: Message, names: dict[int, str]) -> str:
-    """One classifier transcript line — the shared #id line, with the bot's
-    own messages tagged [bot] (they are dialogue context, never window or
-    prefilter input)."""
-    base = render_message(m, names)
-    return f"[bot] {base}" if m.source == "self" else base
 
 
 def render_episodes(episodes: list[IntentEpisode]) -> str:
@@ -198,5 +192,5 @@ def build_recheck_prompt(
         trigger_prompt=workflow.trigger_prompt,
         summary=episode.summary or "(no summary)",
         slots=render_slots(episode.slots or {}),
-        transcript="\n".join(_render_line(m, names) for m in since) or "(nothing)",
+        transcript="\n".join(render_message(m, names) for m in since) or "(nothing)",
     )

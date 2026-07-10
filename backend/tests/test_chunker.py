@@ -304,3 +304,76 @@ def test_chunk_token_budget_clamps_to_model_window():
     assert chunk_token_budget(settings, SimpleNamespace(max_tokens=0)) == 512  # unknown window
     assert chunk_token_budget(settings, SimpleNamespace(max_tokens=128)) == 128  # distiluse-style clamp
     assert chunk_token_budget(settings, SimpleNamespace(max_tokens=8192)) == 512  # setting wins
+
+
+# --- bot lines: tagged [bot] in every render, absent from embedding input ---
+
+
+def _bot_msg(tg_id: int, minutes: float, text: str) -> Message:
+    m = msg(tg_id, minutes, text)
+    m.source = "self"
+    return m
+
+
+def test_bot_lines_are_tagged_and_strippable():
+    from app.memory.chunker import render_thread
+
+    human = msg(1, 0, text="когда свадьба?")
+    bot = _bot_msg(2, 1, text="Event 'Свадьба' created for Oct 19")
+    other_bot = msg(3, 2, text="card roll: Waterfall")
+    other_bot.sender_id = 777  # flagged member, not source='self'
+
+    full = render_thread([human, bot, other_bot], {}, {}, bot_ids=frozenset({777}))
+    assert "[bot] Alice" in full  # both bot kinds tagged
+    assert full.count("[bot]") == 2
+    assert "когда свадьба?" in full and "#1:" in full  # human line untagged
+    assert not full.splitlines()[0].startswith("[bot]")
+
+    stripped = render_thread([human, bot, other_bot], {}, {}, bot_ids=frozenset({777}),
+                             strip_bots=True)
+    assert "когда свадьба?" in stripped
+    assert "Свадьба' created" not in stripped and "Waterfall" not in stripped
+    assert "[bot]" not in stripped
+
+
+def test_reply_quote_tags_bot_targets():
+    from app.memory.chunker import render_thread
+
+    bot = _bot_msg(1, 0, text="I created the event")
+    reply = msg(10, 60, text="thanks!")
+    reply.reply_to_tg_message_id = 1  # target off-transcript -> quoted
+    text = render_thread([reply], {1: bot}, {})
+    assert '↳ replies to [#1] [2026-07-01 12:00] [bot] Alice: "I created the event"' in text
+
+
+async def test_embed_input_excludes_bot_lines(db_sessionmaker):
+    """The stored chunk text keeps bot lines; the vector is computed from the
+    human-only render (verified via the deterministic FakeEmbedder)."""
+    from app.memory.store import embed_pending_chunks, render_chunk_from_raw
+
+    chat_id = await _setup_chat(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        h1 = msg(1, 0, text="привет, когда встречаемся?")
+        b = _bot_msg(2, 1, text="я не нашёл информации об этом")
+        h2 = msg(3, 2, text="в субботу в 10")
+        for m in (h1, b, h2):
+            m.chat_id = chat_id
+            s.add(m)
+        await s.commit()
+
+    now = T0 + timedelta(minutes=200)
+    async with db_sessionmaker() as s:
+        assert await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 24, 0) == 1
+        await s.commit()
+
+    async with db_sessionmaker() as s:
+        n = await embed_pending_chunks(s, EMB, 8)
+        assert n == 1
+        chunk = (await s.execute(select(Chunk))).scalar_one()
+        # stored text: everything, bot line tagged
+        assert "не нашёл" in chunk.text and "[bot]" in chunk.text
+        # vector matches the human-only render, not the full text
+        stripped = await render_chunk_from_raw(s, chunk, strip_bots=True)
+        assert "не нашёл" not in stripped
+        assert chunk.embedding == (await EMB.embed_passages([stripped]))[0]
+        assert chunk.embedding != (await EMB.embed_passages([chunk.text]))[0]

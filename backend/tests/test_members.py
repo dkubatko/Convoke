@@ -273,3 +273,48 @@ async def test_members_api_order_is_stable_across_rename(db_sessionmaker, client
     await client.put(f"/api/chats/{cid}/members", json=[{"sender_id": 111, "display_name": "Zzz"}])
     order2 = [m["sender_id"] for m in (await client.get(f"/api/chats/{cid}/members")).json()]
     assert order1 == order2 == [111, 222, 333]  # stable despite the rename
+
+
+async def test_bot_flag_toggles_and_stales_memory(db_sessionmaker, client):
+    """Marking a member as bot: persists, surfaces in the API, marks the
+    chat's chunks stale (renders + embedding input both change), and
+    load_bot_sender_ids includes both the flag and the chat's own bot."""
+    from app.members import load_bot_sender_ids
+    from app.models import Bot, Chat, ChatMember, Chunk
+
+    async with db_sessionmaker() as s:
+        bot = Bot(tg_bot_id=999, username="b", name="b", token_encrypted="x",
+                  can_read_all_group_messages=True)
+        s.add(bot)
+        await s.flush()
+        chat = Chat(bot_id=bot.id, tg_chat_id=-100, type="supergroup", status="authorized")
+        s.add(chat)
+        await s.flush()
+        chat_id = chat.id
+        s.add(ChatMember(chat_id=chat_id, sender_id=777, auto_name="TCG Bot"))
+        s.add(ChatMember(chat_id=chat_id, sender_id=1, auto_name="Alice"))
+        s.add(Chunk(chat_id=chat_id, thread_id=None, msg_tg_id_start=1, msg_tg_id_end=2,
+                    text="x", embedding=[0.1] * 4, stale=False, content_version=0))
+        await s.commit()
+
+    got = await client.put(f"/api/chats/{chat_id}/members/777",
+                           json={"display_name": None, "is_bot": True})
+    assert got.status_code == 200 and got.json()["is_bot"] is True
+
+    async with db_sessionmaker() as s:
+        from sqlalchemy import select
+        chunk = (await s.execute(select(Chunk))).scalar_one()
+        assert chunk.stale is True  # memory refreshes under the new provenance
+        ids = await load_bot_sender_ids(s, chat_id)
+        assert ids == {777, 999}  # flagged member + the chat's own bot account
+
+    # No-op save doesn't re-stale
+    async with db_sessionmaker() as s:
+        chunk = (await s.execute(select(Chunk))).scalar_one()
+        chunk.stale = False
+        await s.commit()
+    await client.put(f"/api/chats/{chat_id}/members/777",
+                     json={"display_name": None, "is_bot": True})
+    async with db_sessionmaker() as s:
+        from sqlalchemy import select
+        assert (await s.execute(select(Chunk))).scalar_one().stale is False

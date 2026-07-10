@@ -16,7 +16,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.intent.episodes import as_utc  # naive(sqlite)->UTC coercion for comparisons
-from app.models import ChatMember, Chunk, ChunkState
+from app.models import Bot, Chat, ChatMember, Chunk, ChunkState
 
 MAX_NAME_LEN = 64
 
@@ -45,6 +45,43 @@ async def load_member_names(session: AsyncSession, chat_id: int) -> dict[int, st
         if name:
             out[sender_id] = name
     return out
+
+
+async def load_bot_sender_ids(session: AsyncSession, chat_id: int) -> set[int]:
+    """Sender ids whose messages are bot output for rendering/scoring purposes:
+    members the operator flagged is_bot, plus the chat's own bot account — its
+    live sends carry source='self', but its imported previous-generation
+    history arrives as ordinary messages identifiable only by sender id."""
+    flagged = (
+        await session.execute(
+            select(ChatMember.sender_id).where(
+                ChatMember.chat_id == chat_id, ChatMember.is_bot.is_(True)
+            )
+        )
+    ).scalars()
+    own = (
+        await session.execute(
+            select(Bot.tg_bot_id).join(Chat, Chat.bot_id == Bot.id).where(Chat.id == chat_id)
+        )
+    ).scalar_one_or_none()
+    ids = set(flagged)
+    if own is not None:
+        ids.add(own)
+    return ids
+
+
+async def set_bot_flag(
+    session: AsyncSession, chat_id: int, sender_id: int, is_bot: bool
+) -> tuple[ChatMember | None, bool]:
+    """Operator marks/unmarks a member as a bot. Returns (row, changed) —
+    callers refresh chat memory on a real change (renders and embedding input
+    both depend on the flag), mirroring the rename contract."""
+    member = await session.get(ChatMember, (chat_id, sender_id))
+    if member is None:
+        return None, False
+    changed = member.is_bot != is_bot
+    member.is_bot = is_bot
+    return member, changed
 
 
 async def member_display_name(

@@ -123,6 +123,12 @@ class ChatMember(Base):
     auto_name: Mapped[str] = mapped_column(Text, default="")
     override_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     handle: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Treat this member's messages as bot output: tagged [bot] in every render,
+    # excluded from what memory search SCORES (embedding input) while staying in
+    # chunk text and directly readable. Auto-true for the chat's own bot account
+    # (migration backfill); operator-set for other bots — Telegram exports carry
+    # no bot flag, so they can't be auto-detected.
+    is_bot: Mapped[bool] = mapped_column(Boolean, default=False)
     name_basis_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

@@ -42,12 +42,17 @@ def rrf_merge(rankings: list[list[int]], k: int = RRF_K) -> dict[int, float]:
 
 
 async def render_chunk_from_raw(
-    session: AsyncSession, chunk: Chunk, names: dict[int, str] | None = None
+    session: AsyncSession,
+    chunk: Chunk,
+    names: dict[int, str] | None = None,
+    bot_ids: frozenset[int] | None = None,
+    strip_bots: bool = False,
 ) -> str:
     """Render a hit from raw message rows (not the embedded text blob) so edits
     are always reflected and speakers/timestamps are never stale. Delegates to
-    render_for_chat for name + reply-linkage resolution; pass a preloaded
-    `names` map when rendering many chunks of one chat."""
+    render_for_chat for name + reply-linkage resolution; pass preloaded
+    `names`/`bot_ids` maps when rendering many chunks of one chat.
+    `strip_bots=True` yields the EMBEDDING-INPUT form (bot lines omitted)."""
     messages = (
         (
             await session.execute(
@@ -68,7 +73,9 @@ async def render_chunk_from_raw(
         .scalars()
         .all()
     )
-    return await render_for_chat(session, chunk.chat_id, list(messages), names)
+    return await render_for_chat(
+        session, chunk.chat_id, list(messages), names, bot_ids, strip_bots=strip_bots
+    )
 
 
 async def _dense_ids(
@@ -189,11 +196,19 @@ async def embed_pending_chunks(
 ) -> int:
     """Embed new chunks and re-embed stale ones (rendering fresh from raw).
 
+    What gets EMBEDDED is the bot-stripped render — memory search scores only
+    human testimony (bot replies paraphrase queries and summarize facts, so
+    scoring them lets the bot's own past chatter outrank the answers; measured
+    live). The STORED text keeps bot lines, so retrieved chunks still show
+    them and lexical search still matches them.
+
     Runs in its own session over seconds of CPU work, so a message edit can
     land mid-batch. The final clear is a guarded UPDATE that only writes when
     content_version is unchanged since read — otherwise the edited chunk stays
     stale and re-embeds next pass instead of being fixed with a stale vector.
     """
+    from app.members import load_bot_sender_ids
+
     chunks = (
         (
             await session.execute(
@@ -207,24 +222,29 @@ async def embed_pending_chunks(
     )
     if not chunks:
         return 0
-    rendered: list[tuple[int, int, str, list]] = []  # (id, version_at_read, text, vector)
+    rendered: list[tuple[int, int, str | None, str]] = []  # (id, version, new_text, embed_input)
     names_by_chat: dict[int, dict[int, str]] = {}  # chunks may span chats
+    bots_by_chat: dict[int, frozenset[int]] = {}
     for c in chunks:
-        if c.stale:
-            if c.chat_id not in names_by_chat:
-                names_by_chat[c.chat_id] = await load_member_names(session, c.chat_id)
-            text = await render_chunk_from_raw(session, c, names_by_chat[c.chat_id])
-        else:
-            text = c.text
-        rendered.append((c.id, c.content_version, text))
-    vectors = await embedder.embed_passages([r[2] for r in rendered])
+        if c.chat_id not in names_by_chat:
+            names_by_chat[c.chat_id] = await load_member_names(session, c.chat_id)
+            bots_by_chat[c.chat_id] = frozenset(await load_bot_sender_ids(session, c.chat_id))
+        names, bots = names_by_chat[c.chat_id], bots_by_chat[c.chat_id]
+        # Stale = content changed (edit/rename/flag): refresh the stored text.
+        new_text = await render_chunk_from_raw(session, c, names, bots) if c.stale else None
+        embed_input = await render_chunk_from_raw(session, c, names, bots, strip_bots=True)
+        rendered.append((c.id, c.content_version, new_text, embed_input))
+    vectors = await embedder.embed_passages([r[3] for r in rendered])
 
     written = 0
-    for (chunk_id, version, text), vector in zip(rendered, vectors):
+    for (chunk_id, version, new_text, _), vector in zip(rendered, vectors):
+        values = {"embedding": vector, "stale": False}
+        if new_text is not None:
+            values["text"] = new_text
         result = await session.execute(
             update(Chunk)
             .where(Chunk.id == chunk_id, Chunk.content_version == version)
-            .values(embedding=vector, text=text, stale=False)
+            .values(**values)
         )
         written += result.rowcount or 0
     await session.commit()

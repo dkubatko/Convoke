@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.media.render import message_body
-from app.members import load_member_names
+from app.members import load_bot_sender_ids, load_member_names
 from app.memory.embeddings import Embedder
 from app.models import Chunk, ChunkState, Message
 from app.threads import unmonitored_threads
@@ -54,17 +54,33 @@ def _member_name(m: Message, names: dict[int, str]) -> str:
     return mapped or m.sender_name or "Unknown"
 
 
-def render_message(m: Message, names: dict[int, str]) -> str:
-    """One transcript line: 'Sender [ts] #id: body'. The #id is the real
-    Telegram message id — every reader (agent context, chunks, search hits,
-    the intent classifier) uses it identically: agents pass it to
-    get_messages, and reply annotations point at it. `names` resolves the
+def is_bot_message(m: Message, bot_ids: set[int] | frozenset[int]) -> bool:
+    """Bot-authored: the operating bot's own sends (source='self') or any
+    sender in the chat's bot set (flagged members + the bot account's imported
+    previous-generation history). Single authority for [bot] tagging and for
+    what memory search declines to score."""
+    return m.source == "self" or (m.sender_id is not None and m.sender_id in bot_ids)
+
+
+def render_message(m: Message, names: dict[int, str], bot_ids: frozenset[int] = frozenset()) -> str:
+    """One transcript line: 'Sender [ts] #id: body', prefixed '[bot] ' for
+    bot-authored messages (models must never mistake bot output for human
+    testimony — bots summarize the chat, they don't witness it). The #id is
+    the real Telegram message id — every reader (agent context, chunks,
+    search hits, the intent classifier) uses it identically: agents pass it
+    to get_messages, and reply annotations point at it. `names` resolves the
     sender via the chat-member map (see `_member_name`)."""
     ts = m.sent_at.strftime("%Y-%m-%d %H:%M")
-    return f"{_member_name(m, names)} [{ts}] #{m.tg_message_id}: {message_body(m)}"
+    tag = "[bot] " if is_bot_message(m, bot_ids) else ""
+    return f"{tag}{_member_name(m, names)} [{ts}] #{m.tg_message_id}: {message_body(m)}"
 
 
-def reply_quote(target: Message, names: dict[int, str], limit: int = 120) -> str:
+def reply_quote(
+    target: Message,
+    names: dict[int, str],
+    limit: int = 120,
+    bot_ids: frozenset[int] = frozenset(),
+) -> str:
     """The quoted-original line for a reply whose target isn't visible in the
     same transcript — rendered in the same 'Sender [ts] #id: body' shape as a
     normal line so it reads uniformly. Single source of the ↳ format."""
@@ -72,9 +88,10 @@ def reply_quote(target: Message, names: dict[int, str], limit: int = 120) -> str
     q = message_body(target).replace("\n", " ")
     if len(q) > limit:
         q = q[:limit] + "…"
+    tag = "[bot] " if is_bot_message(target, bot_ids) else ""
     return (
         f'  ↳ replies to [#{target.tg_message_id}] [{ts}] '
-        f'{_member_name(target, names)}: "{q}"'
+        f'{tag}{_member_name(target, names)}: "{q}"'
     )
 
 
@@ -83,6 +100,7 @@ def reply_annotation(
     present: set[int],
     targets: dict[int, Message],
     names: dict[int, str],
+    bot_ids: frozenset[int] = frozenset(),
 ) -> str:
     """The reply-linkage suffix for one transcript line — the single source of
     reply rendering, shared by every transcript (agent context, chunks, search
@@ -96,7 +114,7 @@ def reply_annotation(
         return f" (replying to #{rid})"
     target = targets.get(rid)
     if target is not None and message_body(target):
-        return "\n" + reply_quote(target, names)
+        return "\n" + reply_quote(target, names, bot_ids=bot_ids)
     return f" (replying to #{rid} — message not stored)"
 
 
@@ -104,18 +122,26 @@ def render_thread(
     messages: list[Message],
     reply_targets: dict[int, Message],
     names: dict[int, str],
+    bot_ids: frozenset[int] = frozenset(),
+    strip_bots: bool = False,
 ) -> str:
     """Render messages as a transcript with reply linkage always explicit.
-    Chunks embed this text, so both their embeddings and search_chat_history
-    hits carry the linkage. `names` resolves senders via the chat-member map.
+    Chunk text and search hits carry [bot] tags on bot-authored lines; with
+    `strip_bots=True` those lines are omitted entirely — the render used as
+    EMBEDDING INPUT, so memory search scores only human testimony (bot output
+    derives from the chat; scoring it lets the bot's own past replies outrank
+    the facts they summarize — measured live). `names` resolves senders via
+    the chat-member map.
 
     Prefer `render_for_chat` unless you already hold the names map + reply
     targets (e.g. rendering many segments of one chat) — it loads both for you
     so no caller has to remember to thread `names` through by hand."""
+    if strip_bots:
+        messages = [m for m in messages if not is_bot_message(m, bot_ids)]
     present = {m.tg_message_id for m in messages}
     targets = reply_targets or {}
     return "\n".join(
-        render_message(m, names) + reply_annotation(m, present, targets, names)
+        render_message(m, names, bot_ids) + reply_annotation(m, present, targets, names, bot_ids)
         for m in messages
     )
 
@@ -125,17 +151,22 @@ async def render_for_chat(
     chat_id: int,
     messages: list[Message],
     names: dict[int, str] | None = None,
+    bot_ids: frozenset[int] | None = None,
+    strip_bots: bool = False,
 ) -> str:
     """The one entry point for turning a chat's message rows into a model-facing
-    transcript: loads the member-name map (unless the caller already has it) and
-    resolves reply targets, then renders. Because callers never hand-thread
-    `names`, the class of "forgot to resolve names → raw names leak into memory"
-    bug can't recur here. `names` is an optional perf hint for batch callers that
-    render many chunks of one chat and load the map once."""
+    transcript: loads the member-name map and the bot-sender set (unless the
+    caller already has them) and resolves reply targets, then renders. Because
+    callers never hand-thread `names`, the class of "forgot to resolve names →
+    raw names leak into memory" bug can't recur here. `names`/`bot_ids` are
+    optional perf hints for batch callers that render many chunks of one chat
+    and load the maps once."""
     if names is None:
         names = await load_member_names(session, chat_id)
+    if bot_ids is None:
+        bot_ids = frozenset(await load_bot_sender_ids(session, chat_id))
     targets = await resolve_reply_targets(session, chat_id, list(messages))
-    return render_thread(messages, targets, names)
+    return render_thread(messages, targets, names, bot_ids, strip_bots=strip_bots)
 
 
 async def resolve_reply_targets(
@@ -291,14 +322,17 @@ async def chunk_chat(
 
     targets = await resolve_reply_targets(session, chat_id, list(messages))
     names = await load_member_names(session, chat_id)
+    bot_ids = frozenset(await load_bot_sender_ids(session, chat_id))
 
     # Per-message token cost of the line as it will be rendered into a chunk.
     # The reply annotation is costed in its long (quoted) form even when the
     # target lands in the same chunk and renders as a short pointer — a small
     # overestimate is safe; an underestimate reopens the truncation hole.
+    # Bot lines are costed too: the budget governs the STORED text (bot lines
+    # included); the embedding input is a subset, so it can only come in under.
     present: set[int] = set()
     lines = [
-        render_message(m, names) + reply_annotation(m, present, targets, names)
+        render_message(m, names, bot_ids) + reply_annotation(m, present, targets, names, bot_ids)
         for m in chunkable
     ]
     costs = dict(zip((m.tg_message_id for m in chunkable), await embedder.count_tokens(lines)))
@@ -353,7 +387,7 @@ async def chunk_chat(
                 thread_id=seg.thread_id,
                 msg_tg_id_start=seg.tg_id_start,
                 msg_tg_id_end=seg.tg_id_end,
-                text=render_thread(seg.messages, targets, names),
+                text=render_thread(seg.messages, targets, names, bot_ids),
             )
         )
         persisted += 1

@@ -826,14 +826,19 @@ function MembersTab({ chatId }: { chatId: number }) {
   // Staged overrides keyed by sender_id; nothing is written until Save ('' =
   // clear back to the auto name). `editing` is the one row whose input is open.
   const [edits, setEdits] = useState<Record<number, string>>({})
+  const [botEdits, setBotEdits] = useState<Record<number, boolean>>({})
   const [editing, setEditing] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
 
   const list = members.data ?? []
   const savedOverride = (m: Member) => m.override_name ?? ''
   const valueOf = (m: Member) => (m.sender_id in edits ? edits[m.sender_id] : savedOverride(m))
-  const isChanged = (m: Member) =>
+  const botOf = (m: Member) => (m.sender_id in botEdits ? botEdits[m.sender_id] : m.is_bot)
+  const isNameChanged = (m: Member) =>
     m.sender_id in edits && edits[m.sender_id].trim() !== savedOverride(m)
+  const isBotChanged = (m: Member) =>
+    m.sender_id in botEdits && botEdits[m.sender_id] !== m.is_bot
+  const isChanged = (m: Member) => isNameChanged(m) || isBotChanged(m)
   const dirty = list.filter(isChanged)
   const stage = (id: number, v: string) => setEdits((p) => ({ ...p, [id]: v }))
   const revert = (id: number) =>
@@ -849,12 +854,17 @@ function MembersTab({ chatId }: { chatId: number }) {
     try {
       await api.put(
         `/api/chats/${chatId}/members`,
-        dirty.map((m) => ({ sender_id: m.sender_id, display_name: edits[m.sender_id].trim() || null })),
+        dirty.map((m) => ({
+          sender_id: m.sender_id,
+          display_name: isNameChanged(m) ? edits[m.sender_id].trim() || null : m.override_name,
+          ...(isBotChanged(m) ? { is_bot: botEdits[m.sender_id] } : {}),
+        })),
       )
       toast('ok', `Saved ${dirty.length} — rebuilding memory under the new name${dirty.length > 1 ? 's' : ''}`)
       // Refetch first, THEN drop the local edits, so nothing flashes old values.
       await members.refetch()
       setEdits({})
+      setBotEdits({})
     } catch (e) {
       toast('err', e instanceof ApiError ? e.message : 'Couldn’t save')
     } finally {
@@ -863,6 +873,7 @@ function MembersTab({ chatId }: { chatId: number }) {
   }
   function cancel() {
     setEdits({})
+    setBotEdits({})
     setEditing(null)
   }
 
@@ -876,7 +887,9 @@ function MembersTab({ chatId }: { chatId: number }) {
         How the bot refers to each person — in the conversation it reads, in its memory, and in its
         replies. The user id is fixed and the handle is filled in from Telegram when available. Click
         a name to rename it; edits apply only when you click Save — this chat’s memory then
-        refreshes under the new names in the background, staying searchable throughout.
+        refreshes under the new names in the background, staying searchable throughout. Mark other
+        bots (e.g. game bots from imported history) with the Bot checkbox: their messages get a
+        [bot] tag and stop being scored by memory search, though they stay readable in results.
       </p>
       <Card pad={false}>
         {list.length === 0 ? (
@@ -891,6 +904,7 @@ function MembersTab({ chatId }: { chatId: number }) {
                   <th>User ID</th>
                   <th>Handle</th>
                   <th>Display name</th>
+                  <th title="Messages render tagged [bot] and are excluded from memory scoring">Bot</th>
                 </tr>
               </thead>
               <tbody>
@@ -955,6 +969,16 @@ function MembersTab({ chatId }: { chatId: number }) {
                             )}
                           </div>
                         )}
+                      </td>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={botOf(m)}
+                          aria-label={`Treat user ${m.sender_id} as a bot`}
+                          onChange={(e) =>
+                            setBotEdits((p) => ({ ...p, [m.sender_id]: e.target.checked }))
+                          }
+                        />
                       </td>
                     </tr>
                   )
