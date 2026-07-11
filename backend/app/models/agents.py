@@ -42,6 +42,13 @@ class ConnectedModel(Base):
     name: Mapped[str] = mapped_column(Text, unique=True)
     base_url: Mapped[str] = mapped_column(Text)
     model_name: Mapped[str] = mapped_column(Text)
+    # Which OpenAI-compatible API the endpoint speaks: "chat"
+    # (/chat/completions — the universal dialect, default) or "responses"
+    # (/v1/responses — OpenAI's agent API; reasoning persists across tool
+    # calls, and some models allow reasoning WITH tools only there).
+    # Explicit, never auto-detected: half-implemented /responses endpoints
+    # pass trivial probes and break on real workloads.
+    api: Mapped[str] = mapped_column(Text, default="chat")
     api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     # {"chat": bool, "vision": bool, "transcription": bool, "video": bool} —
     # chat/vision/transcription come from probes; video is operator-declared.

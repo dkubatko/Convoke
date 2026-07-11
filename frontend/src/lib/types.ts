@@ -104,6 +104,9 @@ export interface ConnectedModel {
   name: string
   base_url: string
   model_name: string
+  // Endpoint dialect: 'chat' (/chat/completions, default) or 'responses'
+  // (OpenAI agent API — reasoning persists across tool calls).
+  api: string
   has_api_key: boolean
   capabilities: Record<string, boolean>
   last_tested_at: string | null

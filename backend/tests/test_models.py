@@ -199,3 +199,36 @@ def test_reasoning_settings_omits_default():
     assert reasoning_settings(None) == {}
     assert reasoning_settings("") == {}
     assert reasoning_settings("high") == {"openai_reasoning_effort": "high"}
+
+
+async def test_api_dialect_roundtrip_and_model_class(db_sessionmaker, client, monkeypatch):
+    """The api field persists through the API, selects the pydantic-ai model
+    class in build_model, and keys the cache (same endpoint on both dialects
+    coexists)."""
+    from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
+
+    import app.agents.models as am
+    from app.models import ConnectedModel
+
+    created = await client.post("/api/models", json={
+        "name": "luna", "base_url": "http://x", "model_name": "gpt-luna",
+        "api": "responses", "capabilities": {"chat": True},
+    })
+    assert created.status_code == 201 and created.json()["api"] == "responses"
+    assert (await client.post("/api/models", json={
+        "name": "bad", "base_url": "http://x", "model_name": "m", "api": "grpc",
+    })).status_code == 422  # unknown dialect rejected at the boundary
+
+    async with db_sessionmaker() as s:
+        from sqlalchemy import select
+        m = (await s.execute(select(ConnectedModel))).scalar_one()
+        assert m.api == "responses"
+        assert isinstance(am.build_model(m), OpenAIResponsesModel)
+        m.api = "chat"
+        assert isinstance(am.build_model(m), OpenAIChatModel)
+        # distinct cache entries per dialect; evict removes the right one
+        chat_model = am.build_model(m)
+        m.api = "responses"
+        responses_model = am.build_model(m)
+        assert chat_model is not responses_model
+        am.evict_model(m)

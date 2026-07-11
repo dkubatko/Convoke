@@ -3,7 +3,7 @@ import asyncio
 import httpx
 from pydantic_ai import Agent, BinaryContent
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -76,23 +76,30 @@ async def get_provider(session: AsyncSession, role: str) -> ConnectedModel:
     return model
 
 
+def _make_model(base_url: str, model_name: str, api_key: str | None, api: str = "chat"):
+    """The one place a pydantic-ai model is constructed — chat/completions or
+    the Responses API, per the model's configured dialect. Both classes share
+    the Agent interface, function tools, and the openai_* settings keys."""
+    cls = OpenAIResponsesModel if api == "responses" else OpenAIChatModel
+    return cls(
+        model_name, provider=OpenAIProvider(base_url=base_url, api_key=api_key or "unused")
+    )
+
+
 # Each OpenAIProvider owns an AsyncOpenAI/httpx client. The intent sweeper
 # builds one per (workflow × window) evaluation, so without caching the
 # long-running worker leaks connection pools forever. Key on the config that
 # defines the client; invalidate implicitly when any field changes.
-_model_cache: dict[tuple[str, str, str], OpenAIChatModel] = {}
+_model_cache: dict[tuple[str, str, str, str], OpenAIChatModel | OpenAIResponsesModel] = {}
 
 
-def build_model(provider: ConnectedModel) -> OpenAIChatModel:
+def build_model(provider: ConnectedModel) -> OpenAIChatModel | OpenAIResponsesModel:
     """Any OpenAI-compatible endpoint: Ollama, LM Studio, OpenRouter, OpenAI…"""
     api_key = decrypt(provider.api_key_encrypted) if provider.api_key_encrypted else "unused"
-    key = (provider.base_url, provider.model_name, api_key)
+    key = (provider.base_url, provider.model_name, api_key, provider.api)
     cached = _model_cache.get(key)
     if cached is None:
-        cached = OpenAIChatModel(
-            provider.model_name,
-            provider=OpenAIProvider(base_url=provider.base_url, api_key=api_key),
-        )
+        cached = _make_model(provider.base_url, provider.model_name, api_key, provider.api)
         # Bound the cache: a handful of role/config combos in practice.
         if len(_model_cache) > 16:
             _model_cache.clear()
@@ -108,17 +115,15 @@ def evict_model(provider: ConnectedModel) -> None:
     client is left to the GC — a rare, bounded leak, same trade-off as the
     cache-size clear above."""
     api_key = decrypt(provider.api_key_encrypted) if provider.api_key_encrypted else "unused"
-    _model_cache.pop((provider.base_url, provider.model_name, api_key), None)
+    _model_cache.pop((provider.base_url, provider.model_name, api_key, provider.api), None)
 
 
-async def probe_endpoint(base_url: str, model_name: str, api_key: str | None) -> tuple[bool, str]:
+async def probe_endpoint(
+    base_url: str, model_name: str, api_key: str | None, api: str = "chat"
+) -> tuple[bool, str]:
     """Fire one tiny completion at an endpoint to prove it's real before the
     operator saves it. Returns (ok, human-readable detail)."""
-    model = OpenAIChatModel(
-        model_name,
-        provider=OpenAIProvider(base_url=base_url, api_key=api_key or "unused"),
-    )
-    agent = Agent(model, model_settings={"max_tokens": 16})
+    agent = Agent(_make_model(base_url, model_name, api_key, api), model_settings={"max_tokens": 16})
     try:
         result = await asyncio.wait_for(agent.run("Reply with exactly: OK"), TEST_TIMEOUT_S)
     except TimeoutError:
@@ -155,14 +160,12 @@ async def probe_endpoint(base_url: str, model_name: str, api_key: str | None) ->
     return True, f"Model replied: {reply[:60] or '(empty)'}"
 
 
-async def probe_vision(base_url: str, model_name: str, api_key: str | None) -> tuple[bool, str]:
+async def probe_vision(
+    base_url: str, model_name: str, api_key: str | None, api: str = "chat"
+) -> tuple[bool, str]:
     """Send a tiny in-code PNG; a model that accepts image parts is
     vision-capable (we assert HTTP acceptance, not that it *sees* well)."""
-    model = OpenAIChatModel(
-        model_name,
-        provider=OpenAIProvider(base_url=base_url, api_key=api_key or "unused"),
-    )
-    agent = Agent(model, model_settings={"max_tokens": 16})
+    agent = Agent(_make_model(base_url, model_name, api_key, api), model_settings={"max_tokens": 16})
     try:
         result = await asyncio.wait_for(
             agent.run(
@@ -203,15 +206,16 @@ async def probe_transcription(base_url: str, model_name: str, api_key: str | Non
 
 
 async def probe_capabilities(
-    base_url: str, model_name: str, api_key: str | None
+    base_url: str, model_name: str, api_key: str | None, api: str = "chat"
 ) -> dict[str, tuple[bool, str]]:
     """Run the chat, vision, and transcription probes concurrently. A model is
     worth saving if any passes (a whisper server fails the chat probe by
     design). Video capability is operator-declared — probing video content
-    parts is unreliable across gateways."""
+    parts is unreliable across gateways. Transcription is a separate
+    endpoint, untouched by the chat-vs-responses dialect."""
     chat, vision, transcription = await asyncio.gather(
-        probe_endpoint(base_url, model_name, api_key),
-        probe_vision(base_url, model_name, api_key),
+        probe_endpoint(base_url, model_name, api_key, api),
+        probe_vision(base_url, model_name, api_key, api),
         probe_transcription(base_url, model_name, api_key),
     )
     return {"chat": chat, "vision": vision, "transcription": transcription}

@@ -110,7 +110,9 @@ class Describer:
     ) -> str:
         """Video-native path (behind the `video` role): vLLM-convention
         video_url content part on a raw chat/completions call — pydantic-ai's
-        OpenAI model doesn't emit video parts, so this bypasses it."""
+        OpenAI model doesn't emit video parts, so this bypasses it. Always
+        chat/completions regardless of the model's `api` dialect: video_url
+        is a vLLM convention with no Responses-API equivalent."""
         prompt = VIDEO_PROMPT.format(max_chars=self.settings.media_description_max_chars)
         if caption:
             prompt += f'\nThe sender captioned it: "{caption[:200]}"'

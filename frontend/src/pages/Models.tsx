@@ -125,6 +125,7 @@ function ModelLibrary({
   const [baseUrl, setBaseUrl] = useState('')
   const [modelName, setModelName] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [apiDialect, setApiDialect] = useState('chat')
   const [video, setVideo] = useState(false)
   const [test, setTest] = useState<TestState>({ phase: 'idle' })
   const [busy, setBusy] = useState(false)
@@ -143,6 +144,7 @@ function ModelLibrary({
       const result = await api.post<ModelTestResult>('/api/models/test', {
         base_url: baseUrl,
         model_name: modelName,
+        api: apiDialect,
         api_key: apiKey || null,
       })
       setTest({ phase: 'done', result })
@@ -163,6 +165,7 @@ function ModelLibrary({
         name,
         base_url: baseUrl,
         model_name: modelName,
+        api: apiDialect,
         api_key: apiKey || null,
         capabilities: {
           chat: test.result.chat.ok,
@@ -173,6 +176,7 @@ function ModelLibrary({
       })
       toast('ok', `Connected ${name} — assign it a role from the Role assignment tab`)
       setName(''); setBaseUrl(''); setModelName(''); setApiKey(''); setVideo(false)
+      setApiDialect('chat')
       setTest({ phase: 'idle' })
       onChanged()
     } catch (err) {
@@ -189,6 +193,7 @@ function ModelLibrary({
       const result = await api.post<ModelTestResult>('/api/models/test', {
         base_url: m.base_url,
         model_name: m.model_name,
+        api: m.api,
         api_key: null, // reuse the stored key
         model_id: m.id,
       })
@@ -196,6 +201,7 @@ function ModelLibrary({
         name: m.name,
         base_url: m.base_url,
         model_name: m.model_name,
+        api: m.api,
         api_key: null,
         capabilities: {
           chat: result.chat.ok,
@@ -265,6 +271,20 @@ function ModelLibrary({
                 value={apiKey}
                 onChange={(e) => edit(setApiKey)(e.target.value)}
                 autoComplete="off"
+              />
+            </Field>
+            <Field
+              label="API"
+              hint="Responses (OpenAI's agent API) keeps reasoning across tool calls; some models allow reasoning with tools only there. Most endpoints only speak chat/completions."
+            >
+              <Select
+                value={apiDialect}
+                onChange={edit(setApiDialect)}
+                ariaLabel="Endpoint API dialect"
+                options={[
+                  { value: 'chat', label: 'chat/completions (standard)' },
+                  { value: 'responses', label: 'responses (OpenAI agent API)' },
+                ]}
               />
             </Field>
           </div>
@@ -340,7 +360,10 @@ function ModelLibrary({
                 <tr key={m.id}>
                   <td>
                     <b>{m.name}</b>
-                    <div className="mono muted" style={{ fontSize: 12 }}>{m.model_name}</div>
+                    <div className="mono muted" style={{ fontSize: 12 }}>
+                      {m.model_name}
+                      {m.api === 'responses' && ' · responses API'}
+                    </div>
                   </td>
                   <td className="mono muted">{m.base_url}</td>
                   <td>

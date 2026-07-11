@@ -25,6 +25,9 @@ class ModelIn(BaseModel):
     name: str
     base_url: str
     model_name: str
+    # Which dialect the endpoint speaks; "responses" is opt-in (OpenAI's
+    # agent API — reasoning persists across tool calls).
+    api: str = Field(default="chat", pattern="^(chat|responses)$")
     # None = keep existing key; "" = clear (endpoint needs no key)
     api_key: str | None = None
     capabilities: dict[str, bool] = {}
@@ -35,6 +38,7 @@ class ModelOut(BaseModel):
     name: str
     base_url: str
     model_name: str
+    api: str
     has_api_key: bool
     capabilities: dict[str, bool]
     last_tested_at: datetime | None
@@ -51,6 +55,7 @@ class CapabilityProbe(BaseModel):
 class ModelTestIn(BaseModel):
     base_url: str
     model_name: str
+    api: str = Field(default="chat", pattern="^(chat|responses)$")
     # None = fall back to the key already saved for `model_id` (if any);
     # "" = explicitly no key.
     api_key: str | None = None
@@ -95,6 +100,7 @@ def _out(m: ConnectedModel, roles: list[str]) -> ModelOut:
         name=m.name,
         base_url=m.base_url,
         model_name=m.model_name,
+        api=m.api,
         has_api_key=m.api_key_encrypted is not None,
         capabilities={k: bool(v) for k, v in (m.capabilities or {}).items()},
         last_tested_at=m.last_tested_at,
@@ -121,7 +127,7 @@ async def test_model(
     stored = await session.get(ConnectedModel, body.model_id) if body.model_id is not None else None
     if api_key is None and stored is not None and stored.api_key_encrypted:
         api_key = decrypt(stored.api_key_encrypted)
-    probes = await probe_capabilities(body.base_url.rstrip("/"), body.model_name, api_key)
+    probes = await probe_capabilities(body.base_url.rstrip("/"), body.model_name, api_key, body.api)
     # Re-probing a saved model with its saved config counts as "tested".
     if (
         stored is not None
@@ -152,6 +158,7 @@ async def create_model(
         name=body.name,
         base_url=body.base_url.rstrip("/"),
         model_name=body.model_name,
+        api=body.api,
         api_key_encrypted=encrypt(body.api_key) if body.api_key else None,
         capabilities=body.capabilities,
         last_tested_at=datetime.now(timezone.utc),
@@ -172,6 +179,7 @@ async def update_model(
     m.name = body.name
     m.base_url = body.base_url.rstrip("/")
     m.model_name = body.model_name
+    m.api = body.api
     m.capabilities = body.capabilities
     if body.api_key is not None:
         m.api_key_encrypted = encrypt(body.api_key) if body.api_key else None
