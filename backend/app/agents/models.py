@@ -35,10 +35,20 @@ async def get_role_reasoning(session: AsyncSession, role: str) -> str | None:
 async def probe_reasoning(provider: ConnectedModel, effort: str) -> tuple[bool, str]:
     """One micro-call with the requested effort — there is no discovery API
     for supported levels anywhere in the OpenAI-compatible ecosystem, so the
-    only truth is asking. max_tokens is roomy: reasoning burns tokens before
-    the first output token, and a length-starved probe would false-negative."""
+    only truth is asking. The probe carries a function tool because that is
+    the shape every real call has (agent runs, classifier structured output):
+    some models (gpt-5.6-luna) accept reasoning_effort alone but reject it
+    COMBINED with tools — a tool-less probe passes what runs then fail.
+    max_tokens is roomy: reasoning burns tokens before the first output
+    token, and a length-starved probe would false-negative."""
+
+    def probe_noop() -> str:
+        """No-op; present only so the request carries a tool definition."""
+        return "ok"
+
     agent = Agent(
         build_model(provider),
+        tools=[probe_noop],
         model_settings={"max_tokens": 1024, **reasoning_settings(effort)},
     )
     try:

@@ -244,35 +244,41 @@ async def execute_run(
                         getattr(toolset, "label", toolset),
                         exc_info=True,
                     )
-            agent = build_agent(
-                build_model(provider), instructions, live_toolsets,
-                model_settings=reasoning_settings(reasoning),
-            )
-            await stack.enter_async_context(agent)
-            # Deadline: a wedged provider or tool must not hold the chat lock
-            # and a concurrency slot indefinitely; expiry takes the normal
-            # error path (run → error, episode reverts, user is notified).
-            try:
-                async with asyncio.timeout(AGENT_RUN_DEADLINE_S):
-                    result = await agent.run(user_prompt, deps=deps)
-            except ModelHTTPError as e:
-                # Safety net: a provider that changed its reasoning-level menu
-                # degrades this run to Default instead of failing it. The
-                # level was validated at assignment time; this catches drift.
-                if not (reasoning and e.status_code == 400 and "reasoning" in str(e).lower()):
-                    raise
-                log.warning(
-                    "provider rejected reasoning_effort=%r mid-run; retrying without it",
-                    reasoning,
+            # Reasoning fallback chain: configured level → explicit 'none' →
+            # omitted. Providers disagree about what "no reasoning" means —
+            # some reason by default and demand an explicit 'none' with tools
+            # (gpt-5.6-luna), others reject 'none' as an unknown value — so a
+            # reasoning-param 400 walks the chain instead of guessing. The
+            # level was validated at assignment time; this catches drift, and
+            # it also covers Default on reason-by-default models (omitted →
+            # 'none'). Deadline: a wedged provider or tool must not hold the
+            # chat lock and a concurrency slot indefinitely; expiry takes the
+            # normal error path (run → error, episode reverts, user is
+            # notified) and is never retried.
+            variants = list(dict.fromkeys([reasoning, "none", None]))
+            result = None
+            for i, effort in enumerate(variants):
+                agent = build_agent(
+                    build_model(provider), instructions, live_toolsets,
+                    model_settings=reasoning_settings(effort),
                 )
-                agent = build_agent(build_model(provider), instructions, live_toolsets)
                 await stack.enter_async_context(agent)
-                async with asyncio.timeout(AGENT_RUN_DEADLINE_S):
-                    result = await agent.run(user_prompt, deps=deps)
-            except TimeoutError:
-                raise TimeoutError(
-                    f"run exceeded the {AGENT_RUN_DEADLINE_S}s deadline"
-                ) from None
+                try:
+                    async with asyncio.timeout(AGENT_RUN_DEADLINE_S):
+                        result = await agent.run(user_prompt, deps=deps)
+                    break
+                except ModelHTTPError as e:
+                    reasoning_400 = e.status_code == 400 and "reasoning" in str(e).lower()
+                    if not reasoning_400 or i == len(variants) - 1:
+                        raise
+                    log.warning(
+                        "provider rejected reasoning_effort=%r mid-run; retrying with %r",
+                        effort, variants[i + 1],
+                    )
+                except TimeoutError:
+                    raise TimeoutError(
+                        f"run exceeded the {AGENT_RUN_DEADLINE_S}s deadline"
+                    ) from None
         reply_text = (result.output or "").strip() or "(no reply)"
         # The agent's structured way to stand down: a NO_ACTION reply posts
         # nothing to the chat; the run records the decision as `declined` and
