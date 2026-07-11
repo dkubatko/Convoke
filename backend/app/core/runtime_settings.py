@@ -136,6 +136,15 @@ TUNABLES: list[Tunable] = [
         "minutes", 1, 1440, "global", "workflows", group="Firing",
     ),
     Tunable(
+        "memory_ignore_bot_messages", "Ignore bot messages in embeddings",
+        "Applies to the connected bot and any member marked Bot on the chat's Members "
+        "tab. When on (default), search ranking reads only human messages — bot replies "
+        "tend to outrank the facts they summarize. Bot lines stay visible in results and "
+        "exact-word search either way. Rebuild index (Role assignment tab) re-applies "
+        "this to existing history.",
+        "", 0, 1, "global", "models", group="Memory",
+    ),
+    Tunable(
         "chunk_target_tokens", "Memory chunk size",
         "How much conversation one searchable memory chunk holds, in embedding-model tokens. "
         "Smaller finds specific facts more precisely; larger keeps more surrounding context "

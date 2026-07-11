@@ -207,6 +207,7 @@ async def embed_pending_chunks(
     content_version is unchanged since read — otherwise the edited chunk stays
     stale and re-embeds next pass instead of being fixed with a stale vector.
     """
+    from app.core.runtime_settings import effective_settings
     from app.members import load_bot_sender_ids
 
     chunks = (
@@ -222,6 +223,7 @@ async def embed_pending_chunks(
     )
     if not chunks:
         return 0
+    strip = bool((await effective_settings(session)).memory_ignore_bot_messages)
     rendered: list[tuple[int, int, str | None, str]] = []  # (id, version, new_text, embed_input)
     names_by_chat: dict[int, dict[int, str]] = {}  # chunks may span chats
     bots_by_chat: dict[int, frozenset[int]] = {}
@@ -232,7 +234,7 @@ async def embed_pending_chunks(
         names, bots = names_by_chat[c.chat_id], bots_by_chat[c.chat_id]
         # Stale = content changed (edit/rename/flag): refresh the stored text.
         new_text = await render_chunk_from_raw(session, c, names, bots) if c.stale else None
-        embed_input = await render_chunk_from_raw(session, c, names, bots, strip_bots=True)
+        embed_input = await render_chunk_from_raw(session, c, names, bots, strip_bots=strip)
         rendered.append((c.id, c.content_version, new_text, embed_input))
     vectors = await embedder.embed_passages([r[3] for r in rendered])
 

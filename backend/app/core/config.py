@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     chunk_lull_seconds: int = 30 * 60
     chunk_max_messages: int = 24
     chunk_overlap_messages: int = 4
+    # 1 (default): chunk vectors are computed from human lines only — bot
+    # replies paraphrase queries and summarize facts, so scoring them lets the
+    # bot's own chatter outrank the answers (measured live). 0: score bot
+    # lines too. Covers ALL bot senders: the connected bot (live + imported
+    # history) and members flagged is_bot. Either way bot lines stay in chunk
+    # text, lexical search, and direct reads. Applies on the next (re-)embed;
+    # Rebuild index for history.
+    memory_ignore_bot_messages: int = 1
 
     imports_dir: str = "/data/imports"
 

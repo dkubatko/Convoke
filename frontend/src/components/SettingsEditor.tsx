@@ -3,7 +3,7 @@ import { api, ApiError } from '../lib/api'
 import { AppSetting } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from './Toast'
-import { Card, CardSkeleton, ErrorNote } from './ui'
+import { Card, CardSkeleton, Check, ErrorNote } from './ui'
 import { LevelSlider } from './LevelSlider'
 
 /** Reusable editor for a set of tunables served by `endpoint` (global or
@@ -98,6 +98,37 @@ export default function SettingsEditor({ endpoint }: { endpoint: string }) {
                   </svg>
                 </button>
               )
+              // A boolean-shaped setting (0..1, no step labels) is a bare
+              // toggle — the label carries the meaning, the checkbox carries
+              // no caption.
+              if (s.minimum === 0 && s.maximum === 1 && !s.step_labels) {
+                return (
+                  <Fragment key={s.key}>
+                    {header}
+                    <div className={`setting setting--row${changed ? ' setting--changed' : ''}`}>
+                      <div className="setting-main">
+                        <label className="setting-label">{s.label}</label>
+                        <p className="setting-desc">{s.description}</p>
+                      </div>
+                      <div className="setting-control">
+                        <div className="setting-value">
+                          {resetBtn}
+                          {/* Same 64px column as .setting-num, so the box
+                              centers on the shared axis of the inputs. */}
+                          <span className="setting-bool">
+                            <Check
+                              checked={val === 1}
+                              onChange={(v) => stage(s.key, v ? 1 : 0)}
+                            >
+                              {''}
+                            </Check>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </Fragment>
+                )
+              }
               // A step-labelled knob renders as a lever; everything else is a
               // numeric box. Both put the reset + control in the right column.
               if (s.step_labels) {

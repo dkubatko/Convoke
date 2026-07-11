@@ -377,3 +377,28 @@ async def test_embed_input_excludes_bot_lines(db_sessionmaker):
         assert "не нашёл" not in stripped
         assert chunk.embedding == (await EMB.embed_passages([stripped]))[0]
         assert chunk.embedding != (await EMB.embed_passages([chunk.text]))[0]
+
+
+async def test_bot_scoring_setting_restores_full_text_embedding(db_sessionmaker):
+    """memory_ignore_bot_messages=0 embeds the full render (bot lines included)."""
+    from app.memory.store import embed_pending_chunks
+    from app.models import RuntimeSetting
+
+    chat_id = await _setup_chat(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        h = msg(1, 0, text="привет")
+        b = _bot_msg(2, 1, text="я бот и я отвечаю")
+        for m in (h, b):
+            m.chat_id = chat_id
+            s.add(m)
+        s.add(RuntimeSetting(key="memory_ignore_bot_messages", value=0))
+        await s.commit()
+
+    now = T0 + timedelta(minutes=200)
+    async with db_sessionmaker() as s:
+        assert await chunk_chat(s, chat_id, EMB, now, LULL, BIG, 24, 0) == 1
+        await s.commit()
+    async with db_sessionmaker() as s:
+        assert await embed_pending_chunks(s, EMB, 8) == 1
+        chunk = (await s.execute(select(Chunk))).scalar_one()
+        assert chunk.embedding == (await EMB.embed_passages([chunk.text]))[0]

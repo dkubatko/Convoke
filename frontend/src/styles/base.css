@@ -1049,6 +1049,17 @@ td.mono {
 .reset-btn--off {
   visibility: hidden;
 }
+/* Boolean settings: center the bare checkbox on the numeric inputs' axis. */
+.setting-bool {
+  width: 64px;
+  display: flex;
+  justify-content: center;
+}
+
+.setting-bool .check span:empty {
+  display: none; /* captionless: no phantom label gap */
+}
+
 .setting-control .unit {
   width: 64px;
   text-align: center;
