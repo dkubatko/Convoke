@@ -15,17 +15,27 @@ Tools:
   create_event / find_events / update_event / delete_event
                                       each takes a required `calendar` (name or id)
 
-The gotcha this design works around: sharing a calendar with a service account
-grants access *by id* but does NOT add it to the account's list, so a fresh
-`list_calendars` is empty until you `add_calendar` it. Calendars made with
-`create_calendar` are owned by the bot and appear automatically.
+The gotcha this design works around: Google Calendar's CalendarList API is
+UNRELIABLE for service accounts — `calendarList.insert` returns a full success
+and the entry silently never lands (measured live: insert → list in the same
+process returned zero entries, even for a calendar the account OWNS). So names
+can never depend on Google's list. Instead, `add_calendar`/`create_calendar`
+record the name→id mapping in a small JSON file on a volume, and name
+resolution consults that registry first; the live Google list is merged in as
+a bonus wherever it happens to work.
 
 Environment:
   GOOGLE_SERVICE_ACCOUNT_FILE  path to the service-account JSON key
+  CALENDAR_ALIASES_FILE        persistent name→id registry (default
+                               /data/calendars.json; created on first start —
+                               put it on a volume or registrations die with
+                               the container)
   PORT                         HTTP port to serve on (default 8000)
 """
 
+import json
 import os
+from pathlib import Path
 
 from fastmcp import FastMCP
 from google.oauth2 import service_account
@@ -40,6 +50,25 @@ _calendar = build("calendar", "v3", credentials=_creds, cache_discovery=False)
 
 mcp = FastMCP("Calendar")
 
+_ALIASES = Path(os.environ.get("CALENDAR_ALIASES_FILE", "/data/calendars.json"))
+_ALIASES.parent.mkdir(parents=True, exist_ok=True)
+if not _ALIASES.exists():
+    _ALIASES.write_text("{}")
+
+
+def _load_aliases() -> dict[str, str]:
+    """name (as registered) → calendar id."""
+    try:
+        return json.loads(_ALIASES.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_alias(name: str, calendar_id: str) -> None:
+    aliases = _load_aliases()
+    aliases[name] = calendar_id
+    _ALIASES.write_text(json.dumps(aliases, ensure_ascii=False, indent=1))
+
 
 def _calendar_list() -> list[dict]:
     """Every calendar in the bot's list (subscribed + owned), across pages."""
@@ -53,14 +82,19 @@ def _calendar_list() -> list[dict]:
 
 
 def _resolve_calendar(calendar: str) -> str:
-    """Turn a calendar name or id into a calendar id."""
+    """Turn a calendar name or id into a calendar id: the persistent registry
+    first (the only durable source with a service account), then whatever the
+    live Google list happens to contain."""
     if "@" in calendar or calendar == "primary":
         return calendar  # already an id
-    cals = _calendar_list()
-    for c in cals:
+    aliases = _load_aliases()
+    for name, cal_id in aliases.items():
+        if name.lower() == calendar.lower():
+            return cal_id
+    for c in _calendar_list():
         if c.get("summary", "").lower() == calendar.lower():
             return c["id"]
-    known = ", ".join(c.get("summary", "?") for c in cals) or "(none subscribed yet)"
+    known = ", ".join(sorted(aliases)) or "(none registered yet)"
     raise ValueError(
         f"No calendar named {calendar!r}. Known: {known}. If it was shared by id, "
         "run add_calendar with that id first."
@@ -85,20 +119,33 @@ def _summarize(ev: dict) -> dict:
 
 @mcp.tool
 def list_calendars() -> list[dict]:
-    """List the calendars this bot can see, as {id, name, access}. Pass a name as
+    """List the calendars this bot can use, as {id, name, access}. Pass a name as
     the `calendar` argument to the event tools to target one."""
-    return [
-        {"id": c["id"], "name": c.get("summary", ""), "access": c.get("accessRole")}
-        for c in _calendar_list()
-    ]
+    out = {
+        cal_id: {"id": cal_id, "name": name, "access": "registered"}
+        for name, cal_id in _load_aliases().items()
+    }
+    for c in _calendar_list():  # merge the live list where Google provides one
+        out[c["id"]] = {"id": c["id"], "name": c.get("summary", ""), "access": c.get("accessRole")}
+    return list(out.values())
 
 
 @mcp.tool
 def add_calendar(calendar_id: str) -> dict:
-    """Make a calendar that was shared with the bot **by id** discoverable by name.
-    Run once per calendar, after sharing the bot's service-account email onto it."""
-    c = _calendar.calendarList().insert(body={"id": calendar_id}).execute()
-    return {"id": c["id"], "name": c.get("summary", ""), "access": c.get("accessRole")}
+    """Make a calendar that was shared with the bot **by id** durably addressable
+    by name. Run once per calendar, after sharing the bot's service-account email
+    onto it."""
+    # calendars().get is the access check AND the name source of truth; the
+    # CalendarList insert is attempted as a bonus but its result is untrusted
+    # (service-account CalendarLists drop entries silently).
+    c = _calendar.calendars().get(calendarId=calendar_id).execute()
+    name = c.get("summary", calendar_id)
+    try:
+        _calendar.calendarList().insert(body={"id": calendar_id}).execute()
+    except Exception:  # noqa: BLE001 — registry below is the real registration
+        pass
+    _save_alias(name, calendar_id)
+    return {"id": calendar_id, "name": name, "access": "registered"}
 
 
 @mcp.tool
@@ -111,6 +158,7 @@ def create_calendar(name: str, member_emails: list[str] = []) -> dict:
             calendarId=cal["id"],
             body={"role": "reader", "scope": {"type": "user", "value": email}},
         ).execute()
+    _save_alias(cal.get("summary", name), cal["id"])
     return {"id": cal["id"], "name": cal.get("summary", name)}
 
 

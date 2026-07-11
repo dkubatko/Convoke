@@ -196,3 +196,20 @@ should use.
 | Server won't start: `KeyError: 'GOOGLE_SERVICE_ACCOUNT_FILE'` | That env var isn't set in the server's environment. |
 | Invites to attendees don't send | Expected — a consumer service account can't email invitations. Put people on the calendar via sharing, not as event attendees. |
 | Tools don't appear in a run | Server registered but not **enabled** (Tools page), or not ticked for that chat (chat → Tools tab). |
+
+## Persistence
+
+Registrations (`add_calendar` / `create_calendar`) are stored in a name→id
+registry at `CALENDAR_ALIASES_FILE` (default `/data/calendars.json`, created on
+first start). **Mount `/data` on a volume** — Google's CalendarList API silently
+drops entries for service accounts (a `calendarList.insert` returns success and
+the very next `list` is empty, even for owned calendars), so this file is the
+only durable registration. Compose example:
+
+```yaml
+  gcal-mcp:
+    volumes:
+      - gcal-data:/data
+volumes:
+  gcal-data:
+```
