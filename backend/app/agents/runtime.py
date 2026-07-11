@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from aiogram import Bot as AiogramBot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import RetryPromptPart, ToolCallPart
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,7 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.context import assemble_context
 from app.agents.deps import AgentDeps
 from app.agents.mcp import chat_server_prefixes, toolsets_for_chat
-from app.agents.models import ProviderNotConfigured, build_model, evict_model, get_provider
+from app.agents.models import (
+    ProviderNotConfigured,
+    build_model,
+    evict_model,
+    get_provider,
+    get_role_reasoning,
+    reasoning_settings,
+)
 from app.agents.tools import AGENT_TOOLS
 from app.intent.episodes import finish_run_episode
 from app.memory.embeddings import Embedder
@@ -65,7 +73,7 @@ don't know.
 """
 
 
-def build_agent(model, instructions: str, extra_toolsets=None) -> Agent:
+def build_agent(model, instructions: str, extra_toolsets=None, model_settings=None) -> Agent:
     return Agent(
         model,
         instructions=instructions,
@@ -73,6 +81,7 @@ def build_agent(model, instructions: str, extra_toolsets=None) -> Agent:
         tools=list(AGENT_TOOLS),
         toolsets=list(extra_toolsets or []),
         retries=1,
+        model_settings=model_settings or None,
     )
 
 
@@ -127,6 +136,7 @@ async def execute_run(
             chat = await session.get(Chat, chat.id)
             try:
                 provider = await get_provider(session, "agent")
+                reasoning = await get_role_reasoning(session, "agent")
             except ProviderNotConfigured:
                 run = await session.get(AgentRun, run_id)
                 await _fail(
@@ -234,12 +244,29 @@ async def execute_run(
                         getattr(toolset, "label", toolset),
                         exc_info=True,
                     )
-            agent = build_agent(build_model(provider), instructions, live_toolsets)
+            agent = build_agent(
+                build_model(provider), instructions, live_toolsets,
+                model_settings=reasoning_settings(reasoning),
+            )
             await stack.enter_async_context(agent)
             # Deadline: a wedged provider or tool must not hold the chat lock
             # and a concurrency slot indefinitely; expiry takes the normal
             # error path (run → error, episode reverts, user is notified).
             try:
+                async with asyncio.timeout(AGENT_RUN_DEADLINE_S):
+                    result = await agent.run(user_prompt, deps=deps)
+            except ModelHTTPError as e:
+                # Safety net: a provider that changed its reasoning-level menu
+                # degrades this run to Default instead of failing it. The
+                # level was validated at assignment time; this catches drift.
+                if not (reasoning and e.status_code == 400 and "reasoning" in str(e).lower()):
+                    raise
+                log.warning(
+                    "provider rejected reasoning_effort=%r mid-run; retrying without it",
+                    reasoning,
+                )
+                agent = build_agent(build_model(provider), instructions, live_toolsets)
+                await stack.enter_async_context(agent)
                 async with asyncio.timeout(AGENT_RUN_DEADLINE_S):
                     result = await agent.run(user_prompt, deps=deps)
             except TimeoutError:

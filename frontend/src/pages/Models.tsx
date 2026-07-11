@@ -603,6 +603,17 @@ function RoleCard({
   const selectedModel = library.find((m) => m.id === selected)
   const selectionLacksCapability = selectedModel != null && !selectedModel.capabilities[required]
 
+  const savedEffort = assignment?.reasoning_effort ?? ''
+  const PRESET_EFFORTS = ['', 'low', 'medium', 'high']
+  // '' = Default (parameter omitted); CUSTOM_MODEL sentinel reused for a free-form level.
+  const [effortPick, setEffortPick] = useState(
+    PRESET_EFFORTS.includes(savedEffort) ? savedEffort : CUSTOM_MODEL,
+  )
+  const [customEffort, setCustomEffort] = useState(
+    PRESET_EFFORTS.includes(savedEffort) ? '' : savedEffort,
+  )
+  const effort = effortPick === CUSTOM_MODEL ? customEffort.trim() : effortPick
+
   async function apply() {
     setBusy(true)
     try {
@@ -610,7 +621,10 @@ function RoleCard({
         await api.delete(`/api/model-roles/${meta.role}`)
         toast('ok', `Unassigned the ${meta.role} role`)
       } else {
-        await api.put(`/api/model-roles/${meta.role}`, { model_id: selected })
+        await api.put(`/api/model-roles/${meta.role}`, {
+          model_id: selected,
+          reasoning_effort: effort || null,
+        })
         toast('ok', `${meta.role} role → ${selectedModel?.name ?? selected}`)
       }
       onChanged()
@@ -621,7 +635,7 @@ function RoleCard({
     }
   }
 
-  const dirty = (assignment?.model_id ?? '') !== selected
+  const dirty = (assignment?.model_id ?? '') !== selected || effort !== savedEffort
   return (
     <Card>
       <div className="page-head-row" style={{ marginBottom: 10 }}>
@@ -664,14 +678,48 @@ function RoleCard({
             />
           </Field>
         </div>
+        {selected !== '' && (
+          <div style={{ flex: '0 0 170px' }}>
+            <Field label="Reasoning">
+              <Select
+                value={effortPick}
+                onChange={setEffortPick}
+                ariaLabel={`${meta.title} reasoning level`}
+                options={[
+                  { value: '', label: 'Default' },
+                  { value: 'low', label: 'low' },
+                  { value: 'medium', label: 'medium' },
+                  { value: 'high', label: 'high' },
+                  { value: CUSTOM_MODEL, label: 'Custom…' },
+                ]}
+              />
+            </Field>
+          </div>
+        )}
         <button className="btn btn--primary" disabled={!dirty || busy} onClick={() => void apply()}>
           {busy ? 'Saving…' : 'Apply'}
         </button>
       </div>
+      {selected !== '' && effortPick === CUSTOM_MODEL && (
+        <div style={{ maxWidth: 170, marginTop: 10 }}>
+          <Field label="Custom level">
+            <input
+              className="mono"
+              value={customEffort}
+              onChange={(e) => setCustomEffort(e.target.value)}
+              placeholder="e.g. xhigh"
+            />
+          </Field>
+        </div>
+      )}
       {/* Hints sit outside the 420px column so they use the card's full width. */}
       <div className="field-hint" style={{ marginTop: 6 }}>
         <div>Needs the “{required}” capability.</div>
         <div>Recommended: {meta.recommended}.</div>
+        <div>
+          Reasoning: Default omits the parameter; a picked level is verified with a live
+          probe when you Apply — models that don’t support it reject the save harmlessly.
+        </div>
         {meta.note && <div>{meta.note}</div>}
       </div>
       {selectionLacksCapability && (

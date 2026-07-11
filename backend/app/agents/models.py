@@ -21,6 +21,37 @@ class ProviderNotConfigured(RuntimeError):
         self.role = role
 
 
+def reasoning_settings(effort: str | None) -> dict:
+    """model_settings fragment for a reasoning level; {} for Default (the
+    parameter is omitted, never sent as 'none')."""
+    return {"openai_reasoning_effort": effort} if effort else {}
+
+
+async def get_role_reasoning(session: AsyncSession, role: str) -> str | None:
+    a = await session.get(ModelRoleAssignment, role)
+    return a.reasoning_effort if a is not None else None
+
+
+async def probe_reasoning(provider: ConnectedModel, effort: str) -> tuple[bool, str]:
+    """One micro-call with the requested effort — there is no discovery API
+    for supported levels anywhere in the OpenAI-compatible ecosystem, so the
+    only truth is asking. max_tokens is roomy: reasoning burns tokens before
+    the first output token, and a length-starved probe would false-negative."""
+    agent = Agent(
+        build_model(provider),
+        model_settings={"max_tokens": 1024, **reasoning_settings(effort)},
+    )
+    try:
+        await asyncio.wait_for(agent.run("Reply with exactly: OK"), TEST_TIMEOUT_S)
+    except TimeoutError:
+        return False, f"No response within {TEST_TIMEOUT_S}s probing reasoning_effort='{effort}'."
+    except ModelHTTPError as e:
+        return False, f"The endpoint rejected reasoning_effort='{effort}': {str(e)[:200]}"
+    except Exception as e:  # noqa: BLE001 — surface as a failed probe
+        return False, f"{type(e).__name__}: {str(e)[:200]}"
+    return True, f"reasoning_effort='{effort}' accepted."
+
+
 async def get_provider(session: AsyncSession, role: str) -> ConnectedModel:
     """Resolve a role to its assigned connected model."""
     model = (

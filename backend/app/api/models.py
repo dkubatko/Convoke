@@ -7,11 +7,11 @@ is assigned one. Replaces the old role-keyed /api/providers contract."""
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.models import probe_capabilities
+from app.agents.models import probe_capabilities, probe_reasoning
 from app.core.crypto import decrypt, encrypt
 from app.core.db import get_session
 from app.core.security import require_operator
@@ -65,6 +65,10 @@ class ModelTestOut(BaseModel):
 
 class RoleAssignmentIn(BaseModel):
     model_id: int
+    # None = Default: the reasoning parameter is omitted from this role's
+    # calls. Any non-empty string (low/medium/high or provider-specific) is
+    # validated with a live micro-call before the assignment saves.
+    reasoning_effort: str | None = Field(default=None, max_length=32)
 
 
 class RoleAssignmentOut(BaseModel):
@@ -74,6 +78,7 @@ class RoleAssignmentOut(BaseModel):
     required_capability: str
     # False only when a model is assigned and lacks the required capability.
     capability_ok: bool
+    reasoning_effort: str | None
 
 
 async def _assigned_roles(session: AsyncSession) -> dict[int, list[str]]:
@@ -212,6 +217,7 @@ async def list_role_assignments(
                 model_name=model.name if model else None,
                 required_capability=required,
                 capability_ok=model is None or bool((model.capabilities or {}).get(required)),
+                reasoning_effort=a.reasoning_effort if a else None,
             )
         )
     return out
@@ -226,11 +232,20 @@ async def assign_role(
     model = await session.get(ConnectedModel, body.model_id)
     if model is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown model id {body.model_id}")
+    effort = (body.reasoning_effort or "").strip() or None
+    if effort is not None:
+        # There is no discovery API for supported levels anywhere in the
+        # OpenAI-compatible ecosystem — the only truth is a live probe. A
+        # rejected level never saves, so a broken assignment can't exist.
+        ok, detail = await probe_reasoning(model, effort)
+        if not ok:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail)
     assignment = await session.get(ModelRoleAssignment, role)
     if assignment is None:
-        session.add(ModelRoleAssignment(role=role, model_id=model.id))
+        session.add(ModelRoleAssignment(role=role, model_id=model.id, reasoning_effort=effort))
     else:
         assignment.model_id = model.id
+        assignment.reasoning_effort = effort
 
     # Media that was skipped for lack of a model gets another chance now.
     kinds = ROLE_ATTACHMENT_KINDS.get(role)
@@ -248,6 +263,7 @@ async def assign_role(
         model_name=model.name,
         required_capability=required,
         capability_ok=bool((model.capabilities or {}).get(required)),
+        reasoning_effort=effort,
     )
 
 

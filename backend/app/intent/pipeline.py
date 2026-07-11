@@ -30,7 +30,14 @@ from pydantic_ai import Agent
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.models import ProviderNotConfigured, build_model, evict_model, get_provider
+from app.agents.models import (
+    ProviderNotConfigured,
+    build_model,
+    evict_model,
+    get_provider,
+    get_role_reasoning,
+    reasoning_settings,
+)
 from app.core.config import get_settings
 from app.core.runtime_settings import effective_settings, load_chat_overrides
 from app.intent.episodes import (
@@ -939,17 +946,23 @@ class IntentSweeper:
         self, session: AsyncSession, prompt: str, output_type: type[BaseModel]
     ) -> BaseModel | None:
         """The single seam to the cheap model — tests monkeypatch this."""
+        role_used = "intent"
         try:
             provider = await get_provider(session, "intent")
         except ProviderNotConfigured:
             try:
                 provider = await get_provider(session, "agent")
+                role_used = "agent"
             except ProviderNotConfigured:
                 log.warning("no intent/agent model configured; skipping classification")
                 return None
+        reasoning = await get_role_reasoning(session, role_used)
         # Small local models often need a couple of tries to produce valid
         # structured output; pydantic-ai re-prompts with the validation error.
-        agent = Agent(build_model(provider), output_type=output_type, retries=3)
+        agent = Agent(
+            build_model(provider), output_type=output_type, retries=3,
+            model_settings=reasoning_settings(reasoning) or None,
+        )
         try:
             result = await agent.run(prompt)
         except Exception:  # noqa: BLE001 — classifier failures must not stop the sweep

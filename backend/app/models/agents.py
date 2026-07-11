@@ -64,6 +64,13 @@ class ModelRoleAssignment(Base):
 
     role: Mapped[str] = mapped_column(Text, primary_key=True)  # MODEL_ROLES
     model_id: Mapped[int] = mapped_column(ForeignKey("connected_models.id", ondelete="RESTRICT"))
+    # Reasoning effort sent with this role's calls (low/medium/high or any
+    # provider-specific string via Custom). NULL = Default: the parameter is
+    # OMITTED entirely — reasoning models reason at their own default, and
+    # non-reasoning models never see an unknown parameter. Validated with a
+    # live micro-call at assignment time; per-role because the same model can
+    # serve agent (wants effort) and intent (wants latency).
+    reasoning_effort: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

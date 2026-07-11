@@ -148,3 +148,54 @@ async def test_evict_model_forces_fresh_client():
     assert build_model(provider) is first  # cached
     evict_model(provider)
     assert build_model(provider) is not first  # poisoned client replaced
+
+
+async def test_role_reasoning_effort_saved_and_validated(db_sessionmaker, client, monkeypatch):
+    """A reasoning level saves only if the live probe accepts it; Default
+    (null) skips the probe entirely; a rejected level never persists."""
+    import app.api.models as api_models
+    from sqlalchemy import select
+
+    from app.models import ConnectedModel, ModelRoleAssignment
+
+    async with db_sessionmaker() as s:
+        s.add(ConnectedModel(name="m", base_url="http://x", model_name="gpt-test",
+                             capabilities={"chat": True}))
+        await s.commit()
+        model_id = (await s.execute(select(ConnectedModel))).scalar_one().id
+
+    probes: list[str] = []
+
+    async def fake_probe(provider, effort):
+        probes.append(effort)
+        return (effort != "xhigh"), f"probe({effort})"
+
+    monkeypatch.setattr(api_models, "probe_reasoning", fake_probe)
+
+    # Default: no probe, saves as NULL
+    got = await client.put("/api/model-roles/agent", json={"model_id": model_id})
+    assert got.status_code == 200 and got.json()["reasoning_effort"] is None
+    assert probes == []
+
+    # Supported level: probed once, persisted, surfaced in the list endpoint
+    got = await client.put("/api/model-roles/agent",
+                           json={"model_id": model_id, "reasoning_effort": "medium"})
+    assert got.status_code == 200 and got.json()["reasoning_effort"] == "medium"
+    assert probes == ["medium"]
+    roles = {r["role"]: r for r in (await client.get("/api/model-roles")).json()}
+    assert roles["agent"]["reasoning_effort"] == "medium"
+
+    # Rejected level: 422, assignment keeps the previous value
+    got = await client.put("/api/model-roles/agent",
+                           json={"model_id": model_id, "reasoning_effort": "xhigh"})
+    assert got.status_code == 422 and "xhigh" in got.json()["detail"]
+    async with db_sessionmaker() as s:
+        assert (await s.get(ModelRoleAssignment, "agent")).reasoning_effort == "medium"
+
+
+def test_reasoning_settings_omits_default():
+    from app.agents.models import reasoning_settings
+
+    assert reasoning_settings(None) == {}
+    assert reasoning_settings("") == {}
+    assert reasoning_settings("high") == {"openai_reasoning_effort": "high"}

@@ -118,6 +118,8 @@ export interface RoleAssignment {
   model_name: string | null
   required_capability: string
   capability_ok: boolean
+  // Reasoning level sent with this role's calls; null = Default (omitted).
+  reasoning_effort: string | null
 }
 
 export interface CapabilityProbe {
