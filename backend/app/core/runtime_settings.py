@@ -131,6 +131,20 @@ TUNABLES: list[Tunable] = [
         "topics", 1, 5, "global", "workflows", group="Topic tracking",
     ),
     Tunable(
+        "intent_min_slot_confidence_pct", "Detail capture bar",
+        "How sure the classifier must be before a heard detail is recorded at all. Below "
+        "this, the mention is ignored.",
+        "percent", 1, 100, "global", "workflows", group="Firing",
+    ),
+    Tunable(
+        "intent_min_fire_confidence_pct", "Detail confidence to act",
+        "Every required detail must be at least this confident for the workflow to fire. "
+        "A detail between the capture bar and this shows amber — probable — and the "
+        "classifier keeps trying to confirm it from the conversation. Keep at or above "
+        "the capture bar.",
+        "percent", 1, 100, "global", "workflows", group="Firing",
+    ),
+    Tunable(
         "confirm_timeout_minutes", "Confirmation timeout",
         "How long a confirmation prompt waits for an answer before it's cancelled.",
         "minutes", 1, 1440, "global", "workflows", group="Firing",

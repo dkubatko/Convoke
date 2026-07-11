@@ -1679,6 +1679,24 @@ tr.member-row--changed td:first-child {
   color: var(--ink-2);
 }
 
+/* Confirmed clears the fire bar; probable is stored but too uncertain to
+   count — it needs a restatement/confirmation in the chat to turn green.
+   A probable chip carries its current confidence so the gap is visible. */
+.slotchip--confirmed {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
+  background: var(--ok-soft);
+}
+
+.slotchip--probable {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+  background: var(--warn-soft);
+}
+
+.slotchip .conf {
+  font-size: 10px;
+  color: var(--warn);
+}
+
 .episode-acted {
   display: flex;
   gap: 7px;

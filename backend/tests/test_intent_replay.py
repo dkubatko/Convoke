@@ -824,3 +824,28 @@ async def test_direct_invocation_is_context_only_never_fires(db_sessionmaker):
 
     assert len(await _fires(db_sessionmaker)) == 1
     assert "DIRECTMARK" in script.prompts[0]  # the direct line rendered as context
+
+
+# ---------- probable slots (write bar < confidence < fire bar) ----------
+
+async def test_probable_slot_blocks_fire_until_reasserted(db_sessionmaker):
+    """A slot written between the write bar (0.6) and fire bar (0.7) is stored
+    but must NOT fire — and the next attribution prompt shows its confidence
+    and the bar it needs (the classifier's cue to re-extract). A re-emission
+    above the bar then completes the fire. Exercises the percent settings
+    end-to-end through the sweeper (a /100 wiring mistake fails loudly here)."""
+    script = ScriptedModel()
+    _, chat, _ = await _setup(db_sessionmaker, required=SLOT_TIME)
+    sweeper = _sweeper(db_sessionmaker, script)
+
+    await _add(db_sessionmaker, _msg(chat.id, 1, ON_TOPIC, at=NOW - timedelta(minutes=2)))
+    script.push(detect(updates=[upd("time", "7pm", conf=0.65)]))
+    assert await sweeper.sweep(now=NOW) == 1
+    assert not await _fires(db_sessionmaker)  # stored, but below the fire bar
+
+    await _add(db_sessionmaker, _msg(chat.id, 2, "yeah 7 works",
+                                     at=NOW + timedelta(minutes=3)))
+    script.push(attributed(updates=[upd("time", "7pm", conf=0.9)]))
+    assert await sweeper.sweep(now=NOW + timedelta(minutes=4)) == 1
+    assert "time=7pm (confidence 0.65, needs 0.70)" in script.prompts[-1]
+    assert len(await _fires(db_sessionmaker)) == 1

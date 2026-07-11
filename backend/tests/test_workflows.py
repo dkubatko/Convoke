@@ -394,6 +394,8 @@ async def test_new_episode_tunables_are_registered():
         "intent_decay_per_hour_pct",
         "intent_episode_max_age_days",
         "intent_max_open_episodes",
+        "intent_min_slot_confidence_pct",
+        "intent_min_fire_confidence_pct",
     ):
         assert expected in keys
     settings = get_settings()

@@ -618,7 +618,11 @@ class IntentSweeper:
             names = await load_member_names(session, job.chat_id)
             if episodes:
                 prompt = build_attribution_prompt(
-                    wf, episodes, job.context, job.transcript_window, job.quoted, names
+                    wf, episodes, job.context, job.transcript_window, job.quoted, names,
+                    self.settings.intent_min_fire_confidence_pct / 100,
+                    now,
+                    timedelta(hours=self.settings.intent_decay_grace_hours),
+                    self.settings.intent_decay_per_hour_pct / 100,
                 )
                 verdict = await self._model_call(session, prompt, AttributionVerdict)
             else:
@@ -698,7 +702,8 @@ class IntentSweeper:
             now=now,
         )
         episode.slots = apply_slot_updates(
-            {}, verdict.slot_updates, now, job.window[-1].tg_message_id
+            {}, verdict.slot_updates, now, job.window[-1].tg_message_id,
+            min_confidence=self.settings.intent_min_slot_confidence_pct / 100,
         )
         if verdict.relation == "ambiguous":
             return "candidate"
@@ -738,7 +743,8 @@ class IntentSweeper:
                 now=now,
             )
             episode.slots = apply_slot_updates(
-                {}, verdict.slot_updates, now, job.window[-1].tg_message_id
+                {}, verdict.slot_updates, now, job.window[-1].tg_message_id,
+                min_confidence=self.settings.intent_min_slot_confidence_pct / 100,
             )
             stage = await self._maybe_fire(session, job, episode, verdict.confidence, now)
             return stage if episode.slots or stage != "accumulating" else "candidate"
@@ -758,7 +764,8 @@ class IntentSweeper:
             close_episode(episode, "abandoned", now)
             return "concluded"
         episode.slots = apply_slot_updates(
-            dict(episode.slots or {}), verdict.slot_updates, now, job.window[-1].tg_message_id
+            dict(episode.slots or {}), verdict.slot_updates, now, job.window[-1].tg_message_id,
+            min_confidence=self.settings.intent_min_slot_confidence_pct / 100,
         )
         touch(episode, now, summary=verdict.topic_summary or None, confidence=verdict.confidence)
         if episode.status == "converged":
@@ -790,8 +797,13 @@ class IntentSweeper:
             now,
             timedelta(hours=self.settings.intent_decay_grace_hours),
             self.settings.intent_decay_per_hour_pct / 100,
+            floor=self.settings.intent_min_slot_confidence_pct / 100,
         )
-        if not is_converged(wf.required_slots or [], effective):
+        if not is_converged(
+            wf.required_slots or [],
+            effective,
+            min_fire=self.settings.intent_min_fire_confidence_pct / 100,
+        ):
             return "accumulating"
 
         # Fingerprint dedup only means something over actual values — for a

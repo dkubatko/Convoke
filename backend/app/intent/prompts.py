@@ -11,9 +11,11 @@ classifier can read the dialogue ("the bot already confirmed 8pm; the user is
 thanking it") — bot messages are never window/prefilter input, context only.
 """
 
+from datetime import datetime, timedelta
+
 from app.memory.chunker import render_message, reply_annotation
 from app.models import IntentEpisode, Message, Workflow
-from app.intent.state import render_slots
+from app.intent.state import decayed_slots, render_slots
 
 DETECT_PROMPT = """\
 You watch a group chat for this intent:
@@ -82,6 +84,11 @@ Extract slot updates ONLY for values the group actually converged on, not
 proposals still under discussion. Use EXACTLY the slot names listed above —
 never invent new names. Emit value=null to retract a slot the group walked
 back.
+
+A gathered value shown with a confidence below the bar it needs does NOT yet
+count: when the conversation supports it — a restatement, an implicit
+confirmation, or the group simply proceeding on it — re-emit it as a slot
+update with your true confidence, even if the value itself is unchanged.
 """
 
 RECHECK_PROMPT = """\
@@ -133,7 +140,13 @@ def render_transcript(
     return "\n".join(lines)
 
 
-def render_episodes(episodes: list[IntentEpisode]) -> str:
+def render_episodes(
+    episodes: list[IntentEpisode],
+    min_fire_confidence: float,
+    now: datetime,
+    decay_grace: timedelta,
+    decay_per_hour: float,
+) -> str:
     lines = []
     for i, ep in enumerate(episodes, start=1):
         state = {
@@ -144,8 +157,21 @@ def render_episodes(episodes: list[IntentEpisode]) -> str:
         }.get(ep.status, ep.status)
         lines.append(f"{i}. [{state}] {ep.summary or '(no summary yet)'}")
         if ep.slots:
+            # A slot below the fire bar renders with its confidence and the
+            # bar it needs — shown as plainly gathered, the classifier never
+            # re-extracts it and the workflow deadlocks at "n/n details".
+            # DECAYED confidence, because that's what the fire check uses: a
+            # value the group settled hours ago fades, and the raw stored
+            # number would hide that it no longer counts.
+            shown = decayed_slots(ep.slots, now, decay_grace, decay_per_hour)
             lines.append("   gathered: " + "; ".join(
-                f"{name}={info['value']}" for name, info in sorted(ep.slots.items())
+                f"{name}={info['value']}"
+                if info["confidence"] >= min_fire_confidence
+                else (
+                    f"{name}={info['value']} (confidence "
+                    f"{info['confidence']:.2f}, needs {min_fire_confidence:.2f})"
+                )
+                for name, info in sorted(shown.items())
             ))
         if ep.status in ("fired", "satisfied") and ep.execution_summary:
             lines.append(f"   An automation already ran for this: {ep.execution_summary}")
@@ -173,11 +199,15 @@ def build_attribution_prompt(
     window: list[Message],
     quoted: dict[int, Message],
     names: dict[int, str],
+    min_fire_confidence: float,
+    now: datetime,
+    decay_grace: timedelta,
+    decay_per_hour: float,
 ) -> str:
     return ATTRIBUTION_PROMPT.format(
         trigger_prompt=workflow.trigger_prompt,
         slots_desc=slots_desc(workflow),
-        episodes=render_episodes(episodes),
+        episodes=render_episodes(episodes, min_fire_confidence, now, decay_grace, decay_per_hour),
         transcript=render_transcript(context, window, quoted, names),
     )
 

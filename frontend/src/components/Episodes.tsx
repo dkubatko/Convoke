@@ -9,10 +9,12 @@ import { Chip } from './ui'
 export function EpisodeList({
   episodes,
   requiredSlots,
+  minFireConfidence,
   showClosed = 3,
 }: {
   episodes: EpisodeInfo[]
   requiredSlots: SlotSpec[]
+  minFireConfidence: number
   showClosed?: number
 }) {
   const open = openEpisodes(episodes)
@@ -25,14 +27,27 @@ export function EpisodeList({
       </div>
       <div className="episodes">
         {[...open, ...closed].map((e) => (
-          <EpisodeRow key={e.id} e={e} requiredSlots={requiredSlots} />
+          <EpisodeRow
+            key={e.id}
+            e={e}
+            requiredSlots={requiredSlots}
+            minFireConfidence={minFireConfidence}
+          />
         ))}
       </div>
     </div>
   )
 }
 
-function EpisodeRow({ e, requiredSlots }: { e: EpisodeInfo; requiredSlots: SlotSpec[] }) {
+function EpisodeRow({
+  e,
+  requiredSlots,
+  minFireConfidence,
+}: {
+  e: EpisodeInfo
+  requiredSlots: SlotSpec[]
+  minFireConfidence: number
+}) {
   const filled = Object.entries(e.slots ?? {})
   // Missing details only matter while the topic is still being gathered.
   const gathering = ['candidate', 'converged'].includes(e.status)
@@ -58,12 +73,30 @@ function EpisodeRow({ e, requiredSlots }: { e: EpisodeInfo; requiredSlots: SlotS
 
       {(filled.length > 0 || missing.length > 0) && (
         <div className="episode-chips">
-          {filled.map(([name, v]) => (
-            <span className="slotchip" key={name}>
-              <span className="k">{name}</span>
-              {String(v.value)}
-            </span>
-          ))}
+          {filled.map(([name, v]) => {
+            // Confirmed vs probable only matters pre-fire; handled topics
+            // keep neutral chips.
+            const confirmed = (v.confidence ?? 0) >= minFireConfidence
+            const cls = !gathering
+              ? 'slotchip'
+              : confirmed
+                ? 'slotchip slotchip--confirmed'
+                : 'slotchip slotchip--probable'
+            const title = !gathering
+              ? undefined
+              : confirmed
+                ? 'confirmed — counts toward firing'
+                : `probable — needs to be restated or confirmed in the chat before it counts (requires ${minFireConfidence.toFixed(2)})`
+            return (
+              <span className={cls} key={name} title={title}>
+                <span className="k">{name}</span>
+                {String(v.value)}
+                {gathering && !confirmed && (
+                  <span className="conf">{(v.confidence ?? 0).toFixed(2)}</span>
+                )}
+              </span>
+            )
+          })}
           {missing.map((r) => (
             <span className="slotchip slotchip--missing" key={r.name} title={r.description}>
               <span className="k">{r.name}</span>?

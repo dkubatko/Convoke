@@ -150,6 +150,7 @@ function ChatStateCard({ c, wf }: { c: WorkflowChat; wf: WorkflowDetailT }) {
                   steps={funnel(cur, c.episodes, wf.threshold, wf.required_slots, {
                     pending: c.pending_messages > 0,
                     awaitingConfirm: c.recent_fires[0]?.status === 'confirm_wait',
+                    minFireConfidence: wf.min_fire_confidence,
                   })}
                 />
                 <dl className="kv">
@@ -159,7 +160,11 @@ function ChatStateCard({ c, wf }: { c: WorkflowChat; wf: WorkflowDetailT }) {
               </div>
             ))
           )}
-          <EpisodeList episodes={c.episodes} requiredSlots={wf.required_slots} />
+          <EpisodeList
+            episodes={c.episodes}
+            requiredSlots={wf.required_slots}
+            minFireConfidence={wf.min_fire_confidence}
+          />
         </div>
       )}
 

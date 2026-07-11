@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from croniter import croniter
@@ -8,10 +8,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session, get_sessionmaker
+from app.core.runtime_settings import effective_settings
 from app.core.security import require_operator
 from app.core.tasks import spawn
 from app.intent.episodes import close_episode, revert_fired
 from app.intent.examples import generate_examples
+from app.intent.state import decayed_slots
 from app.memory.runtime import ensure_embedder
 from app.threads import visible_thread_keys
 from sqlalchemy import func
@@ -333,7 +335,12 @@ class EpisodeOut(BaseModel):
 
 
 async def _episodes_for(
-    session: AsyncSession, workflow_id: int, chat_id: int, limit: int = 10
+    session: AsyncSession,
+    workflow_id: int,
+    chat_id: int,
+    decay_grace: timedelta,
+    decay_per_hour: float,
+    limit: int = 10,
 ) -> list[EpisodeOut]:
     # Only threads that actually exist AND are monitored surface here. This
     # excludes disabled threads and orphaned cursors/episodes (whose messages
@@ -364,7 +371,16 @@ async def _episodes_for(
         .scalars()
         .all()
     )
-    return [EpisodeOut.model_validate(e) for e in rows]
+    # Slot confidences go out DECAYED — the same numbers the fire check
+    # compares against the bar. Raw stored values would render a faded slot
+    # as a confirmed green chip while the backend no longer counts it.
+    now = datetime.now(timezone.utc)
+    out = []
+    for e in rows:
+        item = EpisodeOut.model_validate(e)
+        item.slots = decayed_slots(e.slots or {}, now, decay_grace, decay_per_hour)
+        out.append(item)
+    return out
 
 
 async def _cursors_for(
@@ -453,6 +469,9 @@ class ChatWorkflowOut(BaseModel):
     recent_runs: list[ChatRunOut]
     # Messages THIS workflow hasn't evaluated yet (past its own cursor).
     pending_messages: int = 0
+    # Global fire bar (0–1): a gathered slot below it is "probable" — shown
+    # amber and not yet counted toward firing. From runtime settings.
+    min_fire_confidence: float = 0.7
 
 
 @router.get("/chats/{chat_id}/workflows", response_model=list[ChatWorkflowOut])
@@ -472,12 +491,18 @@ async def chat_workflows(
         ).scalars()
     )
     workflows = (await session.execute(select(Workflow).order_by(Workflow.id))).scalars().all()
+    rs = await effective_settings(session)
+    fire_bar = rs.intent_min_fire_confidence_pct / 100
+    decay_grace = timedelta(hours=rs.intent_decay_grace_hours)
+    decay_per_hour = rs.intent_decay_per_hour_pct / 100
 
     out: list[ChatWorkflowOut] = []
     for wf in workflows:
         cursors = await _cursors_for(session, wf.id, chat_id)
         episodes = (
-            await _episodes_for(session, wf.id, chat_id) if wf.type == "intent" else []
+            await _episodes_for(session, wf.id, chat_id, decay_grace, decay_per_hour)
+            if wf.type == "intent"
+            else []
         )
         # Messages THIS workflow hasn't evaluated yet: newer than its own
         # least-advanced cursor. Only meaningful for an assigned intent
@@ -539,6 +564,7 @@ async def chat_workflows(
                 ],
                 recent_runs=[ChatRunOut.model_validate(r) for r in runs],
                 pending_messages=pending_messages,
+                min_fire_confidence=fire_bar,
             )
         )
     return out
@@ -560,6 +586,8 @@ class WorkflowChatOut(BaseModel):
 
 class WorkflowDetailOut(WorkflowOut):
     chats: list[WorkflowChatOut]
+    # Global fire bar (0–1), for rendering probable-vs-confirmed slots.
+    min_fire_confidence: float = 0.7
 
 
 @router.get("/workflows/{workflow_id}/detail", response_model=WorkflowDetailOut)
@@ -572,6 +600,7 @@ async def workflow_detail(
     if wf is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow not found")
     base = await _out(session, wf)
+    rs = await effective_settings(session)
 
     chats = (
         (
@@ -590,7 +619,15 @@ async def workflow_detail(
     for chat in chats:
         cursors = await _cursors_for(session, workflow_id, chat.id)
         episodes = (
-            await _episodes_for(session, workflow_id, chat.id) if wf.type == "intent" else []
+            await _episodes_for(
+                session,
+                workflow_id,
+                chat.id,
+                timedelta(hours=rs.intent_decay_grace_hours),
+                rs.intent_decay_per_hour_pct / 100,
+            )
+            if wf.type == "intent"
+            else []
         )
         pending = 0
         if wf.type == "intent" and cursors:
@@ -638,7 +675,11 @@ async def workflow_detail(
                 recent_runs=[ChatRunOut.model_validate(r) for r in runs],
             )
         )
-    return WorkflowDetailOut(**base.model_dump(), chats=chat_out)
+    return WorkflowDetailOut(
+        **base.model_dump(),
+        chats=chat_out,
+        min_fire_confidence=rs.intent_min_fire_confidence_pct / 100,
+    )
 
 
 @router.put("/chats/{chat_id}/workflows", response_model=list[int])

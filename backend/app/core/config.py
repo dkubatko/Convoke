@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     # computed lazily, never written back.
     intent_decay_grace_hours: int = 6
     intent_decay_per_hour_pct: int = 85
+    # Slot confidence bars, percent. The write bar records a heard detail; the
+    # fire bar lets it count toward acting. A detail between the two is
+    # "probable": stored and shown (amber), rendered to the classifier with
+    # its confidence so it re-extracts it once the group confirms.
+    intent_min_slot_confidence_pct: int = 60
+    intent_min_fire_confidence_pct: int = 70
     # How often the detector loop wakes to look for windows to evaluate. One
     # global loop processes every chat — not a per-chat knob.
     intent_sweep_interval_seconds: int = 5

@@ -34,12 +34,13 @@ def decay_factor(
     return per_hour**hours
 
 
-def effective_slots(
-    slots: dict, now: datetime, grace: timedelta, per_hour: float
-) -> dict:
-    """Slots with decayed confidences, each aged from its own write time;
-    slots that faded below the floor drop out entirely. Stored values are
-    never mutated — recompute on each read."""
+def decayed_slots(slots: dict, now: datetime, grace: timedelta, per_hour: float) -> dict:
+    """Every slot with its confidence decayed from its own write time — no
+    floor applied. For surfaces that must SHOW a faded value (UI chips, the
+    classifier prompt) rather than silently drop it: comparing the RAW stored
+    confidence there would render a decayed slot as confirmed while the fire
+    check no longer counts it — the "gathered but never fires" deadlock
+    again, via decay. Stored values are never mutated — recompute on read."""
     out = {}
     for name, info in slots.items():
         ts = info.get("ts")
@@ -50,9 +51,24 @@ def effective_slots(
         if written_at.tzinfo is None:  # naive stored ts — treat as UTC
             written_at = written_at.replace(tzinfo=timezone.utc)
         confidence = info.get("confidence", 0) * decay_factor(written_at, now, grace, per_hour)
-        if confidence >= MIN_SLOT_CONFIDENCE:
-            out[name] = {**info, "confidence": confidence}
+        out[name] = {**info, "confidence": confidence}
     return out
+
+
+def effective_slots(
+    slots: dict,
+    now: datetime,
+    grace: timedelta,
+    per_hour: float,
+    floor: float = MIN_SLOT_CONFIDENCE,
+) -> dict:
+    """The fire decision's view: decayed slots that still clear the floor
+    (the workflow's write bar); slots that faded below it drop out."""
+    return {
+        name: info
+        for name, info in decayed_slots(slots, now, grace, per_hour).items()
+        if info["confidence"] >= floor
+    }
 
 
 def _canon(name: str) -> str:
@@ -103,15 +119,20 @@ def normalize_slot_updates(
 
 
 def apply_slot_updates(
-    slots: dict, updates: list[SlotUpdate], now: datetime, window_last_msg_id: int
+    slots: dict,
+    updates: list[SlotUpdate],
+    now: datetime,
+    window_last_msg_id: int,
+    min_confidence: float = MIN_SLOT_CONFIDENCE,
 ) -> dict:
-    """Last-write-wins; value=None retracts; low-confidence updates ignored."""
+    """Last-write-wins; value=None retracts; updates below the workflow's
+    write bar ignored."""
     out = dict(slots)
     for update in updates:
         if update.value is None:
             out.pop(update.name, None)
             continue
-        if update.confidence < MIN_SLOT_CONFIDENCE:
+        if update.confidence < min_confidence:
             continue
         out[update.name] = {
             "value": update.value,
@@ -122,7 +143,9 @@ def apply_slot_updates(
     return out
 
 
-def is_converged(required_slots: list[dict], slots: dict) -> bool:
+def is_converged(
+    required_slots: list[dict], slots: dict, min_fire: float = MIN_FIRE_CONFIDENCE
+) -> bool:
     """Fires only when every required slot is filled with enough confidence —
     call with EFFECTIVE (decayed) slots. A workflow with no required slots
     converges on any confident match (caller checks the verdict)."""
@@ -130,7 +153,7 @@ def is_converged(required_slots: list[dict], slots: dict) -> bool:
         return True
     for spec in required_slots:
         filled = slots.get(spec["name"])
-        if filled is None or filled.get("confidence", 0) < MIN_FIRE_CONFIDENCE:
+        if filled is None or filled.get("confidence", 0) < min_fire:
             return False
     return True
 

@@ -6,6 +6,7 @@ from app.intent.schemas import SlotUpdate
 from app.intent.state import (
     apply_slot_updates,
     decay_factor,
+    decayed_slots,
     effective_slots,
     fingerprint,
     is_converged,
@@ -113,6 +114,15 @@ def test_slots_age_independently():
     assert stored["date"]["confidence"] == 0.9  # lazy: stored never mutated
 
 
+def test_decayed_slots_keeps_faded_slots_visible():
+    """Display/prompt surfaces show a faded slot with its decayed confidence;
+    only the fire check (effective_slots) drops it."""
+    stored = {"date": _slot("Tue", 0.9, ts=NOW - timedelta(hours=9))}
+    shown = decayed_slots(stored, NOW, GRACE, PER_HOUR)
+    assert 0.5 < shown["date"]["confidence"] < 0.6  # faded but still visible
+    assert effective_slots(stored, NOW, GRACE, PER_HOUR) == {}
+
+
 def test_reassertion_restores_full_strength():
     stored = {"date": _slot("Tue", 0.9, ts=NOW - timedelta(hours=9))}
     stored = apply_slot_updates(stored, [SlotUpdate(name="date", value="Tue", confidence=0.9)], NOW, 5)
@@ -149,6 +159,26 @@ def test_convergence_requires_all_slots_confident():
 
 def test_no_slot_workflow_converges_trivially():
     assert is_converged([], {})
+
+
+def test_confidence_bars_are_tunable():
+    """The write bar (apply/effective) and fire bar (is_converged) come from
+    runtime settings — the defaults are the old constants, and stricter bars
+    reject what the defaults accept."""
+    update = [SlotUpdate(name="date", value="Tue", confidence=0.65)]
+    assert "date" in apply_slot_updates({}, update, NOW, 1)  # default write bar 0.6
+    assert apply_slot_updates({}, update, NOW, 1, min_confidence=0.7) == {}
+
+    stored = {"date": _slot("Tue", 0.65)}
+    assert "date" in effective_slots(stored, NOW, GRACE, PER_HOUR)
+    assert effective_slots(stored, NOW, GRACE, PER_HOUR, floor=0.7) == {}
+
+    eff = {
+        "date": {"value": "Tue", "confidence": 0.75},
+        "title": {"value": "dinner", "confidence": 0.75},
+    }
+    assert is_converged(REQUIRED, eff)  # default fire bar 0.7
+    assert not is_converged(REQUIRED, eff, min_fire=0.8)
 
 
 # ---------- fingerprint ----------

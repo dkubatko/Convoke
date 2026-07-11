@@ -623,6 +623,7 @@ function ExpandedWorkflow({ wf, chatId }: { wf: ChatWorkflow; chatId: number }) 
                 steps={funnel(c, wf.episodes, wf.threshold, wf.required_slots, {
                   pending: wf.pending_messages > 0,
                   awaitingConfirm: wf.recent_fires[0]?.status === 'confirm_wait',
+                  minFireConfidence: wf.min_fire_confidence,
                 })}
               />
               <dl className="kv">
@@ -637,7 +638,11 @@ function ExpandedWorkflow({ wf, chatId }: { wf: ChatWorkflow; chatId: number }) 
         ))}
 
       {wf.type === 'intent' && (
-        <EpisodeList episodes={wf.episodes} requiredSlots={wf.required_slots} />
+        <EpisodeList
+          episodes={wf.episodes}
+          requiredSlots={wf.required_slots}
+          minFireConfidence={wf.min_fire_confidence}
+        />
       )}
 
       {wf.type === 'scheduled' && (

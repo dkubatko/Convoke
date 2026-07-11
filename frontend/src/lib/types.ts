@@ -259,6 +259,9 @@ export interface ChatWorkflow {
   recent_fires: Fire[]
   recent_runs: ChatWorkflowRun[]
   pending_messages: number
+  // Global fire bar (0–1): a gathered slot below it is "probable" — amber,
+  // not yet counted toward firing.
+  min_fire_confidence: number
 }
 
 export interface WorkflowChat {
@@ -274,6 +277,7 @@ export interface WorkflowChat {
 
 export interface WorkflowDetail extends Workflow {
   chats: WorkflowChat[]
+  min_fire_confidence: number
 }
 
 export interface ThreadPreviewMsg {

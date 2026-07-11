@@ -118,7 +118,7 @@ export function funnel(
   episodes: EpisodeInfo[],
   threshold: number | null,
   requiredSlots: SlotSpec[],
-  opts?: { pending?: boolean; awaitingConfirm?: boolean },
+  opts?: { pending?: boolean; awaitingConfirm?: boolean; minFireConfidence?: number },
 ): FunnelStep[] {
   const stage = cursor?.last_stage ?? null
   const score = cursor?.last_score ?? null
@@ -182,8 +182,18 @@ export function funnel(
 
   const active = open.find((e) => e.status === 'candidate')
   // Count REQUIRED names present — never raw keys, so a stray slot the model
-  // invented can't display as "1/1" while convergence still waits.
-  const gathered = requiredSlots.filter((r) => r.name in (active?.slots ?? {})).length
+  // invented can't display as "1/1" while convergence still waits. Only
+  // slots clearing the fire bar count: a probable (sub-bar) detail showing
+  // as gathered here is exactly the "3/3 but not firing" confusion.
+  const fireBar = opts?.minFireConfidence ?? 0.7
+  const gathered = requiredSlots.filter(
+    (r) => (active?.slots?.[r.name]?.confidence ?? 0) >= fireBar,
+  ).length
+  const probable = requiredSlots.filter(
+    (r) =>
+      r.name in (active?.slots ?? {}) &&
+      (active?.slots?.[r.name]?.confidence ?? 0) < fireBar,
+  ).length
   const need = requiredSlots.length
   // Fire-stage blocks (fingerprint duplicate, stale recheck) are amber at
   // Fire; classifier-level blocks leave Fire dashed 'held' — nothing
@@ -203,7 +213,13 @@ export function funnel(
               : stage === 'suppressed' || stage === 'concluded'
                 ? { name: 'Fire', status: 'held', detail: 'not acted' }
                 : stage === 'candidate' || stage === 'accumulating'
-                  ? { name: 'Fire', status: 'wait', detail: need ? `${gathered}/${need} details` : 'any match' }
+                  ? {
+                      name: 'Fire',
+                      status: 'wait',
+                      detail: need
+                        ? `${gathered}/${need} details${probable ? ` · ${probable} probable` : ''}`
+                        : 'any match',
+                    }
                   : { name: 'Fire', status: 'skip' }
 
   return [prefilter, classifier, fire]
