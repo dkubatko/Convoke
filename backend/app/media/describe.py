@@ -46,6 +46,25 @@ FRAMES_PROMPT = (
     "Keep it under {max_chars} characters. Reply with the description only."
 )
 
+# Question-directed re-inspection (the agent's inspect_media tool): unlike the
+# describe prompts, the output is an ANSWER, not an index entry.
+INSPECT_IMAGE_PROMPT = (
+    "This image was sent in a group chat. Answer the question about it precisely; quote "
+    "any relevant visible text VERBATIM (dates, times, names, amounts matter most). If "
+    "the image cannot answer the question, say what it shows instead.\n"
+    'Question: "{question}"'
+)
+
+INSPECT_FRAMES_PROMPT = (
+    "These images are frames sampled from a video sent in a group chat (the first is its "
+    "thumbnail).{transcript_line}\n"
+    "Answer the question about the video precisely; quote any relevant visible text or "
+    "speech VERBATIM. If the frames cannot answer it, say what the video shows instead.\n"
+    'Question: "{question}"'
+)
+
+INSPECT_MAX_CHARS = 1500  # answers return to the agent's context — keep them bounded
+
 
 class Describer:
     """The media loop's model seam; tests substitute a fake."""
@@ -118,6 +137,37 @@ class Describer:
         resp.raise_for_status()
         text = (resp.json()["choices"][0]["message"]["content"] or "").strip()
         return text[: self.settings.media_description_max_chars]
+
+    async def answer_about_image(
+        self, provider: ConnectedModel, data: bytes, mime: str, question: str, caption: str = ""
+    ) -> str:
+        prompt = INSPECT_IMAGE_PROMPT.format(question=question[:500])
+        if caption:
+            prompt += f'\nThe sender captioned it: "{caption[:200]}"'
+        agent = Agent(build_model(provider), model_settings={"max_tokens": 700})
+        result = await asyncio.wait_for(
+            agent.run([prompt, BinaryContent(data, media_type=mime)]), DESCRIBE_TIMEOUT_S
+        )
+        return (result.output or "").strip()[:INSPECT_MAX_CHARS]
+
+    async def answer_about_frames(
+        self,
+        provider: ConnectedModel,
+        frames: list[bytes],
+        question: str,
+        transcript: str | None = None,
+        caption: str = "",
+    ) -> str:
+        transcript_line = f'\nThe audio says: "{transcript[:800]}"' if transcript else ""
+        prompt = INSPECT_FRAMES_PROMPT.format(
+            transcript_line=transcript_line, question=question[:500]
+        )
+        if caption:
+            prompt += f'\nThe sender captioned it: "{caption[:200]}"'
+        agent = Agent(build_model(provider), model_settings={"max_tokens": 700})
+        parts = [prompt, *(BinaryContent(f, media_type="image/jpeg") for f in frames)]
+        result = await asyncio.wait_for(agent.run(parts), DESCRIBE_TIMEOUT_S)
+        return (result.output or "").strip()[:INSPECT_MAX_CHARS]
 
     async def sample_frames(self, data: bytes, count: int, duration_s: int | None) -> list[bytes]:
         """Evenly sample up to `count` JPEG frames via ffmpeg. Best-effort:

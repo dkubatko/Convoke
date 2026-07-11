@@ -1,11 +1,9 @@
 """Memory tools attached to every agent run."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pydantic_ai import RunContext
-from sqlalchemy import select
-
-from sqlalchemy import func
+from sqlalchemy import func, select, true
 
 from app.agents.deps import AgentDeps
 from app.members import refresh_chat_memory_names, set_override_name
@@ -22,19 +20,152 @@ MAX_MESSAGES_FETCHED = 30
 MAX_CONTEXT_RADIUS = 20
 
 
-async def search_chat_history(ctx: RunContext[AgentDeps], query: str) -> str:
+def _parse_day(value: str | None, end_of_day: bool) -> datetime | None:
+    """ISO date/datetime → aware UTC datetime; a bare date snaps to the day's
+    start (after) or end (before), so after=X, before=X covers all of day X.
+    Raises ValueError with a model-actionable message."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise ValueError(f"'{value}' is not an ISO date (use YYYY-MM-DD).") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    if len(value.strip()) <= 10 and end_of_day:  # bare date
+        parsed = parsed + timedelta(days=1) - timedelta(microseconds=1)
+    return parsed
+
+
+async def search_chat_history(
+    ctx: RunContext[AgentDeps],
+    query: str,
+    after: str | None = None,
+    before: str | None = None,
+) -> str:
     """Semantically search this chat's full message history (including
     imported history from before you joined). Use for anything that happened
-    earlier than the recent messages you were shown."""
+    earlier than the recent messages you were shown. Optional after/before
+    (ISO dates, e.g. '2026-05-05') restrict results to conversations from
+    that period — use them for time-anchored questions ('last summer',
+    'around her birthday'). To browse by date without a query, use
+    get_messages_by_date."""
+    try:
+        after_dt = _parse_day(after, end_of_day=False)
+        before_dt = _parse_day(before, end_of_day=True)
+    except ValueError as e:
+        return str(e)
     async with ctx.deps.sessionmaker() as session:
         # k=6, not 4: conversations ABOUT a fact (incl. with the bot) often
         # outscore the fact itself — measured live, the true answer sits at
         # fused rank 5-6 under that pressure. The model is good at picking
         # the right excerpt from a slightly bigger pile; two more are cheap.
-        hits = await store_search(session, ctx.deps.embedder, ctx.deps.chat_id, query, k=6)
+        hits = await store_search(
+            session, ctx.deps.embedder, ctx.deps.chat_id, query,
+            k=6, after=after_dt, before=before_dt,
+        )
     if not hits:
-        return "No matching history found."
+        return "No matching history found." + (
+            " Try widening or dropping the date range." if after or before else ""
+        )
     return "\n\n---\n\n".join(h.rendered for h in hits)
+
+
+async def get_messages_by_date(
+    ctx: RunContext[AgentDeps], date: str, radius: int = 10
+) -> str:
+    """Read the chat as it was on a given ISO date ('2025-10-19'): up to
+    `radius` stored messages each side of that day's first message, as one
+    transcript (max 20). Deterministic — no search ranking involved. Use it
+    for 'what happened on/around <date>' and anniversary-style lookups; pair
+    with search_chat_history when you don't know the date."""
+    try:
+        anchor_dt = _parse_day(date, end_of_day=False)
+    except ValueError as e:
+        return str(e)
+    radius = max(1, min(radius, MAX_CONTEXT_RADIUS))
+    async with ctx.deps.sessionmaker() as session:
+        unmonitored = await unmonitored_threads(session, ctx.deps.chat_id)
+        monitored = (
+            ~func.coalesce(Message.thread_id, 0).in_(unmonitored) if unmonitored else true()
+        )
+        anchor = (
+            await session.execute(
+                select(Message)
+                .where(
+                    Message.chat_id == ctx.deps.chat_id,
+                    Message.sent_at >= anchor_dt,
+                    monitored,
+                )
+                .order_by(Message.tg_message_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        note = ""
+        if anchor is None:  # date past the last stored message
+            anchor = (
+                await session.execute(
+                    select(Message)
+                    .where(Message.chat_id == ctx.deps.chat_id, monitored)
+                    .order_by(Message.tg_message_id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if anchor is None:
+                return "No stored messages in this chat."
+            note = f"(No messages on/after {date} — showing the latest stored ones.)\n"
+        before_rows = (
+            await session.execute(
+                select(Message)
+                .where(
+                    Message.chat_id == ctx.deps.chat_id,
+                    Message.tg_message_id < anchor.tg_message_id,
+                    monitored,
+                )
+                .order_by(Message.tg_message_id.desc())
+                .limit(radius)
+            )
+        ).scalars().all()
+        after_rows = (
+            await session.execute(
+                select(Message)
+                .where(
+                    Message.chat_id == ctx.deps.chat_id,
+                    Message.tg_message_id > anchor.tg_message_id,
+                    monitored,
+                )
+                .order_by(Message.tg_message_id)
+                .limit(radius)
+            )
+        ).scalars().all()
+        rows = list(reversed(before_rows)) + [anchor] + list(after_rows)
+        return note + await render_for_chat(session, ctx.deps.chat_id, rows)
+
+
+async def inspect_media(ctx: RunContext[AgentDeps], message_id: int, question: str) -> str:
+    """Re-examine the media on one message with a specific question — the
+    stored description is a short index entry and often lacks the detail
+    asked about. Photos/videos are re-read by the vision model with your
+    question (videos as sampled frames + audio transcript); voice returns
+    its full transcript. Costs a model call — use when the stored
+    description in the transcript doesn't answer. Unavailable for media from
+    imported history (source files were discarded after description)."""
+    from app.media.inspect import inspect_attachment
+
+    async with ctx.deps.sessionmaker() as session:
+        anchor = (
+            await session.execute(
+                select(Message).where(
+                    Message.chat_id == ctx.deps.chat_id,
+                    Message.tg_message_id == message_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if anchor is None or (anchor.thread_id or 0) in await unmonitored_threads(
+            session, ctx.deps.chat_id
+        ):
+            return f"#{message_id}: not in Convoke's stored history for this chat."
+        return await inspect_attachment(session, ctx.deps.chat_id, message_id, question)
 
 
 async def get_messages(ctx: RunContext[AgentDeps], message_ids: list[int]) -> str:
@@ -295,6 +426,8 @@ AGENT_TOOLS = [
     search_chat_history,
     get_messages,
     get_conversation_context,
+    get_messages_by_date,
+    inspect_media,
     remember,
     recall,
     past_workflow_actions,

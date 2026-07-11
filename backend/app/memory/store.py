@@ -78,43 +78,86 @@ async def render_chunk_from_raw(
     )
 
 
-async def _dense_ids(
-    session: AsyncSession, embedder: Embedder, chat_id: int, query: str
-) -> list[int]:
-    qvec = await embedder.embed_query(query)
-    return list(
-        (
-            await session.execute(
-                select(Chunk.id)
-                .where(Chunk.chat_id == chat_id, Chunk.embedding.is_not(None))
-                .order_by(Chunk.embedding.cosine_distance(qvec))
-                .limit(CHANNEL_POOL)
-            )
-        ).scalars()
+def _period_filter(after, before):
+    """ORM EXISTS restricting chunks to those covering >=1 message inside
+    [after, before]. Chunks carry no timestamps — their period is derived
+    from the messages they cover (cheap at chunk counts; uses the message
+    chat/id index)."""
+    conds = [
+        Message.chat_id == Chunk.chat_id,
+        func.coalesce(Message.thread_id, 0) == func.coalesce(Chunk.thread_id, 0),
+        Message.tg_message_id >= Chunk.msg_tg_id_start,
+        Message.tg_message_id <= Chunk.msg_tg_id_end,
+    ]
+    if after is not None:
+        conds.append(Message.sent_at >= after)
+    if before is not None:
+        conds.append(Message.sent_at <= before)
+    return select(1).where(*conds).exists()
+
+
+def _period_sql(after, before) -> tuple[str, dict]:
+    """Raw-SQL twin of _period_filter for the textual lexical channels."""
+    if after is None and before is None:
+        return "", {}
+    bounds, params = [], {}
+    if after is not None:
+        bounds.append("ms.sent_at >= :after")
+        params["after"] = after
+    if before is not None:
+        bounds.append("ms.sent_at <= :before")
+        params["before"] = before
+    return (
+        " AND EXISTS (SELECT 1 FROM messages ms "
+        "WHERE ms.chat_id = chunks.chat_id "
+        "AND coalesce(ms.thread_id, 0) = coalesce(chunks.thread_id, 0) "
+        "AND ms.tg_message_id BETWEEN chunks.msg_tg_id_start AND chunks.msg_tg_id_end "
+        f"AND {' AND '.join(bounds)})",
+        params,
     )
 
 
-async def _fts_ids(session: AsyncSession, chat_id: int, query: str) -> list[int]:
+async def _dense_ids(
+    session: AsyncSession, embedder: Embedder, chat_id: int, query: str, after=None, before=None
+) -> list[int]:
+    qvec = await embedder.embed_query(query)
+    stmt = (
+        select(Chunk.id)
+        .where(Chunk.chat_id == chat_id, Chunk.embedding.is_not(None))
+        .order_by(Chunk.embedding.cosine_distance(qvec))
+        .limit(CHANNEL_POOL)
+    )
+    if after is not None or before is not None:
+        stmt = stmt.where(_period_filter(after, before))
+    return list((await session.execute(stmt)).scalars())
+
+
+async def _fts_ids(
+    session: AsyncSession, chat_id: int, query: str, after=None, before=None
+) -> list[int]:
     """Exact-token matches, language-neutral ('simple': no stemming) and
     accent-folded. websearch_to_tsquery is total on arbitrary user text."""
+    period, params = _period_sql(after, before)
     return list(
         (
             await session.execute(
                 text(
                     "SELECT id FROM chunks "
                     "WHERE chat_id = :chat_id AND to_tsvector('simple', f_unaccent(text)) "
-                    "      @@ websearch_to_tsquery('simple', f_unaccent(:q)) "
-                    "ORDER BY ts_rank(to_tsvector('simple', f_unaccent(text)), "
+                    "      @@ websearch_to_tsquery('simple', f_unaccent(:q))" + period +
+                    " ORDER BY ts_rank(to_tsvector('simple', f_unaccent(text)), "
                     "                 websearch_to_tsquery('simple', f_unaccent(:q))) DESC "
                     "LIMIT :pool"
                 ),
-                {"chat_id": chat_id, "q": query, "pool": CHANNEL_POOL},
+                {"chat_id": chat_id, "q": query, "pool": CHANNEL_POOL, **params},
             )
         ).scalars()
     )
 
 
-async def _trgm_ids(session: AsyncSession, chat_id: int, query: str) -> list[int]:
+async def _trgm_ids(
+    session: AsyncSession, chat_id: int, query: str, after=None, before=None
+) -> list[int]:
     """Fuzzy word-level matches: inflected forms ('день рождения' ↔ 'Днем
     Рождения'), typos, partial names. <% is index-backed; the threshold GUC
     is scoped to this transaction only."""
@@ -124,23 +167,30 @@ async def _trgm_ids(session: AsyncSession, chat_id: int, query: str) -> list[int
         text("SELECT set_config('pg_trgm.word_similarity_threshold', :t, true)"),
         {"t": str(TRGM_WORD_SIM_THRESHOLD)},
     )
+    period, params = _period_sql(after, before)
     return list(
         (
             await session.execute(
                 text(
                     "SELECT id FROM chunks "
-                    "WHERE chat_id = :chat_id AND f_unaccent(:q) <% f_unaccent(text) "
-                    "ORDER BY word_similarity(f_unaccent(:q), f_unaccent(text)) DESC "
+                    "WHERE chat_id = :chat_id AND f_unaccent(:q) <% f_unaccent(text)" + period +
+                    " ORDER BY word_similarity(f_unaccent(:q), f_unaccent(text)) DESC "
                     "LIMIT :pool"
                 ),
-                {"chat_id": chat_id, "q": query, "pool": CHANNEL_POOL},
+                {"chat_id": chat_id, "q": query, "pool": CHANNEL_POOL, **params},
             )
         ).scalars()
     )
 
 
 async def search_chat_history(
-    session: AsyncSession, embedder: Embedder, chat_id: int, query: str, k: int = 6
+    session: AsyncSession,
+    embedder: Embedder,
+    chat_id: int,
+    query: str,
+    k: int = 6,
+    after=None,
+    before=None,
 ) -> list[SearchHit]:
     if session.bind.dialect.name != "postgresql":
         return []  # hybrid search is Postgres-only; unit tests hit this path
@@ -150,9 +200,9 @@ async def search_chat_history(
     if state is not None and state.status == "reembedding":
         return []  # vectors are being rebuilt; query dim may not match yet
     rankings = [
-        await _dense_ids(session, embedder, chat_id, query),
-        await _fts_ids(session, chat_id, query),
-        await _trgm_ids(session, chat_id, query),
+        await _dense_ids(session, embedder, chat_id, query, after, before),
+        await _fts_ids(session, chat_id, query, after, before),
+        await _trgm_ids(session, chat_id, query, after, before),
     ]
     fused = rrf_merge(rankings)
     top = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:k]

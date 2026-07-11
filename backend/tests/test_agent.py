@@ -455,3 +455,98 @@ async def test_get_conversation_context_windows_same_thread(db_sessionmaker):
     assert "main-3" in out and "SECRET" not in out
     assert "#4: not in Convoke's stored history for this chat." in out
     assert "#6: not in Convoke's stored history for this chat." in out
+
+
+async def test_get_messages_by_date_and_temporal_parse(db_sessionmaker):
+    from types import SimpleNamespace
+
+    from app.agents.deps import AgentDeps
+    from app.agents.tools import _parse_day, get_messages_by_date
+    from app.models import Bot, Chat, ChatThread
+    from datetime import datetime as dt, timezone as tz
+
+    # bare dates snap to day boundaries; datetimes pass through; junk errors
+    assert _parse_day("2026-05-05", end_of_day=False) == dt(2026, 5, 5, tzinfo=tz.utc)
+    assert _parse_day("2026-05-05", end_of_day=True).hour == 23
+    assert _parse_day(None, end_of_day=False) is None
+    with pytest.raises(ValueError):
+        _parse_day("май пятое", end_of_day=False)
+
+    async with db_sessionmaker() as s:
+        bot = Bot(tg_bot_id=1, username="b", name="b", token_encrypted="x",
+                  can_read_all_group_messages=True)
+        s.add(bot)
+        await s.flush()
+        chat = Chat(bot_id=bot.id, tg_chat_id=-100, type="supergroup", status="authorized")
+        s.add(chat)
+        await s.flush()
+        chat_id = chat.id
+        days = ["2026-05-01", "2026-05-03", "2026-05-05", "2026-05-05", "2026-05-09"]
+        for i, day in enumerate(days, start=1):
+            s.add(Message(chat_id=chat_id, tg_message_id=i, sender_name="A",
+                          text=f"msg-{day}-#{i}",
+                          sent_at=dt.fromisoformat(day + "T12:00:00+00:00")))
+        # unmonitored thread on the anchor day must not become the anchor
+        s.add(Message(chat_id=chat_id, tg_message_id=10, thread_id=55, sender_name="A",
+                      text="SECRET", sent_at=dt(2026, 5, 5, 10, 0, tzinfo=tz.utc)))
+        s.add(ChatThread(chat_id=chat_id, thread_key=55, monitored=False))
+        await s.commit()
+
+    deps = AgentDeps(sessionmaker=db_sessionmaker, embedder=FakeEmbedder(),
+                     chat_id=chat_id, run_id=1, workflow_id=None)
+    ctx = SimpleNamespace(deps=deps)
+
+    out = await get_messages_by_date(ctx, "2026-05-05", radius=1)
+    assert "msg-2026-05-05-#3" in out  # anchor: first message of the day
+    assert "msg-2026-05-03-#2" in out and "msg-2026-05-05-#4" in out  # radius
+    assert "SECRET" not in out
+
+    out = await get_messages_by_date(ctx, "2027-01-01", radius=2)
+    assert "showing the latest stored ones" in out and "msg-2026-05-09-#5" in out
+
+    out = await get_messages_by_date(ctx, "not-a-date", radius=2)
+    assert "not an ISO date" in out
+
+
+async def test_inspect_media_cheap_paths(db_sessionmaker):
+    from types import SimpleNamespace
+
+    from app.agents.deps import AgentDeps
+    from app.agents.tools import inspect_media
+    from app.models import Bot, Chat, MessageAttachment
+
+    async with db_sessionmaker() as s:
+        bot = Bot(tg_bot_id=1, username="b", name="b", token_encrypted="x",
+                  can_read_all_group_messages=True)
+        s.add(bot)
+        await s.flush()
+        chat = Chat(bot_id=bot.id, tg_chat_id=-100, type="supergroup", status="authorized")
+        s.add(chat)
+        await s.flush()
+        chat_id = chat.id
+        t0 = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        for tg in (1, 2, 3):
+            s.add(Message(chat_id=chat_id, tg_message_id=tg, sender_name="A",
+                          text="", sent_at=t0))
+        await s.flush()
+        msgs = (await s.execute(select(Message).order_by(Message.tg_message_id))).scalars().all()
+        # 2: import-sourced photo (file_id gone); 3: voice with transcript
+        s.add(MessageAttachment(message_id=msgs[1].id, chat_id=chat_id, tg_message_id=2,
+                                kind="photo", file_id=None, file_unique_id="u2",
+                                status="described", description="a cat on a table"))
+        s.add(MessageAttachment(message_id=msgs[2].id, chat_id=chat_id, tg_message_id=3,
+                                kind="voice", file_id="F3", file_unique_id="u3",
+                                status="described",
+                                transcript="встречаемся в субботу в десять"))
+        await s.commit()
+
+    deps = AgentDeps(sessionmaker=db_sessionmaker, embedder=FakeEmbedder(),
+                     chat_id=chat_id, run_id=1, workflow_id=None)
+    ctx = SimpleNamespace(deps=deps)
+
+    assert "no media attachment" in await inspect_media(ctx, 1, "what is it?")
+    out = await inspect_media(ctx, 2, "what breed is the cat?")
+    assert "a cat on a table" in out and "can't be re-inspected" in out
+    out = await inspect_media(ctx, 3, "when do we meet?")
+    assert "встречаемся в субботу в десять" in out
+    assert "not in Convoke's stored history" in await inspect_media(ctx, 99, "?")
