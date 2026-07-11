@@ -6,6 +6,11 @@ an AccuWeather-backed one. In every case the pattern is the same: **get an MCP
 endpoint the worker can reach over HTTP, register its URL on the Tools page, then
 enable it per chat.**
 
+Weather is a stateless, public, read-only lookup with one shared key, so an off-the-shelf
+community server is the right call — no custom code. (Tools that write to a per-person
+account, like the [calendar](gcal-mcp/) and [Splitwise](splitwise-mcp/) examples, want a
+small first-party shim instead; the [examples index](README.md) explains the split.)
+
 ---
 
 ## Option A — Hosted on Smithery (zero install)

@@ -75,8 +75,12 @@ Sign in with `CONVOKE_OPERATOR_PASSWORD`, then:
    it (verified at click time). From that moment, messages are ingested.
 4. *(Optional)* Import history, and create **workflows** assigned to chats.
 
-📖 **Walkthroughs:** [`examples/events.md`](examples/events.md) builds an event-scheduling
-bot end-to-end; [`examples/weather-mcp.md`](examples/weather-mcp.md) adds a weather tool.
+📖 **Walkthroughs** ([`examples/`](examples/)): [`getting-started.md`](examples/getting-started.md)
+gets Convoke running with a bot listening in a group, then add tools —
+[weather](examples/weather-mcp.md), [movie lookups](examples/omdb-mcp.md), a shared
+[Google Calendar](examples/gcal-mcp/) the agent can CRUD, and
+[Splitwise](examples/splitwise-mcp/) expense tracking. The last two ship small first-party
+MCP servers; the [index](examples/README.md) explains when you need one.
 
 ## How it works
 
