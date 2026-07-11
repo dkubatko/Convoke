@@ -328,7 +328,7 @@ async def test_context_annotates_reply_to_off_window_target(db_sessionmaker, bot
     async with db_sessionmaker() as s:
         chat_row = await s.get(Chat, chat.id)
         ctx = await assemble_context(s, FakeEmbedder(), chat_row, "hike")
-    assert '↳ replies to [#1] [2026-07-01 12:00] Alice: "hike Saturday at 10"' in ctx
+    assert '↳ replies to [#1] [2026-07-01 12:00 UTC] Alice: "hike Saturday at 10"' in ctx
     assert "(replying to #95)" in ctx  # visible target: pointer, not a quote
 
 
@@ -550,3 +550,19 @@ async def test_inspect_media_cheap_paths(db_sessionmaker):
     out = await inspect_media(ctx, 3, "when do we meet?")
     assert "встречаемся в субботу в десять" in out
     assert "not in Convoke's stored history" in await inspect_media(ctx, 99, "?")
+
+
+def test_parse_day_uses_reference_timezone(monkeypatch):
+    """Bare dates mean reference-timezone days; explicit offsets still win."""
+    from zoneinfo import ZoneInfo
+
+    from app.agents.tools import _parse_day
+
+    monkeypatch.setattr("app.agents.tools.get_tzinfo", lambda: ZoneInfo("America/Los_Angeles"))
+    start = _parse_day("2026-05-05", end_of_day=False)
+    end = _parse_day("2026-05-05", end_of_day=True)
+    assert start.utcoffset().total_seconds() == -7 * 3600  # PDT
+    assert start.astimezone(timezone.utc).hour == 7  # 00:00 PDT = 07:00 UTC
+    assert (end - start).total_seconds() > 86399  # full local day covered
+    explicit = _parse_day("2026-05-05T00:00:00+02:00", end_of_day=False)
+    assert explicit.utcoffset().total_seconds() == 2 * 3600  # offset wins

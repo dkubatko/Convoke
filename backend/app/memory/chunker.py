@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_tzinfo
 from app.media.render import message_body
 from app.members import load_bot_sender_ids, load_member_names
 from app.memory.embeddings import Embedder
@@ -24,6 +25,18 @@ from app.models import Chunk, ChunkState, Message
 from app.threads import unmonitored_threads
 
 log = logging.getLogger("convoke.memory")
+
+
+def render_ts(dt: datetime) -> str:
+    """One timestamp, everywhere models read one: converted to the reference
+    timezone and LABELED ('2026-07-10 22:32 PDT') — an unlabeled UTC wall
+    clock was read as local time by the agent, shifting its whole world by
+    hours (calendar windows built 7h in the future, measured live). Naive
+    values (sqlite tests) are UTC by storage contract."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local = dt.astimezone(get_tzinfo())
+    return f"{local:%Y-%m-%d %H:%M} {local:%Z}"
 
 
 def chunk_token_budget(settings, state) -> int:
@@ -70,9 +83,8 @@ def render_message(m: Message, names: dict[int, str], bot_ids: frozenset[int] = 
     search hits, the intent classifier) uses it identically: agents pass it
     to get_messages, and reply annotations point at it. `names` resolves the
     sender via the chat-member map (see `_member_name`)."""
-    ts = m.sent_at.strftime("%Y-%m-%d %H:%M")
     tag = "[bot] " if is_bot_message(m, bot_ids) else ""
-    return f"{tag}{_member_name(m, names)} [{ts}] #{m.tg_message_id}: {message_body(m)}"
+    return f"{tag}{_member_name(m, names)} [{render_ts(m.sent_at)}] #{m.tg_message_id}: {message_body(m)}"
 
 
 def reply_quote(
@@ -84,13 +96,12 @@ def reply_quote(
     """The quoted-original line for a reply whose target isn't visible in the
     same transcript — rendered in the same 'Sender [ts] #id: body' shape as a
     normal line so it reads uniformly. Single source of the ↳ format."""
-    ts = target.sent_at.strftime("%Y-%m-%d %H:%M")
     q = message_body(target).replace("\n", " ")
     if len(q) > limit:
         q = q[:limit] + "…"
     tag = "[bot] " if is_bot_message(target, bot_ids) else ""
     return (
-        f'  ↳ replies to [#{target.tg_message_id}] [{ts}] '
+        f'  ↳ replies to [#{target.tg_message_id}] [{render_ts(target.sent_at)}] '
         f'{tag}{_member_name(target, names)}: "{q}"'
     )
 

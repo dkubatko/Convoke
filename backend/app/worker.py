@@ -31,6 +31,9 @@ log = logging.getLogger("convoke.worker")
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    from app.core.config import get_tzinfo
+
+    get_tzinfo()  # fail fast on a typo'd CONVOKE_TIMEZONE_OVERRIDE
     lock_conn = await acquire_singleton_lock(SINGLETON_LOCK_WORKER)
     log.info("worker started (singleton lock acquired)")
     sessionmaker = get_sessionmaker()

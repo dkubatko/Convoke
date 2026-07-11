@@ -10,6 +10,8 @@ import logging
 from datetime import datetime, timezone
 
 from croniter import croniter
+
+from app.core.config import get_tzinfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -21,7 +23,12 @@ TICK_S = 15
 
 
 def next_fire(cron: str, after: datetime) -> datetime:
-    return croniter(cron, after).get_next(datetime)
+    """Cron fields mean wall-clock in the reference timezone
+    (CONVOKE_TIMEZONE_OVERRIDE, default UTC — a no-op there): '0 9 * * *' is
+    9am where the operator lives, not 9am UTC. croniter+zoneinfo handles DST
+    (skipped/repeated local hours). Returns UTC for storage/comparison."""
+    local_next = croniter(cron, after.astimezone(get_tzinfo())).get_next(datetime)
+    return local_next.astimezone(timezone.utc)
 
 
 class ScheduleLoop:

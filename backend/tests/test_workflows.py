@@ -592,3 +592,22 @@ async def test_fallback_examples_self_heal_when_provider_appears(db_sessionmaker
     async with db_sessionmaker() as s:
         assert (await s.get(Workflow, fb_id)).examples_status == "ready"
         assert (await s.get(Workflow, ready_id)).examples_status == "ready"  # untouched
+
+
+def test_cron_fires_on_reference_clock(monkeypatch):
+    """'0 9 * * *' means 9am in the reference timezone; DST moves the UTC
+    instant (9am PDT = 16:00Z, 9am PST = 17:00Z)."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from app.scheduler.loop import next_fire
+
+    # default UTC: unchanged behavior
+    nxt = next_fire("0 9 * * *", datetime(2026, 7, 11, 3, 0, tzinfo=timezone.utc))
+    assert (nxt.hour, nxt.tzinfo) == (9, timezone.utc)
+
+    monkeypatch.setattr("app.scheduler.loop.get_tzinfo", lambda: ZoneInfo("America/Los_Angeles"))
+    summer = next_fire("0 9 * * *", datetime(2026, 7, 11, 3, 0, tzinfo=timezone.utc))
+    assert summer == datetime(2026, 7, 11, 16, 0, tzinfo=timezone.utc)  # 9am PDT
+    winter = next_fire("0 9 * * *", datetime(2026, 1, 11, 3, 0, tzinfo=timezone.utc))
+    assert winter == datetime(2026, 1, 11, 17, 0, tzinfo=timezone.utc)  # 9am PST

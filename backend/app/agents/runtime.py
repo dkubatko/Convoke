@@ -28,6 +28,7 @@ from app.agents.models import (
 )
 from app.agents.tools import AGENT_TOOLS
 from app.intent.episodes import finish_run_episode
+from app.memory.chunker import render_ts
 from app.memory.embeddings import Embedder
 from app.members import clean_display_name, member_display_name
 from app.models import AgentRun, Bot, Chat, Message
@@ -134,6 +135,23 @@ async def execute_run(
             # chat/bot_row from the first block are detached but readable;
             # re-attach chat for the queries these helpers run.
             chat = await session.get(Chat, chat.id)
+            # The temporal anchor: relative expressions in the request ("in an
+            # hour", "today") mean the moment the triggering message was SENT
+            # — not when this run executes (confirm-gated fires and parked
+            # rechecks run much later). Workflow fires have no trigger
+            # message; the run's creation stands in.
+            anchor = run.created_at
+            if trigger_message_id is not None:
+                trigger_msg = (
+                    await session.execute(
+                        select(Message).where(
+                            Message.chat_id == chat.id,
+                            Message.tg_message_id == trigger_message_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if trigger_msg is not None:
+                    anchor = trigger_msg.sent_at
             try:
                 provider = await get_provider(session, "agent")
                 reasoning = await get_role_reasoning(session, "agent")
@@ -208,7 +226,14 @@ async def execute_run(
                 if is_reply
                 else "You were invoked by a member's message (shown last in the recent messages)."
             )
-            + requester_note,
+            + requester_note
+            + (
+                f" The triggering request was sent at [{render_ts(anchor)}] — all "
+                "transcript timestamps use this same labeled timezone; anchor "
+                "relative time expressions ('now', 'in an hour', 'today') to that "
+                "moment, converting to the group's local timezone when it is known "
+                "(from notes or conversation) and day boundaries matter."
+            ),
         )
         user_prompt = prompt_context
         if is_workflow:

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.members import load_member_names
-from app.memory.chunker import render_message, render_thread, resolve_reply_targets
+from app.memory.chunker import render_message, render_thread, render_ts, resolve_reply_targets
 from app.memory.embeddings import Embedder
 from app.memory.store import search_chat_history
 from app.models import Chat, MemoryGap, Message, Note
@@ -105,7 +105,7 @@ async def assemble_context(
             "## Known gaps in memory (the bot was offline; messages in these "
             "ranges were never seen)\n"
             + "\n".join(
-                f"- {g.gap_start:%Y-%m-%d %H:%M} to {g.gap_end:%Y-%m-%d %H:%M} UTC"
+                f"- {render_ts(g.gap_start)} to {render_ts(g.gap_end)}"
                 for g in gaps
             )
         )

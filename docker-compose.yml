@@ -27,6 +27,7 @@ services:
       CONVOKE_COOKIE_SECURE: ${CONVOKE_COOKIE_SECURE:-false}
       # Optional: unlocks gated Hugging Face models (e.g. EmbeddingGemma)
       HF_TOKEN: ${HF_TOKEN:-}
+      CONVOKE_TIMEZONE_OVERRIDE: ${CONVOKE_TIMEZONE_OVERRIDE:-UTC}
       # Multipart uploads (history imports) spool to a temp file before the
       # endpoint streams them to imports_dir. Point TMPDIR at the imports
       # volume so a multi-GB export doesn't fill the small docker root fs.
@@ -57,6 +58,7 @@ services:
       CONVOKE_SECRET_KEY: ${CONVOKE_SECRET_KEY:?set in .env}
       CONVOKE_FERNET_KEY: ${CONVOKE_FERNET_KEY:?set in .env}
       HF_TOKEN: ${HF_TOKEN:-}
+      CONVOKE_TIMEZONE_OVERRIDE: ${CONVOKE_TIMEZONE_OVERRIDE:-UTC}
     volumes:
       # imports is shared with the backend: the media loop describes
       # import-sourced media from there (then deletes the files).

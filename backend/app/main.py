@@ -81,6 +81,9 @@ async def _sweep_orphaned_import_artifacts() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.core.config import get_tzinfo
+
+    get_tzinfo()  # fail fast on a typo'd CONVOKE_TIMEZONE_OVERRIDE
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     app.state.singleton_lock_conn = await acquire_singleton_lock(SINGLETON_LOCK_BACKEND)
     await _recover_interrupted_imports()

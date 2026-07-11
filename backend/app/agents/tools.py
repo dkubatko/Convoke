@@ -6,8 +6,9 @@ from pydantic_ai import RunContext
 from sqlalchemy import func, select, true
 
 from app.agents.deps import AgentDeps
+from app.core.config import get_tzinfo
 from app.members import refresh_chat_memory_names, set_override_name
-from app.memory.chunker import render_for_chat
+from app.memory.chunker import render_for_chat, render_ts
 from app.memory.store import search_chat_history as store_search
 from app.models import ChatMember, IntentEpisode, Message, Note
 from app.threads import unmonitored_threads
@@ -21,9 +22,11 @@ MAX_CONTEXT_RADIUS = 20
 
 
 def _parse_day(value: str | None, end_of_day: bool) -> datetime | None:
-    """ISO date/datetime → aware UTC datetime; a bare date snaps to the day's
-    start (after) or end (before), so after=X, before=X covers all of day X.
-    Raises ValueError with a model-actionable message."""
+    """ISO date/datetime → aware datetime; a bare date means a calendar day in
+    the reference timezone (CONVOKE_TIMEZONE_OVERRIDE, default UTC) and snaps
+    to its start (after) or end (before), so after=X, before=X covers all of
+    day X as the chat's members experience it. Explicit offsets win. Raises
+    ValueError with a model-actionable message."""
     if not value:
         return None
     try:
@@ -31,7 +34,7 @@ def _parse_day(value: str | None, end_of_day: bool) -> datetime | None:
     except ValueError:
         raise ValueError(f"'{value}' is not an ISO date (use YYYY-MM-DD).") from None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=get_tzinfo())
     if len(value.strip()) <= 10 and end_of_day:  # bare date
         parsed = parsed + timedelta(days=1) - timedelta(microseconds=1)
     return parsed
@@ -357,7 +360,7 @@ async def past_workflow_actions(ctx: RunContext[AgentDeps]) -> str:
     for e in episodes:
         if e.agent_run_id == ctx.deps.run_id:
             continue  # the action currently being executed
-        fired = e.fired_at.strftime("%Y-%m-%d %H:%M UTC")
+        fired = render_ts(e.fired_at)
         lines.append(f"- [{fired}] {e.summary or '(no topic summary)'}")
         if e.slots:
             lines.append(

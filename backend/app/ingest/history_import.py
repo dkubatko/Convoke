@@ -22,7 +22,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import get_settings
+from app.core.config import get_settings, get_tzinfo
 from app.members import invalidate_chat_memory, refresh_members_from_messages
 from app.models import (
     Bot,
@@ -170,7 +170,7 @@ def parse_export_message(item: dict) -> ExportMessage | None:
     if "date_unixtime" in item:
         sent_at = datetime.fromtimestamp(int(item["date_unixtime"]), tz=timezone.utc)
     elif "date" in item:
-        sent_at = datetime.fromisoformat(item["date"]).replace(tzinfo=timezone.utc)
+        sent_at = datetime.fromisoformat(item["date"]).replace(tzinfo=get_tzinfo())
     else:
         return None
     reply_to = item.get("reply_to_message_id")

@@ -535,7 +535,7 @@ async def test_reply_pulls_quoted_original_into_the_prompt(db_sessionmaker):
     script.push(detect(relation="unrelated"))
     assert await sweeper.sweep(now=NOW) == 1
     prompt = script.prompts[0]
-    assert 'replies to [#1] [2026-07-02 09:00] Alice: "wanna hike Saturday at 10?"' in prompt
+    assert 'replies to [#1] [2026-07-02 09:00 UTC] Alice: "wanna hike Saturday at 10?"' in prompt
     assert "wanna hike Saturday" not in prompt.split("↳")[0]  # truly out of context
 
 

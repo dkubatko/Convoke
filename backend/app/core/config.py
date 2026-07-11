@@ -1,4 +1,5 @@
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,6 +15,14 @@ class Settings(BaseSettings):
     secret_key: str
     # Encrypts bot tokens / provider credentials at rest (Fernet, urlsafe base64 32 bytes).
     fernet_key: str
+
+    # Reference timezone for everything model- or schedule-facing: transcript
+    # timestamps render in it (labeled), bare dates in agent date tools mean
+    # its calendar days, and cron expressions fire on its clock. Defaults to
+    # UTC (a no-op relative to storage, which is always UTC). IANA name, e.g.
+    # America/Los_Angeles. Per-member whereabouts are deliberately NOT config —
+    # the bot learns those from conversation (memory notes).
+    timezone_override: str = "UTC"
 
     session_max_age_seconds: int = 7 * 24 * 3600
     cookie_secure: bool = False  # set true behind HTTPS
@@ -103,3 +112,17 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+@lru_cache
+def get_tzinfo() -> ZoneInfo:
+    """The validated reference timezone. Called once at process startup so a
+    typo'd name fails loudly there, not on the first rendered message."""
+    name = get_settings().timezone_override
+    try:
+        return ZoneInfo(name)
+    except Exception as e:  # noqa: BLE001 — re-raise with the fix in the message
+        raise RuntimeError(
+            f"CONVOKE_TIMEZONE_OVERRIDE={name!r} is not an IANA timezone "
+            "(e.g. UTC, America/Los_Angeles)"
+        ) from e

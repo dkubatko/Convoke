@@ -248,7 +248,7 @@ def test_render_thread_quotes_out_of_transcript_reply_targets():
     c.reply_to_tg_message_id = 7  # target never stored
 
     text = render_thread([a, b, c], {1: old, 10: a}, {})
-    assert '↳ replies to [#1] [2026-07-01 12:00] Alice: "wanna hike Saturday at 10?"' in text
+    assert '↳ replies to [#1] [2026-07-01 12:00 UTC] Alice: "wanna hike Saturday at 10?"' in text
     assert text.count("↳") == 1  # the in-transcript reply is NOT expanded
     assert "(replying to #10)" in text  # …it is a pointer instead
     assert "(replying to #7 — message not stored)" in text
@@ -343,7 +343,7 @@ def test_reply_quote_tags_bot_targets():
     reply = msg(10, 60, text="thanks!")
     reply.reply_to_tg_message_id = 1  # target off-transcript -> quoted
     text = render_thread([reply], {1: bot}, {})
-    assert '↳ replies to [#1] [2026-07-01 12:00] [bot] Alice: "I created the event"' in text
+    assert '↳ replies to [#1] [2026-07-01 12:00 UTC] [bot] Alice: "I created the event"' in text
 
 
 async def test_embed_input_excludes_bot_lines(db_sessionmaker):
@@ -402,3 +402,22 @@ async def test_bot_scoring_setting_restores_full_text_embedding(db_sessionmaker)
         assert await embed_pending_chunks(s, EMB, 8) == 1
         chunk = (await s.execute(select(Chunk))).scalar_one()
         assert chunk.embedding == (await EMB.embed_passages([chunk.text]))[0]
+
+
+def test_render_ts_labels_and_converts(monkeypatch):
+    """Timestamps carry their timezone; a non-UTC override converts values
+    (03:00 UTC = previous-day 20:00 Pacific — the day-boundary case that
+    misled the agent live)."""
+    from zoneinfo import ZoneInfo
+
+    import app.core.config as config
+    from app.memory.chunker import render_ts
+
+    assert render_ts(datetime(2026, 7, 11, 3, 0, tzinfo=timezone.utc)) == "2026-07-11 03:00 UTC"
+    # naive (sqlite) values are UTC by contract
+    assert render_ts(datetime(2026, 7, 11, 3, 0)) == "2026-07-11 03:00 UTC"
+
+    monkeypatch.setattr(config, "get_tzinfo", lambda: ZoneInfo("America/Los_Angeles"))
+    monkeypatch.setattr("app.memory.chunker.get_tzinfo", lambda: ZoneInfo("America/Los_Angeles"))
+    assert render_ts(datetime(2026, 7, 11, 3, 0, tzinfo=timezone.utc)) == "2026-07-10 20:00 PDT"
+    assert render_ts(datetime(2026, 1, 11, 3, 0, tzinfo=timezone.utc)) == "2026-01-10 19:00 PST"
