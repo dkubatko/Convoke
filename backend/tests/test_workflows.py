@@ -147,6 +147,41 @@ async def test_pending_counts_per_thread_not_global_min(db_sessionmaker):
         assert await _pending_for(s, cid, cursors) == 1  # only the new main-thread msg
 
 
+async def test_pending_excludes_direct_invocations(db_sessionmaker):
+    # An @mention got its own agent run at ingest and the sweeper never
+    # evaluates it — with the mention as the chat's last message the cursor
+    # never advances past it, so counting it would show "Waiting · 1 new"
+    # indefinitely for work that will never run.
+    from app.api.workflows import CursorOut, _pending_for
+    from app.models import AgentRun
+
+    async with db_sessionmaker() as s:
+        bot = Bot(tg_bot_id=1, username="b", name="b", token_encrypted="x",
+                  can_read_all_group_messages=True)
+        s.add(bot)
+        await s.flush()
+        chat = Chat(bot_id=bot.id, tg_chat_id=-100, type="supergroup", status="authorized")
+        s.add(chat)
+        await s.flush()
+        cid = chat.id
+        s.add(Message(chat_id=cid, tg_message_id=20, thread_id=None,
+                      sender_name="A", text="@bot what's up?", sent_at=NOW))
+        s.add(AgentRun(chat_id=cid, trigger="mention", trigger_tg_message_id=20,
+                       status="done"))
+        await s.commit()
+
+    cursors = [CursorOut(thread_key=0, last_tg_message_id=19, last_evaluated_at=None,
+                         last_stage=None, last_score=None, last_confidence=None)]
+    async with db_sessionmaker() as s:
+        assert await _pending_for(s, cid, cursors) == 0
+        # a normal message past the mention still counts
+        s.add(Message(chat_id=cid, tg_message_id=21, thread_id=None,
+                      sender_name="A", text="let's plan dinner", sent_at=NOW))
+        await s.commit()
+    async with db_sessionmaker() as s:
+        assert await _pending_for(s, cid, cursors) == 1
+
+
 # ---------- shared setup ----------
 
 async def _bot_and_chat(db_sessionmaker):

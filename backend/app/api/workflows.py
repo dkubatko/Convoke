@@ -414,6 +414,25 @@ async def _pending_for(
     that thread's own cursor. A single global min-cursor miscounts: a stale seed
     cursor in a quiet thread would flag another thread's already-evaluated
     messages as pending forever."""
+    if not cursors:
+        return 0
+    # Direct invocations (@mention / reply-to-bot) got their own agent run at
+    # ingest; the sweeper excludes them from its windows, so counting them
+    # here shows "Waiting · N new" for work that will never run — indefinitely
+    # when the mention is the chat's last message, since the sweeper sees no
+    # unevaluated work and the cursor never moves past it.
+    min_cursor = min(c.last_tg_message_id for c in cursors)
+    direct = set(
+        (
+            await session.execute(
+                select(AgentRun.trigger_tg_message_id).where(
+                    AgentRun.chat_id == chat_id,
+                    AgentRun.trigger.in_(("mention", "reply")),
+                    AgentRun.trigger_tg_message_id > min_cursor,
+                )
+            )
+        ).scalars()
+    )
     total = 0
     for c in cursors:
         thread_pred = (
@@ -421,16 +440,17 @@ async def _pending_for(
             if c.thread_key == 0
             else Message.thread_id == c.thread_key
         )
+        conditions = [
+            Message.chat_id == chat_id,
+            Message.source != "self",
+            Message.tg_message_id > c.last_tg_message_id,
+            thread_pred,
+        ]
+        if direct:
+            conditions.append(Message.tg_message_id.not_in(direct))
         total += (
             await session.execute(
-                select(func.count())
-                .select_from(Message)
-                .where(
-                    Message.chat_id == chat_id,
-                    Message.source != "self",
-                    Message.tg_message_id > c.last_tg_message_id,
-                    thread_pred,
-                )
+                select(func.count()).select_from(Message).where(*conditions)
             )
         ).scalar() or 0
     return total
