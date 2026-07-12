@@ -1,13 +1,14 @@
+from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 
 class SlotUpdate(BaseModel):
     name: str = Field(description="Slot name from the required slots list")
     value: str | None = Field(
-        description="New value, or null to RETRACT a previously filled slot "
-        "(e.g. the group walked back a decision)"
+        description="The slot's value as the group currently holds it — "
+        "unchanged when only confidence moved; null retracts the slot"
     )
     confidence: float = Field(default=0.7, ge=0, le=1)
 
@@ -66,6 +67,43 @@ class AttributionVerdict(BaseModel):
         description="True if the group explicitly dropped or finished the topic "
         "('nah, forget it', 'already handled it ourselves')",
     )
+
+
+@lru_cache(maxsize=8)
+def calibrated_verdicts(
+    capture: float, fire: float
+) -> tuple[type[DetectVerdict], type[AttributionVerdict]]:
+    """Detect/Attribution verdict classes whose SlotUpdate.confidence carries
+    the operator's live bars as calibration anchors. Field descriptions are
+    frozen at class definition, so the classes are generated per (capture,
+    fire) pair — cached, and the bars are runtime-tunable, hence not baked
+    into the static classes above. The model habitually stamps 0.8+ on
+    anything it extracts ('tentatively agree' at 0.8, prod Jul 12); an
+    uncalibrated score is meaningless against the bars."""
+    confidence = (
+        float,
+        Field(
+            default=0.7, ge=0, le=1,
+            description=(
+                f"How settled the group is on this value: {fire:.2f} and above "
+                f"— settled; {capture:.2f}-{fire:.2f} — tentative; below "
+                f"{capture:.2f} — unsettled."
+            ),
+        ),
+    )
+    slot_update = create_model("SlotUpdate", __base__=SlotUpdate, confidence=confidence)
+    slot_updates = (
+        list[slot_update],
+        Field(
+            default_factory=list,
+            description="Slot values these messages establish, change, or retract",
+        ),
+    )
+    detect = create_model("DetectVerdict", __base__=DetectVerdict, slot_updates=slot_updates)
+    attribution = create_model(
+        "AttributionVerdict", __base__=AttributionVerdict, slot_updates=slot_updates
+    )
+    return detect, attribution
 
 
 class RecheckVerdict(BaseModel):

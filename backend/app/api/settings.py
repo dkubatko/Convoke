@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_session
 from app.core.runtime_settings import (
     TUNABLES,
+    check_confidence_bars,
     default_for,
     load_chat_overrides,
     load_overrides,
@@ -70,6 +71,7 @@ async def update_settings(
     try:
         for u in updates:
             await set_override(session, u.key, u.value)
+        await check_confidence_bars(session)
     except ValueError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
     # The permissiveness knob has an effect only through the workflow thresholds

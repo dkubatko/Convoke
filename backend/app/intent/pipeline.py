@@ -55,7 +55,12 @@ from app.intent.prompts import (
     build_detect_prompt,
     build_recheck_prompt,
 )
-from app.intent.schemas import AttributionVerdict, DetectVerdict, RecheckVerdict
+from app.intent.schemas import (
+    AttributionVerdict,
+    DetectVerdict,
+    RecheckVerdict,
+    calibrated_verdicts,
+)
 from app.media.render import attachment_annotation, message_body
 from app.intent.state import (
     apply_slot_updates,
@@ -615,6 +620,10 @@ class IntentSweeper:
             await session.commit()
 
             names = await load_member_names(session, job.chat_id)
+            detect_type, attribution_type = calibrated_verdicts(
+                self.settings.intent_min_slot_confidence_pct / 100,
+                self.settings.intent_min_fire_confidence_pct / 100,
+            )
             if episodes:
                 prompt = build_attribution_prompt(
                     wf, episodes, job.context, job.transcript_window, job.quoted, names,
@@ -623,12 +632,12 @@ class IntentSweeper:
                     timedelta(hours=self.settings.intent_decay_grace_hours),
                     self.settings.intent_decay_per_hour_pct / 100,
                 )
-                verdict = await self._model_call(session, prompt, AttributionVerdict)
+                verdict = await self._model_call(session, prompt, attribution_type)
             else:
                 prompt = build_detect_prompt(
                     wf, job.context, job.transcript_window, job.quoted, names
                 )
-                verdict = await self._model_call(session, prompt, DetectVerdict)
+                verdict = await self._model_call(session, prompt, detect_type)
             if verdict is None:
                 # A FAILED call must not consume the window or spend the
                 # throttle budget — the next sweep retries promptly.
@@ -654,7 +663,7 @@ class IntentSweeper:
                 getattr(verdict, "episode_ref", None),
                 verdict.confidence,
                 getattr(verdict, "topic_concluded", False),
-                [u.name for u in verdict.slot_updates],
+                [f"{u.name}={u.value!r}@{u.confidence:.2f}" for u in verdict.slot_updates],
                 (verdict.topic_summary or "")[:120],
             )
             cursor.last_llm_at = now

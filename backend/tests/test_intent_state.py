@@ -43,6 +43,34 @@ def test_low_confidence_update_ignored():
     assert apply_slot_updates({}, [SlotUpdate(name="date", value="maybe Tue?", confidence=0.3)], NOW, 1) == {}
 
 
+def test_calibrated_verdicts_carry_live_bars():
+    """The confidence anchors in the schema must track the operator's
+    tunables — a hardcoded 0.6/0.7 in the description would lie the moment
+    the bars are retuned."""
+    from app.intent.schemas import AttributionVerdict, calibrated_verdicts
+
+    detect, attribution = calibrated_verdicts(0.5, 0.85)
+    desc = detect.model_fields["slot_updates"].annotation.__args__[0].model_fields[
+        "confidence"
+    ].description
+    assert "0.85" in desc and "0.50" in desc
+    assert issubclass(attribution, AttributionVerdict)
+    # same bars -> same cached classes (pydantic-ai sees a stable type)
+    assert calibrated_verdicts(0.5, 0.85)[0] is detect
+
+
+def test_low_confidence_update_demotes_existing_slot():
+    # The write bar gates only NEW slots: a hedge re-emitted at low confidence
+    # ("not sure about Friday anymore" after Friday stored at 0.8) demotes the
+    # stored value out of the effective set instead of being silently ignored.
+    slots = {"date": _slot("Friday", 0.8)}
+    slots = apply_slot_updates(
+        slots, [SlotUpdate(name="date", value="Friday", confidence=0.4)], NOW, 3
+    )
+    assert slots["date"]["confidence"] == 0.4
+    assert "date" not in effective_slots(slots, NOW, GRACE, PER_HOUR)
+
+
 # ---------- slot-name normalization (small models invent names) ----------
 
 LOCATION = [{"name": "location", "description": "where"}]

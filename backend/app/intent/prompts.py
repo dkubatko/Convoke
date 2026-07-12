@@ -85,10 +85,14 @@ proposals still under discussion. Use EXACTLY the slot names listed above —
 never invent new names. Emit value=null to retract a slot the group walked
 back.
 
-A gathered value shown with a confidence below the bar it needs does NOT yet
-count: when the conversation supports it — a restatement, an implicit
-confirmation, or the group simply proceeding on it — re-emit it as a slot
-update with your true confidence, even if the value itself is unchanged.
+Every gathered value is shown with its current confidence; one marked
+"needs Y" does not yet count toward acting. By default leave gathered
+values alone — re-emit one ONLY when the new messages carry signal about
+it. When they do, the re-emit is mandatory: state the value and confidence
+you now believe. A restatement, confirmation, or the group proceeding on a
+value raises its confidence; hedging, questioning, or reopening it lowers
+its confidence while KEEPING the value; emit value=null only when the group
+explicitly walked it back or deferred the decision.
 """
 
 RECHECK_PROMPT = """\
@@ -157,19 +161,29 @@ def render_episodes(
         }.get(ep.status, ep.status)
         lines.append(f"{i}. [{state}] {ep.summary or '(no summary yet)'}")
         if ep.slots:
-            # A slot below the fire bar renders with its confidence and the
-            # bar it needs — shown as plainly gathered, the classifier never
-            # re-extracts it and the workflow deadlocks at "n/n details".
+            # On a topic still being gathered, EVERY slot renders with its
+            # confidence — one evidence rule covers confirming, demoting,
+            # revising, and retracting; a slot shown as a bare value reads as
+            # settled and the classifier never re-emits it (the "n/n details"
+            # deadlock). Sub-bar slots additionally carry the bar they need.
             # DECAYED confidence, because that's what the fire check uses: a
             # value the group settled hours ago fades, and the raw stored
-            # number would hide that it no longer counts.
+            # number would hide that it no longer counts. Fired/satisfied
+            # topics render plain values: their slot updates are discarded,
+            # so asking for a re-confirm there only contradicts the "already
+            # ran" line below it.
+            gathering = ep.status in ("candidate", "converged")
             shown = decayed_slots(ep.slots, now, decay_grace, decay_per_hour)
             lines.append("   gathered: " + "; ".join(
                 f"{name}={info['value']}"
-                if info["confidence"] >= min_fire_confidence
+                if not gathering
                 else (
-                    f"{name}={info['value']} (confidence "
-                    f"{info['confidence']:.2f}, needs {min_fire_confidence:.2f})"
+                    f"{name}={info['value']} (confidence {info['confidence']:.2f})"
+                    if info["confidence"] >= min_fire_confidence
+                    else (
+                        f"{name}={info['value']} (confidence "
+                        f"{info['confidence']:.2f}, needs {min_fire_confidence:.2f})"
+                    )
                 )
                 for name, info in sorted(shown.items())
             ))

@@ -125,14 +125,16 @@ def apply_slot_updates(
     window_last_msg_id: int,
     min_confidence: float = MIN_SLOT_CONFIDENCE,
 ) -> dict:
-    """Last-write-wins; value=None retracts; updates below the workflow's
-    write bar ignored."""
+    """Last-write-wins; value=None retracts. The write bar gates only NEW
+    slots (noise must not create one) — an update to an already-gathered slot
+    always applies, so a hedge ("not sure about Friday anymore") demotes the
+    stored confidence instead of being silently ignored."""
     out = dict(slots)
     for update in updates:
         if update.value is None:
             out.pop(update.name, None)
             continue
-        if update.confidence < min_confidence:
+        if update.confidence < min_confidence and update.name not in out:
             continue
         out[update.name] = {
             "value": update.value,

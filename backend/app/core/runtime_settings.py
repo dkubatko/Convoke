@@ -213,6 +213,26 @@ async def effective_settings(session: AsyncSession, base: Settings | None = None
     return base.model_copy(update=overrides) if overrides else base
 
 
+async def check_confidence_bars(session: AsyncSession) -> None:
+    """The capture bar must not exceed the fire bar: a detail recorded but
+    never able to count would deadlock a workflow at "n/n details". Called
+    after a batch of writes — the pair is only meaningful once the whole
+    batch has landed (raising both bars in one save must not trip on the
+    intermediate state)."""
+    overrides = await load_overrides(session)
+    slot = overrides.get(
+        "intent_min_slot_confidence_pct", default_for("intent_min_slot_confidence_pct")
+    )
+    fire = overrides.get(
+        "intent_min_fire_confidence_pct", default_for("intent_min_fire_confidence_pct")
+    )
+    if slot > fire:
+        raise ValueError(
+            "Detail confidence to act must be at or above the detail capture bar "
+            f"({fire} < {slot})"
+        )
+
+
 async def set_override(session: AsyncSession, key: str, value: int) -> None:
     _check(key, value, scope="global")
     if value == default_for(key):  # storing the default just clears the override

@@ -378,6 +378,26 @@ async def test_setting_scope_and_range_validation(db_sessionmaker):
             await set_chat_override(s, 1, "intent_min_llm_interval_seconds", 30)  # global
 
 
+async def test_confidence_bar_order_enforced(db_sessionmaker):
+    """Capture bar above the fire bar re-creates the silent "n/n details"
+    deadlock. The pair is validated after a whole batch of writes, so raising
+    both bars in one save never trips on the intermediate state."""
+    from app.core.runtime_settings import check_confidence_bars, set_override
+
+    async with db_sessionmaker() as s:
+        await check_confidence_bars(s)  # defaults (60/70) pass
+        # Raising both in one batch: intermediate pair (80 vs default 70) is
+        # inverted, the final pair (80/85) is valid.
+        await set_override(s, "intent_min_slot_confidence_pct", 80)
+        await set_override(s, "intent_min_fire_confidence_pct", 85)
+        await check_confidence_bars(s)
+        await s.commit()
+    async with db_sessionmaker() as s:
+        await set_override(s, "intent_min_fire_confidence_pct", 75)
+        with pytest.raises(ValueError, match="capture bar"):
+            await check_confidence_bars(s)
+
+
 async def test_new_episode_tunables_are_registered():
     """Every episode-lifecycle knob is operator-tunable and maps to a real
     Settings field (a typo here would silently never apply)."""

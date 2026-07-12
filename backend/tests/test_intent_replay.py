@@ -58,7 +58,10 @@ class ScriptedModel:
         verdict = self.queue.pop(0)
         if verdict is None:
             return None  # scripted model failure
-        assert isinstance(verdict, output_type), (
+        # The pipeline passes calibrated SUBCLASSES of the verdict types
+        # (schemas.calibrated_verdicts), so mode-matching is subclass-of, not
+        # isinstance: the scripted verdicts are base-class instances.
+        assert issubclass(output_type, type(verdict)), (
             f"expected {output_type.__name__}, scripted {type(verdict).__name__} — "
             f"the pipeline called the wrong mode.\n{prompt[:200]}"
         )
