@@ -9,6 +9,10 @@ export type Tone = 'ok' | 'warn' | 'err' | 'accent' | 'idle'
 
 const OPEN = ['candidate', 'converged', 'fired', 'satisfied']
 
+/** Backend default for intent_min_fire_confidence_pct — only used when the
+    API response predates the field (deploy skew). */
+export const DEFAULT_FIRE_BAR = 0.7
+
 export function openEpisodes(episodes: EpisodeInfo[]): EpisodeInfo[] {
   return episodes.filter((e) => OPEN.includes(e.status))
 }
@@ -185,7 +189,7 @@ export function funnel(
   // invented can't display as "1/1" while convergence still waits. Only
   // slots clearing the fire bar count: a probable (sub-bar) detail showing
   // as gathered here is exactly the "3/3 but not firing" confusion.
-  const fireBar = opts?.minFireConfidence ?? 0.7
+  const fireBar = opts?.minFireConfidence ?? DEFAULT_FIRE_BAR
   const gathered = requiredSlots.filter(
     (r) => (active?.slots?.[r.name]?.confidence ?? 0) >= fireBar,
   ).length

@@ -58,7 +58,6 @@ from app.intent.prompts import (
 from app.intent.schemas import AttributionVerdict, DetectVerdict, RecheckVerdict
 from app.media.render import attachment_annotation, message_body
 from app.intent.state import (
-    MIN_FIRE_CONFIDENCE,
     apply_slot_updates,
     effective_slots,
     fingerprint,
@@ -790,7 +789,7 @@ class IntentSweeper:
         now: datetime,
     ) -> str:
         wf = job.workflow
-        if confidence < MIN_FIRE_CONFIDENCE:
+        if confidence < self.settings.intent_min_fire_confidence_pct / 100:
             return "accumulating"
         effective = effective_slots(
             dict(episode.slots or {}),

@@ -1,5 +1,5 @@
 import { EpisodeInfo, SlotSpec } from '../lib/types'
-import { episodeBadge, openEpisodes } from '../lib/intent'
+import { DEFAULT_FIRE_BAR, episodeBadge, openEpisodes } from '../lib/intent'
 import { shortDateTime, timeAgo, truncate } from '../lib/format'
 import { Chip } from './ui'
 
@@ -17,6 +17,8 @@ export function EpisodeList({
   minFireConfidence: number
   showClosed?: number
 }) {
+  // A backend older than this frontend omits min_fire_confidence entirely.
+  const fireBar = minFireConfidence ?? DEFAULT_FIRE_BAR
   const open = openEpisodes(episodes)
   const closed = episodes.filter((e) => e.status === 'closed').slice(0, showClosed)
   if (open.length === 0 && closed.length === 0) return null
@@ -31,7 +33,7 @@ export function EpisodeList({
             key={e.id}
             e={e}
             requiredSlots={requiredSlots}
-            minFireConfidence={minFireConfidence}
+            minFireConfidence={fireBar}
           />
         ))}
       </div>
