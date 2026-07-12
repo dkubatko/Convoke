@@ -289,6 +289,33 @@ async def test_c_cap_protects_invested_topics_only(db_sessionmaker):
         assert cursor.last_stage == "cap_full"
 
 
+async def test_c3_pivot_concluded_frees_the_cap(db_sessionmaker):
+    """"Forget the hike, let's do a picnic instead": new_instance with
+    topic_concluded=true closes the dropped topic BEFORE the cap check, so
+    the pivot opens the new topic instead of bouncing off cap_full (prod
+    Jul 12: an invested candidate squatted the cap through an explicit
+    walk-off — the concluded flag was silently ignored on this branch)."""
+    script = ScriptedModel()
+    _, chat, _ = await _setup(db_sessionmaker, required=SLOT_TIME)
+    sweeper = _sweeper(db_sessionmaker, script)
+
+    # Invested candidate: a hike with a gathered (sub-fire-bar) slot —
+    # immovable under the plain cap rule.
+    await _add(db_sessionmaker, _msg(chat.id, 1, ON_TOPIC, at=NOW - timedelta(minutes=2)))
+    script.push(detect(summary="hike friday", updates=[upd("time", "friday", 0.65)]))
+    await sweeper.sweep(now=NOW)
+
+    await _add(db_sessionmaker, _msg(chat.id, 2, "forget the hike, picnic sunday instead",
+                                     at=NOW + timedelta(minutes=2)))
+    script.push(attributed(relation="new_instance", summary="picnic sunday", concluded=True,
+                           updates=[upd("time", "sunday-ish", 0.65)]))
+    await sweeper.sweep(now=NOW + timedelta(minutes=3))
+    eps = await _episodes(db_sessionmaker)
+    assert [e.status for e in eps] == ["closed", "candidate"]
+    assert eps[0].close_reason == "abandoned"
+    assert eps[1].summary == "picnic sunday"
+
+
 async def test_c2_vague_topic_never_squats_the_cap(db_sessionmaker):
     """The Washington case: a slotless topic (vague 'let's hike somewhere
     else') must never block the next concrete topic under the cap."""

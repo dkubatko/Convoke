@@ -79,6 +79,9 @@ Classify how the NEW messages relate to the tracked topics:
 Return an updated topic_summary (1-2 sentences) for the topic the messages
 belong to. Set topic_concluded=true only if the group explicitly dropped or
 finished the topic themselves ("nah, forget it", "we already took care of it").
+That includes a pivot: when they drop a tracked topic in the same breath that
+starts a new one ("forget the hike, let's do a picnic instead" — a
+new_instance), set topic_concluded=true so the dropped topic is closed.
 
 Extract slot updates ONLY for values the group actually converged on, not
 proposals still under discussion. Use EXACTLY the slot names listed above —

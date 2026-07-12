@@ -735,6 +735,15 @@ class IntentSweeper:
             return "no_match"
 
         if verdict.relation == "new_instance":
+            if verdict.topic_concluded:
+                # A pivot ("forget the hike, let's do a picnic instead") drops
+                # the old topic in the same breath that opens the new one.
+                # Honor the close BEFORE make_room, or the dropped topic — an
+                # immovable slot-bearing candidate — squats the cap and the
+                # new occurrence bounces off as cap_full (prod, Jul 12).
+                dropped = self._resolve_ref(episodes, verdict.episode_ref)
+                if dropped.status in ("candidate", "converged"):
+                    close_episode(dropped, "abandoned", now)
             if not make_room(episodes, self.settings.intent_max_open_episodes, now):
                 # Cap full of invested (slot-bearing/parked) topics: the new
                 # occurrence is not tracked (see outstanding-issues).
