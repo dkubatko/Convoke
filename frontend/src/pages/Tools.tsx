@@ -11,8 +11,21 @@ import {
   ErrorNote,
   Field,
   PageHead,
+  SkeletonCol,
+  TableHead,
   TableSkeleton,
 } from '../components/ui'
+
+/* Shared column spec for skeleton and loaded table (fixed layout) — widths
+   match what auto layout solved for typical data, keeping the look unchanged. */
+const SERVER_COLS: SkeletonCol[] = [
+  { header: 'Name', w: '12%', bar: 90 },
+  { header: 'Status', w: '12%', kind: 'pill' },
+  { header: 'Transport', w: '10%', kind: 'mono', bar: 46 },
+  { header: 'Target', w: '31%', kind: 'mono', bar: '75%' },
+  { header: 'Auth', w: '11%', bar: 70 },
+  { header: '', w: '24%', kind: 'actions', n: 3 },
+]
 
 export default function Tools() {
   const servers = useQuery<McpServer[]>(() => api.get('/api/mcp-servers'), [])
@@ -346,7 +359,7 @@ export default function Tools() {
 
         <Card pad={false}>
           {servers.loading ? (
-            <TableSkeleton rows={2} />
+            <TableSkeleton rows={4} cols={SERVER_COLS} />
           ) : servers.error ? (
             <ErrorNote message={servers.error} onRetry={() => void servers.refetch()} />
           ) : (servers.data ?? []).length === 0 ? (
@@ -356,16 +369,7 @@ export default function Tools() {
             />
           ) : (
             <table className="data">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Status</th>
-                  <th>Transport</th>
-                  <th>Target</th>
-                  <th>Auth</th>
-                  <th />
-                </tr>
-              </thead>
+              <TableHead cols={SERVER_COLS} />
               <tbody>
                 {servers.data!.map((s) => (
                   <tr key={s.id}>

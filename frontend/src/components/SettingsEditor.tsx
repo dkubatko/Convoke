@@ -3,8 +3,61 @@ import { api, ApiError } from '../lib/api'
 import { AppSetting } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
 import { useToast } from './Toast'
-import { Card, CardSkeleton, Check, ErrorNote } from './ui'
+import { Card, Check, ErrorNote, SkeletonButton, SkeletonControl, SkeletonText } from './ui'
 import { LevelSlider } from './LevelSlider'
+
+/** The setting list's geometry while it loads: a group header, rows with a
+    label + description on the left and a value box on the right, and the
+    save-footer — same classes as the real list, so nothing shifts on load. */
+function SettingsSkeleton() {
+  const rows = [
+    { label: 150, desc: '68%' },
+    { label: 190, desc: '54%' },
+    { label: 120, desc: '74%' },
+    { label: 170, desc: '48%' },
+    { label: 140, desc: '62%' },
+  ]
+  return (
+    <div role="status" aria-label="Loading">
+      <div className="setting-list">
+        <div className="setting-group">
+          <span className="setting-group-label">
+            <SkeletonText w={90} />
+          </span>
+        </div>
+        {rows.map((r, i) => (
+          /* minHeight pins the row to the real .setting--row's rendered height
+             (80px = its padding + label/desc/control lines in base.css) — bar
+             line-boxes come up fractionally short of real text. If .setting--row
+             spacing changes in base.css, re-measure and update this. */
+          <div className="setting setting--row" key={i} style={{ minHeight: 80 }}>
+            <div className="setting-main">
+              <span className="setting-label">
+                <SkeletonText w={r.label} />
+              </span>
+              <p className="setting-desc">
+                <SkeletonText w={r.desc} />
+              </p>
+            </div>
+            <div className="setting-control">
+              <div className="setting-value">
+                {/* Keeps the reset icon's 24px footprint, like the real rows. */}
+                <span style={{ width: 24 }} />
+                <SkeletonControl w={64} />
+              </div>
+              <span className="unit">
+                <SkeletonText w={28} />
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="settings-actions">
+        <SkeletonButton w={64} />
+      </div>
+    </div>
+  )
+}
 
 /** Reusable editor for a set of tunables served by `endpoint` (global or
     per-chat). Renders a save-on-demand form; only changed keys are sent. */
@@ -61,9 +114,7 @@ export default function SettingsEditor({ endpoint }: { endpoint: string }) {
     // is a padded footer inside the card.
     <Card pad={false}>
       {settings.loading ? (
-        <div className="card-pad">
-          <CardSkeleton lines={4} />
-        </div>
+        <SettingsSkeleton />
       ) : settings.error ? (
         <div className="card-pad">
           <ErrorNote message={settings.error} onRetry={() => void settings.refetch()} />

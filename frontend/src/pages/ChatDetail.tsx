@@ -2,6 +2,7 @@ import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api, ApiError } from '../lib/api'
 import { shortDateTime, stripTags, timeAgo } from '../lib/format'
+import { safeStorageGet, safeStorageSet } from '../lib/storage'
 import {
   Chat,
   ChatThread,
@@ -25,7 +26,6 @@ import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
 import {
   Card,
-  CardSkeleton,
   Check,
   Chip,
   EmptyState,
@@ -34,12 +34,37 @@ import {
   HoverCard,
   HoverText,
   PageHead,
+  SkeletonButton,
+  SkeletonCheckbox,
+  SkeletonCol,
+  SkeletonPill,
+  SkeletonText,
   StatusPill,
   TabBar,
+  TableHead,
   TableSkeleton,
   ToolCalls,
 } from '../components/ui'
 import { useUrlTab } from '../hooks/useUrlTab'
+
+/* Shared column specs for skeleton and loaded tables (fixed layout) — widths
+   match what auto layout solved for typical data, keeping the look unchanged. */
+const IMPORT_COLS: SkeletonCol[] = [
+  { header: 'File', w: '25%', kind: 'mono', bar: 120 },
+  { header: 'Status', w: '12%', kind: 'pill' },
+  { header: 'Messages', w: '10%', kind: 'mono', bar: 60 },
+  { header: 'Notes', w: '40%', bar: '70%' },
+  { header: '', w: '13%', kind: 'actions', n: 1 },
+]
+
+const RUN_COLS: SkeletonCol[] = [
+  { header: 'When', w: '8%', kind: 'mono', bar: 64 },
+  { header: 'Trigger', w: '8%', kind: 'mono', bar: 60 },
+  { header: 'Status', w: '14%', kind: 'pill' },
+  { header: 'Request', w: '25%', kind: 'para' },
+  { header: 'Outcome', w: '28.5%', kind: 'para' },
+  { header: 'Tool calls', w: '16.5%', kind: 'pill' },
+]
 
 const TABS = ['Memory', 'Members', 'Workflows', 'Threads', 'Import history', 'Tools', 'Agent runs', 'Settings'] as const
 
@@ -52,34 +77,48 @@ export default function ChatDetail() {
   // authorization flips to live without a manual reload.
   const chat = useQuery<Chat>(() => api.get(`/api/chats/${id}`), [id], { pollMs: 5000 })
 
-  if (chat.loading) return <CardSkeleton lines={5} />
-  if (chat.error === 'Chat not found' || (!chat.error && !chat.data)) {
-    return (
-      <EmptyState
-        title="Chat not found"
-        hint="It may have been removed along with its bot."
-        action={<Link className="btn btn--quiet" to="/chats">Back to chats</Link>}
-      />
-    )
-  }
-  if (chat.error || !chat.data) {
-    return <ErrorNote message={chat.error!} onRetry={() => void chat.refetch()} />
+  if (!chat.loading) {
+    if (chat.error === 'Chat not found' || (!chat.error && !chat.data)) {
+      return (
+        <EmptyState
+          title="Chat not found"
+          hint="It may have been removed along with its bot."
+          action={<Link className="btn btn--quiet" to="/chats">Back to chats</Link>}
+        />
+      )
+    }
+    if (chat.error && !chat.data) {
+      return <ErrorNote message={chat.error} onRetry={() => void chat.refetch()} />
+    }
   }
 
+  // While the header loads, the page keeps its full chrome — skeleton title
+  // and lede under a real tab bar — and the active tab loads in parallel
+  // (the tabs only need the chat id from the URL, not the header payload).
   const c = chat.data
   return (
     <>
-      <PageHead
-        title={c.title || String(c.tg_chat_id)}
-        actions={<StatusPill status={c.status} live={c.status === 'authorized'} />}
-        lede={
-          c.status === 'authorized'
-            ? `Live since ${c.authorized_at ? shortDateTime(c.authorized_at) : 'authorization'}${c.authorized_by_name ? `, authorized by ${c.authorized_by_name}` : ''}.`
-            : 'Waiting for a chat admin to tap “Authorize Convoke” in Telegram. Nothing is stored until then.'
-        }
-      />
+      {c ? (
+        <PageHead
+          title={c.title || String(c.tg_chat_id)}
+          actions={<StatusPill status={c.status} live={c.status === 'authorized'} />}
+          lede={
+            c.status === 'authorized'
+              ? `Live since ${c.authorized_at ? shortDateTime(c.authorized_at) : 'authorization'}${c.authorized_by_name ? `, authorized by ${c.authorized_by_name}` : ''}.`
+              : 'Waiting for a chat admin to tap “Authorize Convoke” in Telegram. Nothing is stored until then.'
+          }
+        />
+      ) : (
+        <PageHead
+          title={<SkeletonText w={220} />}
+          actions={<SkeletonPill w={96} />}
+          lede={<SkeletonText w={340} />}
+        />
+      )}
       <TabBar tabs={TABS} active={tab} onSelect={setTab} />
-      {tab === 'Memory' && <MemoryTab chatId={id} />}
+      {/* Keyed: back/forward between two chat URLs swaps the prop without a
+          remount, which would leak per-chat state (dismissed-gaps init). */}
+      {tab === 'Memory' && <MemoryTab key={id} chatId={id} />}
       {tab === 'Members' && <MembersTab chatId={id} />}
       {tab === 'Workflows' && <WorkflowsTab chatId={id} />}
       {tab === 'Threads' && <ThreadsTab chatId={id} />}
@@ -109,6 +148,20 @@ function MemoryTab({ chatId }: { chatId: number }) {
     { pollMs: 10000 },
   )
   const gaps = useQuery<Gap[]>(() => api.get(`/api/chats/${chatId}/gaps`), [chatId])
+
+  // Dismissal remembers the dismissed gap ids (per chat): the card stays
+  // hidden across refreshes and shows again only when an UNSEEN gap appears —
+  // a gap disappearing (e.g. covered by an import) never resurfaces it.
+  const gapsDismissKey = `convoke.memory-gaps-dismissed.${chatId}`
+  const [dismissedGapIds, setDismissedGapIds] = useState<Set<string>>(
+    () => new Set(safeStorageGet(gapsDismissKey)?.split(',').filter(Boolean)),
+  )
+  const gapsVisible = (gaps.data ?? []).some((g) => !dismissedGapIds.has(String(g.id)))
+  const dismissGaps = () => {
+    const ids = new Set([...dismissedGapIds, ...(gaps.data ?? []).map((g) => String(g.id))])
+    safeStorageSet(gapsDismissKey, [...ids].sort().join(','))
+    setDismissedGapIds(ids)
+  }
 
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<SearchHit[] | null>(null)
@@ -147,8 +200,21 @@ function MemoryTab({ chatId }: { chatId: number }) {
 
   return (
     <div className="stack">
-      {gaps.data && gaps.data.length > 0 && (
-        <Card title="Gaps in memory">
+      {/* TODO: move this conditional notice to a separate tab or an "alerts"
+          surface — as an inline card it appears/disappears based on data and
+          can't have an honest skeleton, so it displaces the cards below. */}
+      {gaps.data && gaps.data.length > 0 && gapsVisible && (
+        <Card>
+          <div className="page-head-row" style={{ marginBottom: 10 }}>
+            <div className="card-title" style={{ margin: 0 }}>Gaps in memory</div>
+            <button
+              className="btn btn--quiet btn--sm"
+              title="Hide this notice — it returns if a new gap appears"
+              onClick={dismissGaps}
+            >
+              Dismiss
+            </button>
+          </div>
           <p className="muted" style={{ marginBottom: 10 }}>
             Convoke was offline longer than Telegram keeps updates (24 hours). Messages in these
             ranges were never received and can only be recovered with a history import.
@@ -200,7 +266,21 @@ function MemoryTab({ chatId }: { chatId: number }) {
         )}
       </Card>
 
-      {mediaStatus.data &&
+      {/* TODO: move this conditional card to a separate tab or an "alerts"
+          surface. Until then it gets a skeleton despite being data-conditional:
+          in practice chats almost always have media, so reserving its row is
+          right far more often than not (the skeleton vanishes when a chat
+          truly has none). */}
+      {mediaStatus.loading ? (
+        <Card>
+          <div className="row" style={{ alignItems: 'center', gap: 8 }} role="status" aria-label="Loading">
+            <b style={{ fontSize: 13 }}>Media memory</b>
+            <SkeletonPill w={96} />
+            <SkeletonPill w={82} />
+          </div>
+        </Card>
+      ) : (
+        mediaStatus.data &&
         mediaStatus.data.pending +
           mediaStatus.data.described +
           mediaStatus.data.failed +
@@ -229,18 +309,23 @@ function MemoryTab({ chatId }: { chatId: number }) {
               )}
             </div>
           </Card>
-        )}
+        )
+      )}
 
       <Card title="Latest messages" pad={false}>
         {messages.loading ? (
-          <TableSkeleton rows={5} />
+          <TableSkeleton
+            rows={25}
+            className="data--rows2"
+            cols={[{ kind: 'twoline', w: 160, bar: 90, sub: 11 }, { kind: 'para' }]}
+          />
         ) : (messages.data ?? []).length === 0 ? (
           <EmptyState
             title="Nothing stored yet"
             hint="Messages appear here once the chat is authorized and people start talking."
           />
         ) : (
-          <table className="data">
+          <table className="data data--rows2">
             <tbody>
               {messages.data!.map((m) => (
                 <tr key={m.id}>
@@ -252,22 +337,31 @@ function MemoryTab({ chatId }: { chatId: number }) {
                     </div>
                   </td>
                   <td>
-                    {m.reply_to && (
-                      <div
-                        className="muted"
-                        style={{
-                          fontSize: 12,
-                          borderLeft: '2px solid var(--line-strong)',
-                          padding: '1px 8px',
-                          marginBottom: 4,
-                        }}
-                      >
-                        ↪ <b>{m.reply_to.sender_name}</b>:{' '}
-                        <HoverText text={m.reply_to.text} max={90} />
-                      </div>
-                    )}
-                    {m.attachment && <AttachmentLine att={m.attachment} />}
-                    {m.text && <HoverText text={m.text} max={180} />}
+                    {/* Rows are pinned to exactly two lines (.data--rows2), so
+                        every piece here is single-line except a bare text-only
+                        message, which may use both lines. The maxHeight is a
+                        safety clip for the rare quote+attachment+text combo. */}
+                    <div style={{ maxHeight: '2lh', overflow: 'hidden' }}>
+                      {m.reply_to && (
+                        <div
+                          className="muted clamp1"
+                          style={{
+                            fontSize: 12,
+                            borderLeft: '2px solid var(--line-strong)',
+                            padding: '0 8px',
+                          }}
+                        >
+                          ↪ <b>{m.reply_to.sender_name}</b>:{' '}
+                          <HoverText text={m.reply_to.text} max={90} />
+                        </div>
+                      )}
+                      {m.attachment && <AttachmentLine att={m.attachment} />}
+                      {m.text && (
+                        <div className={m.reply_to || m.attachment ? 'clamp1' : 'clamp2'}>
+                          <HoverText text={m.text} max={180} />
+                        </div>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -322,9 +416,11 @@ function AttachmentLine({ att }: { att: MessageAttachment }) {
         ? 'description pending…'
         : att.error ?? att.status
   return (
-    <div style={{ marginBottom: 4 }}>
-      <span className={`pill pill--${tone}`}>{label}</span>{' '}
-      <span className="muted" style={{ fontSize: 12.5 }}>{body}</span>
+    /* One flex line, pinned to the cell's line-height: inside .data--rows2 the
+       attachment must never be taller than a text line, or rows would drift. */
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, height: '1lh', minWidth: 0 }}>
+      <span className={`pill pill--${tone}`} style={{ flex: 'none' }}>{label}</span>
+      <span className="muted clamp1" style={{ fontSize: 12.5 }}>{body}</span>
     </div>
   )
 }
@@ -375,7 +471,43 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
     }
   }
 
-  if (workflows.loading) return <CardSkeleton lines={4} />
+  if (workflows.loading) {
+    // The Blind header ("Active" + count + caret) is real; the cards below
+    // mirror the assigned-workflow card: checkbox, name, type pill, summary.
+    return (
+      <div className="stack" role="status" aria-label="Loading">
+        <section>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="card-title" style={{ margin: 0 }}>Active</span>
+            <span className="muted" style={{ fontSize: 12 }}><SkeletonText w={12} /></span>
+            <span className="muted">▾</span>
+          </div>
+          <div className="stack" style={{ marginTop: 10 }}>
+            {[150, 118, 134].map((w) => (
+              <Card key={w}>
+                <div className="page-head-row">
+                  <div className="row" style={{ gap: 10 }}>
+                    <SkeletonCheckbox />
+                    <h3 style={{ fontSize: 15, margin: 0 }}>
+                      <SkeletonText w={w} />
+                    </h3>
+                    <SkeletonPill w={64} />
+                  </div>
+                  <span className="row" style={{ gap: 8 }}>
+                    <SkeletonPill w={88} />
+                    <SkeletonButton sm w={74} />
+                  </span>
+                </div>
+                <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+                  <SkeletonText w="55%" />
+                </p>
+              </Card>
+            ))}
+          </div>
+        </section>
+      </div>
+    )
+  }
   if (workflows.error)
     return <ErrorNote message={workflows.error} onRetry={() => void workflows.refetch()} />
   if ((workflows.data ?? []).length === 0) {
@@ -708,7 +840,6 @@ function ThreadsTab({ chatId }: { chatId: number }) {
     }
   }
 
-  if (threads.loading) return <CardSkeleton lines={4} />
   if (threads.error)
     return <ErrorNote message={threads.error} onRetry={() => void threads.refetch()} />
   const list = threads.data ?? []
@@ -719,7 +850,26 @@ function ThreadsTab({ chatId }: { chatId: number }) {
         Turn a thread off and Convoke ignores it completely — no workflows, nothing added to memory,
         and no replies, even to a direct mention. Names are yours to set, for display only.
       </p>
-      {list.length === 0 ? (
+      {threads.loading ? (
+        [128, 96].map((w) => (
+          <Card key={w}>
+            <div className="page-head-row" role="status" aria-label="Loading">
+              <div className="row" style={{ gap: 10 }}>
+                <SkeletonCheckbox />
+                <h3 className="thread-name-h3">
+                  <SkeletonText w={w} />
+                </h3>
+              </div>
+              <span className="row" style={{ gap: 10 }}>
+                <span className="muted mono" style={{ fontSize: 11 }}>
+                  <SkeletonText w={90} />
+                </span>
+                <SkeletonButton sm w={82} />
+              </span>
+            </div>
+          </Card>
+        ))
+      ) : list.length === 0 ? (
         <Card>
           <EmptyState title="No threads yet" hint="Threads appear here as messages arrive." />
         </Card>
@@ -882,7 +1032,6 @@ function MembersTab({ chatId }: { chatId: number }) {
     setEditing(null)
   }
 
-  if (members.loading) return <TableSkeleton rows={5} />
   if (members.error)
     return <ErrorNote message={members.error} onRetry={() => void members.refetch()} />
 
@@ -897,7 +1046,46 @@ function MembersTab({ chatId }: { chatId: number }) {
         [bot] tag and stop being scored by memory search, though they stay readable in results.
       </p>
       <Card pad={false}>
-        {list.length === 0 ? (
+        {members.loading ? (
+          <>
+            {/* Bespoke skeleton: the display-name cell wraps its bar in the
+                real .member-name (28px) — the row's height driver — so the
+                loading row is the loaded row's height by construction. */}
+            <table className="data members-table" role="status" aria-label="Loading">
+              <thead>
+                <tr>
+                  <th>User ID</th>
+                  <th>Handle</th>
+                  <th>Display name</th>
+                  <th title="Messages render tagged [bot] and are excluded from memory scoring">Bot</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from({ length: 8 }, (_, i) => (
+                  <tr key={i}>
+                    <td className="mono muted">
+                      <SkeletonText w={76} />
+                    </td>
+                    <td className="mono">
+                      <SkeletonText w={64 + ((i * 5) % 3) * 18} />
+                    </td>
+                    <td>
+                      <span className="member-name">
+                        <SkeletonText w={90 + ((i * 7) % 3) * 20} />
+                      </span>
+                    </td>
+                    <td>
+                      <SkeletonCheckbox />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="settings-actions">
+              <SkeletonButton w={64} />
+            </div>
+          </>
+        ) : list.length === 0 ? (
           <div className="card-pad">
             <EmptyState title="No members yet" hint="Members appear here as messages arrive." />
           </div>
@@ -1077,20 +1265,12 @@ function ImportTab({ chatId }: { chatId: number }) {
 
       <Card title="Imports" pad={false}>
         {jobs.loading ? (
-          <TableSkeleton rows={2} />
+          <TableSkeleton rows={4} cols={IMPORT_COLS} />
         ) : (jobs.data ?? []).length === 0 ? (
           <EmptyState title="No imports yet" hint="Uploads and their validation results appear here." />
         ) : (
           <table className="data">
-            <thead>
-              <tr>
-                <th>File</th>
-                <th>Status</th>
-                <th>Messages</th>
-                <th>Notes</th>
-                <th />
-              </tr>
-            </thead>
+            <TableHead cols={IMPORT_COLS} />
             <tbody>
               {jobs.data!.map((j) => (
                 <tr key={j.id}>
@@ -1101,7 +1281,7 @@ function ImportTab({ chatId }: { chatId: number }) {
                   <td className="mono">
                     {j.messages_ingested}/{j.messages_total}
                   </td>
-                  <td className="muted" style={{ maxWidth: 340 }}>{j.detail}</td>
+                  <td className="muted">{j.detail}</td>
                   <td style={{ textAlign: 'right' }}>
                     {/* A failed job can still hold committed partial rows — offer the same cleanup. */}
                     {(j.status === 'done' || (j.status === 'failed' && j.messages_ingested > 0)) && (
@@ -1146,7 +1326,23 @@ function ToolsTab({ chatId }: { chatId: number }) {
     }
   }
 
-  if (servers.loading || enabled.loading) return <CardSkeleton lines={3} />
+  if (servers.loading || enabled.loading) {
+    // Real card title over check-row placeholders shaped like the server list.
+    return (
+      <Card title="Tools available to this chat's agent">
+        <div className="stack" style={{ gap: 10 }} role="status" aria-label="Loading">
+          {[170, 210, 150].map((w) => (
+            <span className="check" key={w}>
+              <SkeletonCheckbox />
+              <span>
+                <SkeletonText w={w} />
+              </span>
+            </span>
+          ))}
+        </div>
+      </Card>
+    )
+  }
   if (servers.error || enabled.error)
     return (
       <ErrorNote
@@ -1198,7 +1394,7 @@ function RunsTab({ chatId }: { chatId: number }) {
   if (runs.loading)
     return (
       <Card pad={false}>
-        <TableSkeleton rows={4} />
+        <TableSkeleton rows={20} cols={RUN_COLS} className="data--rows2" />
       </Card>
     )
   if (runs.error) return <ErrorNote message={runs.error} onRetry={() => void runs.refetch()} />
@@ -1211,17 +1407,8 @@ function RunsTab({ chatId }: { chatId: number }) {
           hint="Mention the bot, reply to it, or let a workflow trigger."
         />
       ) : (
-        <table className="data">
-          <thead>
-            <tr>
-              <th>When</th>
-              <th>Trigger</th>
-              <th>Status</th>
-              <th>Request</th>
-              <th>Outcome</th>
-              <th>Tool calls</th>
-            </tr>
-          </thead>
+        <table className="data data--rows2">
+          <TableHead cols={RUN_COLS} />
           <tbody>
             {runs.data!.map((r) => (
               <tr key={r.id}>
@@ -1231,10 +1418,14 @@ function RunsTab({ chatId }: { chatId: number }) {
                   <StatusPill status={r.status} />
                 </td>
                 <td className="muted">
-                  <HoverText text={stripTags(r.request_text)} max={70} />
+                  <div className="clamp2">
+                    <HoverText text={stripTags(r.request_text)} max={70} />
+                  </div>
                 </td>
                 <td className={r.error ? 'field-error' : 'muted'}>
-                  <HoverText text={stripTags(r.error ?? r.response_text ?? '')} max={90} />
+                  <div className="clamp2">
+                    <HoverText text={stripTags(r.error ?? r.response_text ?? '')} max={90} />
+                  </div>
                 </td>
                 <td className="toolcall-cell">
                   <ToolCalls calls={r.tool_calls} />

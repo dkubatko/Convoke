@@ -7,13 +7,17 @@ import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
 import {
   Card,
-  CardSkeleton,
   Check,
   EmptyState,
   ErrorNote,
   Field,
   PageHead,
+  SkeletonButton,
+  SkeletonControl,
+  SkeletonPill,
   TabBar,
+  SkeletonCol,
+  TableHead,
   TableSkeleton,
 } from '../components/ui'
 import SettingsEditor from '../components/SettingsEditor'
@@ -21,6 +25,17 @@ import { Select, SelectOption } from '../components/Select'
 import { useUrlTab } from '../hooks/useUrlTab'
 
 const SUBTABS = ['Role assignment', 'Model library', 'Settings'] as const
+
+/* Shared column spec for skeleton and loaded table (fixed layout) — widths
+   match what auto layout solved for typical data, keeping the look unchanged. */
+const MODEL_COLS: SkeletonCol[] = [
+  { header: 'Name', w: '10.5%', kind: 'twoline', bar: 110, sub: 12 },
+  { header: 'Endpoint', w: '19.5%', kind: 'mono', bar: '80%' },
+  { header: 'Capabilities', w: '29%', kind: 'pills', n: 4 },
+  { header: 'Roles', w: '19.5%', kind: 'pill' },
+  { header: 'Tested', w: '8%', bar: 70 },
+  { header: '', w: '13.5%', kind: 'actions' },
+]
 
 const CAPABILITIES = ['chat', 'vision', 'transcription', 'video'] as const
 
@@ -335,7 +350,7 @@ function ModelLibrary({
 
       <Card pad={false}>
         {models.loading ? (
-          <TableSkeleton rows={2} />
+          <TableSkeleton rows={4} cols={MODEL_COLS} />
         ) : models.error ? (
           <ErrorNote message={models.error} onRetry={() => onChanged()} />
         ) : (models.data ?? []).length === 0 ? (
@@ -345,16 +360,7 @@ function ModelLibrary({
           />
         ) : (
           <table className="data">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Endpoint</th>
-                <th>Capabilities</th>
-                <th>Roles</th>
-                <th>Tested</th>
-                <th />
-              </tr>
-            </thead>
+            <TableHead cols={MODEL_COLS} />
             <tbody>
               {models.data!.map((m) => (
                 <tr key={m.id}>
@@ -414,32 +420,80 @@ function RoleAssignments({
   roles: ReturnType<typeof useQuery<RoleAssignment[]>>
   onChanged: () => void
 }) {
-  if (models.loading || roles.loading) {
-    return (
-      <div className="stack">
-        <CardSkeleton lines={2} />
-        <CardSkeleton lines={2} />
-        <CardSkeleton lines={2} />
-      </div>
-    )
-  }
   if (roles.error) return <ErrorNote message={roles.error} onRetry={onChanged} />
 
+  const loading = models.loading || roles.loading
   const byRole = new Map((roles.data ?? []).map((r) => [r.role, r]))
   return (
     <div className="stack">
+      {/* The embeddings cards fetch their own state — they render (with their
+          own loading pill) while the library and role queries are in flight. */}
       <EmbeddingsCard role="memory" />
       <EmbeddingsCard role="intent" />
-      {ROLES.map((meta) => (
-        <RoleCard
-          key={meta.role}
-          meta={meta}
-          assignment={byRole.get(meta.role)}
-          library={models.data ?? []}
-          onChanged={onChanged}
-        />
-      ))}
+      {ROLES.map((meta) =>
+        loading ? (
+          <RoleCardSkeleton key={meta.role} meta={meta} />
+        ) : (
+          <RoleCard
+            key={meta.role}
+            meta={meta}
+            assignment={byRole.get(meta.role)}
+            library={models.data ?? []}
+            onChanged={onChanged}
+          />
+        ),
+      )}
     </div>
+  )
+}
+
+/** The capability a role needs is fixed per role but delivered via the
+    assignment payload — derive it from the role name too, so the skeleton and
+    an unassigned RoleCard render the same hint the assignment will confirm. */
+function requiredCapability(meta: (typeof ROLES)[number], assignment?: RoleAssignment) {
+  return (
+    assignment?.required_capability ??
+    (['vision', 'transcription', 'video'].includes(meta.role) ? meta.role : 'chat')
+  )
+}
+
+/** Shared by RoleCard and its skeleton — the hint is static text that must be
+    byte-identical in both, or it swaps visibly when loading finishes. */
+function RoleHint({ meta, required }: { meta: (typeof ROLES)[number]; required: string }) {
+  return (
+    <div className="field-hint" style={{ marginTop: 6 }}>
+      <div>Needs the “{required}” capability.</div>
+      <div>Recommended: {meta.recommended}.</div>
+      <div>
+        Reasoning: Default omits the parameter; a picked level is verified with a live
+        probe when you Apply — models that don’t support it reject the save harmlessly.
+      </div>
+      {meta.note && <div>{meta.note}</div>}
+    </div>
+  )
+}
+
+/** A RoleCard before its assignment is known: every static part (title, blurb,
+    labels, hints) is real text; only the status pill and picker shimmer. */
+function RoleCardSkeleton({ meta }: { meta: (typeof ROLES)[number] }) {
+  const required = requiredCapability(meta)
+  return (
+    <Card>
+      <div className="page-head-row" style={{ marginBottom: 10 }} role="status" aria-label="Loading">
+        <h3 style={{ fontSize: 16 }}>{meta.title}</h3>
+        <SkeletonPill w={104} />
+      </div>
+      <p className="muted" style={{ marginBottom: 14 }}>{meta.blurb}</p>
+      <div className="row" style={{ alignItems: 'flex-end' }}>
+        <div style={{ flex: '0 1 420px' }}>
+          <Field label="Model">
+            <SkeletonControl />
+          </Field>
+        </div>
+        <SkeletonButton w={68} />
+      </div>
+      <RoleHint meta={meta} required={required} />
+    </Card>
   )
 }
 
@@ -538,6 +592,12 @@ function EmbeddingsCard({ role }: { role: EmbedderRole }) {
               {cur.model_id} · {cur.dim}d · local
             </span>
           )
+        ) : info.error ? (
+          // A dead endpoint must not read as eternal loading.
+          <span className="pill pill--err" title={info.error}>
+            <span className="lamp" aria-hidden />
+            unavailable
+          </span>
         ) : (
           <span className="pill pill--idle">loading…</span>
         )}
@@ -622,7 +682,7 @@ function RoleCard({
   const [selected, setSelected] = useState<number | ''>(assignment?.model_id ?? '')
   const [busy, setBusy] = useState(false)
 
-  const required = assignment?.required_capability ?? 'chat'
+  const required = requiredCapability(meta, assignment)
   const selectedModel = library.find((m) => m.id === selected)
   const selectionLacksCapability = selectedModel != null && !selectedModel.capabilities[required]
 
@@ -736,15 +796,7 @@ function RoleCard({
         </div>
       )}
       {/* Hints sit outside the 420px column so they use the card's full width. */}
-      <div className="field-hint" style={{ marginTop: 6 }}>
-        <div>Needs the “{required}” capability.</div>
-        <div>Recommended: {meta.recommended}.</div>
-        <div>
-          Reasoning: Default omits the parameter; a picked level is verified with a live
-          probe when you Apply — models that don’t support it reject the save harmlessly.
-        </div>
-        {meta.note && <div>{meta.note}</div>}
-      </div>
+      <RoleHint meta={meta} required={required} />
       {selectionLacksCapability && (
         <p className="field-error" style={{ marginTop: 8 }}>
           {selectedModel!.name} didn’t pass the {required} probe — this role won’t work until a{' '}

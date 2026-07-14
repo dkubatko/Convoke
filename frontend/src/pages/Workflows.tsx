@@ -11,13 +11,16 @@ import { useToast } from '../components/Toast'
 import { useConfirm } from '../components/ConfirmDialog'
 import {
   Card,
-  CardSkeleton,
   Check,
   ChoiceChips,
   EmptyState,
   ErrorNote,
   Field,
+  KVSkeleton,
   PageHead,
+  SkeletonButton,
+  SkeletonPill,
+  SkeletonText,
   StatusPill,
   TabBar,
 } from '../components/ui'
@@ -114,8 +117,9 @@ export default function Workflows() {
 
         {workflows.loading ? (
           <>
-            <CardSkeleton lines={4} />
-            <CardSkeleton lines={4} />
+            <WorkflowCardSkeleton />
+            <WorkflowCardSkeleton />
+            <WorkflowCardSkeleton />
           </>
         ) : workflows.error ? (
           <ErrorNote message={workflows.error} onRetry={() => void workflows.refetch()} />
@@ -164,6 +168,30 @@ export default function Workflows() {
       </div>
       )}
     </>
+  )
+}
+
+/** The WorkflowCard's geometry while the list loads: same header row (name,
+    type + status pills, three small actions) over the same kv grid. */
+function WorkflowCardSkeleton() {
+  return (
+    <Card>
+      <div className="page-head-row" style={{ marginBottom: 10 }} role="status" aria-label="Loading">
+        <div className="row" style={{ gap: 10 }}>
+          <h3 style={{ fontSize: 16, margin: 0 }}>
+            <SkeletonText w={150} />
+          </h3>
+          <SkeletonPill w={70} />
+          <SkeletonPill w={78} />
+        </div>
+        <span className="row">
+          <SkeletonButton sm w={44} />
+          <SkeletonButton sm w={62} />
+          <SkeletonButton sm w={56} />
+        </span>
+      </div>
+      <KVSkeleton labels={['trigger', 'needs', 'detector', 'dedup', 'action', 'chats']} />
+    </Card>
   )
 }
 

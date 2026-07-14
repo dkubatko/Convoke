@@ -3,7 +3,17 @@ import { api } from '../lib/api'
 import { timeAgo } from '../lib/format'
 import { Bot, Chat } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
-import { Card, EmptyState, ErrorNote, PageHead, StatusPill, TableSkeleton } from '../components/ui'
+import { Card, EmptyState, ErrorNote, PageHead, SkeletonCol, StatusPill, TableHead, TableSkeleton } from '../components/ui'
+
+/* One column spec for skeleton AND loaded table (table.data is layout: fixed,
+   so these widths are the columns — matched to what auto layout used to solve
+   for typical data, to keep the rendered look unchanged). */
+const COLS: SkeletonCol[] = [
+  { header: 'Chat', w: '22%', kind: 'twoline', bar: 130 },
+  { header: 'Bot', w: '28%', kind: 'mono', bar: 100 },
+  { header: 'Status', w: '25%', kind: 'pill' },
+  { header: 'Authorized by', w: '25%', bar: 150 },
+]
 
 export default function Chats() {
   const chats = useQuery<Chat[]>(() => api.get('/api/chats'), [], { pollMs: 10000 })
@@ -23,7 +33,7 @@ export default function Chats() {
       />
       <Card pad={false}>
         {chats.loading ? (
-          <TableSkeleton rows={3} />
+          <TableSkeleton rows={8} cols={COLS} />
         ) : chats.error ? (
           <ErrorNote message={chats.error} onRetry={() => void chats.refetch()} />
         ) : (chats.data ?? []).length === 0 ? (
@@ -33,14 +43,7 @@ export default function Chats() {
           />
         ) : (
           <table className="data">
-            <thead>
-              <tr>
-                <th>Chat</th>
-                <th>Bot</th>
-                <th>Status</th>
-                <th>Authorized by</th>
-              </tr>
-            </thead>
+            <TableHead cols={COLS} />
             <tbody>
               {chats.data!.map((c) => (
                 <tr

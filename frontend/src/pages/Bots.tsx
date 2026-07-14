@@ -12,8 +12,20 @@ import {
   Field,
   PageHead,
   StatusPill,
+  SkeletonCol,
+  TableHead,
   TableSkeleton,
 } from '../components/ui'
+
+/* Shared column spec for skeleton and loaded table (fixed layout) — widths
+   match what auto layout solved for typical data, keeping the look unchanged. */
+const BOT_COLS: SkeletonCol[] = [
+  { header: 'Bot', w: '19%', kind: 'twoline', bar: 120, sub: 12, subMono: false },
+  { header: 'Status', w: '14%', kind: 'pill' },
+  { header: 'Polling', w: '23.5%', kind: 'pill' },
+  { header: 'Hearing', w: '19.5%', kind: 'pill' },
+  { header: '', w: '24%', kind: 'actions' },
+]
 
 /** Freshness of the getUpdates wire: stamped ~1/min on successful polls.
     Stale > 3 min while active means polling is failing — check worker logs. */
@@ -136,7 +148,7 @@ export default function Bots() {
 
         <Card pad={false}>
           {bots.loading ? (
-            <TableSkeleton rows={2} />
+            <TableSkeleton rows={4} cols={BOT_COLS} />
           ) : bots.error ? (
             <ErrorNote message={bots.error} onRetry={() => void bots.refetch()} />
           ) : (bots.data ?? []).length === 0 ? (
@@ -146,15 +158,7 @@ export default function Bots() {
             />
           ) : (
             <table className="data">
-              <thead>
-                <tr>
-                  <th>Bot</th>
-                  <th>Status</th>
-                  <th>Polling</th>
-                  <th>Hearing</th>
-                  <th />
-                </tr>
-              </thead>
+              <TableHead cols={BOT_COLS} />
               <tbody>
                 {bots.data!.map((b) => (
                   <tr key={b.id}>

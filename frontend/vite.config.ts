@@ -7,7 +7,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // Non-docker dev: `npm run dev` against a locally running backend.
-      '/api': 'http://localhost:8000',
+      // CONVOKE_API_PROXY can point elsewhere, e.g. the dockerized nginx
+      // (http://localhost:8080) to develop against the running stack.
+      '/api': process.env.CONVOKE_API_PROXY ?? 'http://localhost:8000',
     },
   },
 })

@@ -1,6 +1,7 @@
+import { useSyncExternalStore } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { api } from '../lib/api'
-import { useQuery } from '../hooks/useQuery'
+import { debugForcedLoading, useQuery } from '../hooks/useQuery'
 import {
   IconBolt,
   IconBubbles,
@@ -29,6 +30,9 @@ const NAV = [
 export default function Layout({ onSignOut }: { onSignOut: () => void }) {
   const health = useQuery<Health>(() => api.get('/api/health'), [], { pollMs: 30000 })
   const healthy = health.data?.status === 'ok' && health.data.pgvector
+  // Debug: the health pill doubles as a skeleton-preview toggle (see useQuery).
+  // While previewing, health.loading is forced too, so label from the flag.
+  const previewing = useSyncExternalStore(debugForcedLoading.subscribe, debugForcedLoading.read)
 
   return (
     <div className="shell">
@@ -50,10 +54,24 @@ export default function Layout({ onSignOut }: { onSignOut: () => void }) {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <span className={`pill ${healthy ? 'pill--ok pill--live' : 'pill--err'}`}>
+          <button
+            type="button"
+            className={`pill ${previewing ? 'pill--warn' : healthy ? 'pill--ok pill--live' : 'pill--err'}`}
+            style={{ cursor: 'pointer', border: 'none' }}
+            role="switch"
+            aria-checked={previewing}
+            title="Debug: preview loading skeletons — forces every query's loading state (already-loaded, data-gated content stays visible)"
+            onClick={() => debugForcedLoading.toggle()}
+          >
             <span className="lamp" aria-hidden />
-            {health.loading ? 'checking…' : healthy ? 'all systems live' : 'backend unreachable'}
-          </span>
+            {previewing
+              ? 'skeleton preview'
+              : health.loading
+                ? 'checking…'
+                : healthy
+                  ? 'all systems live'
+                  : 'backend unreachable'}
+          </button>
           <button
             className="btn btn--quiet btn--sm"
             onClick={async () => {

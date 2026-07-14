@@ -2,6 +2,37 @@
    Cool porcelain surfaces, ink-blue text, one working accent (dispatch blue),
    signal colors reserved for state: live green / standby amber / fault red. */
 
+/* Metric-compatible fallbacks: local faces adjusted (via canvas-measured
+   ratios) to the webfonts' advance widths and vertical metrics, so the moment
+   a webfont finishes loading nothing moves — text occupies the same box in
+   both. Keep these in every font stack right after the webfont. */
+@font-face {
+  font-family: 'IBM Plex Sans Fallback';
+  src: local('Arial');
+  size-adjust: 101.44%;
+  ascent-override: 100.55%;
+  descent-override: 26.62%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono Fallback';
+  src: local('Courier New');
+  size-adjust: 99.98%;
+  ascent-override: 102.02%;
+  descent-override: 27%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: 'Bricolage Grotesque Fallback';
+  src: local('Arial');
+  size-adjust: 105.14%;
+  ascent-override: 88.46%;
+  descent-override: 25.68%;
+  line-gap-override: 0%;
+}
+
 :root {
   color-scheme: light dark;
 
@@ -31,9 +62,9 @@
   --shadow-1: 0 1px 2px rgb(23 34 44 / 6%), 0 2px 10px rgb(23 34 44 / 5%);
   --shadow-2: 0 4px 12px rgb(23 34 44 / 10%), 0 12px 40px rgb(23 34 44 / 12%);
 
-  --font-display: 'Bricolage Grotesque Variable', 'IBM Plex Sans', sans-serif;
-  --font-body: 'IBM Plex Sans', system-ui, sans-serif;
-  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --font-display: 'Bricolage Grotesque Variable', 'Bricolage Grotesque Fallback', 'IBM Plex Sans', sans-serif;
+  --font-body: 'IBM Plex Sans', 'IBM Plex Sans Fallback', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'IBM Plex Mono Fallback', ui-monospace, monospace;
 }
 
 @media (prefers-color-scheme: dark) {

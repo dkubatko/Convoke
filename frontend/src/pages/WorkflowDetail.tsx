@@ -5,7 +5,19 @@ import { shortDateTime, timeAgo, truncate } from '../lib/format'
 import { Chat, WorkflowDetail as WorkflowDetailT, WorkflowChat } from '../lib/types'
 import { dedupLabel, funnel, stageStory, statusChip } from '../lib/intent'
 import { useQuery } from '../hooks/useQuery'
-import { Card, CardSkeleton, Chip, EmptyState, ErrorNote, Funnel, PageHead, StatusPill } from '../components/ui'
+import {
+  Card,
+  Chip,
+  EmptyState,
+  ErrorNote,
+  Funnel,
+  KVSkeleton,
+  PageHead,
+  SkeletonButton,
+  SkeletonPill,
+  SkeletonText,
+  StatusPill,
+} from '../components/ui'
 import { EpisodeList } from '../components/Episodes'
 import { WorkflowForm } from './Workflows'
 
@@ -18,7 +30,48 @@ export default function WorkflowDetail() {
   const chats = useQuery<Chat[]>(() => api.get('/api/chats'), [])
   const [editing, setEditing] = useState(false)
 
-  if (wf.loading) return <CardSkeleton lines={5} />
+  if (wf.loading) {
+    // Same chrome as the loaded page: head, "Definition" card, chats section —
+    // only the workflow's own values shimmer.
+    return (
+      <div className="stack">
+        <PageHead
+          title={<SkeletonText w={200} />}
+          lede={
+            <span>
+              <Link to="/workflows">Workflows</Link> · <SkeletonText w={110} />
+            </span>
+          }
+          actions={<SkeletonButton w={58} />}
+        />
+        <Card title="Definition">
+          <KVSkeleton labels={['trigger', 'waits for', 'dedup', 'detector', 'on fire', 'action', 'enabled', 'chats']} />
+        </Card>
+        <div>
+          <PageHead title="In these chats" />
+          <div className="stack" style={{ gap: 12 }}>
+            <Card>
+              <div className="page-head-row" role="status" aria-label="Loading">
+                <h3 style={{ fontSize: 15, margin: 0 }}>
+                  <SkeletonText w={130} />
+                </h3>
+                <span className="row" style={{ gap: 8 }}>
+                  <SkeletonPill w={92} />
+                  <SkeletonPill w={84} />
+                </span>
+              </div>
+              <div className="stack" style={{ gap: 8, marginTop: 10 }}>
+                <p style={{ fontSize: 12.5, margin: 0 }}>
+                  <SkeletonText w="60%" />
+                </p>
+                <KVSkeleton labels={['last check']} />
+              </div>
+            </Card>
+          </div>
+        </div>
+      </div>
+    )
+  }
   if (wf.error) return <ErrorNote message={wf.error} onRetry={() => void wf.refetch()} />
   const w = wf.data!
 

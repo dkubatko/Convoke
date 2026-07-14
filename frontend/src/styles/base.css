@@ -7,6 +7,13 @@ body {
   height: 100%;
 }
 
+/* Classic (non-overlay) scrollbars: reserve the gutter even while the page is
+   shorter than the viewport, so content doesn't shift left when a loading
+   page grows past 100vh and the scrollbar appears. */
+html {
+  scrollbar-gutter: stable;
+}
+
 /* min-height (not height): the app must be allowed to grow with its content —
    a fixed-height root detaches the sticky sidebar the moment a page gets
    taller than the viewport. */
@@ -152,6 +159,9 @@ code,
   min-height: 0;
   padding: 4px 10px;
   font-size: 12.5px;
+  /* Explicit: 16 + 8 padding + 2 border = the 26px the skeletons assume;
+     `normal` here is renderer-dependent (see .pill). */
+  line-height: 16px;
 }
 
 input,
@@ -455,6 +465,14 @@ table.data {
   width: 100%;
   border-collapse: collapse;
   font-size: 13.5px;
+  /* Deterministic columns: widths come from the first row's declared widths,
+     not from re-solving all cell content — so columns hold identical geometry
+     across skeleton → loaded and fallback-font → webfont transitions. */
+  table-layout: fixed;
+}
+
+table.data td {
+  overflow-wrap: break-word; /* fixed columns wrap long values instead of overflowing */
 }
 
 table.data th {
@@ -475,6 +493,52 @@ table.data td {
 
 table.data tr:last-child td {
   border-bottom: none;
+}
+
+/* Tables whose long-text column wraps to 1–2 lines per row (runs, messages):
+   every row occupies exactly the two-line height (derived from the cell's own
+   line-height — 2lh — plus 22px padding and the 1px row border, so it can
+   never drift from the text metrics) and shorter entries center within it.
+   Cell content in these tables must be clamped to two lines (.clamp1/.clamp2,
+   single-line toolcalls below), which is what guarantees ZERO height shift
+   between skeleton, short rows, and long rows. */
+table.data--rows2 td {
+  height: calc(2lh + 23px);
+}
+
+/* Exactly N text lines — string length can't change geometry. line-clamp
+   supplies the ellipsis where the engine honors it; the max-height (N line
+   boxes) is the hard geometric guarantee either way. */
+.clamp1,
+.clamp2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.clamp1 {
+  -webkit-line-clamp: 1;
+  max-height: 1lh;
+}
+
+.clamp2 {
+  -webkit-line-clamp: 2;
+  max-height: 2lh;
+}
+
+/* In two-line rows, provider chips stay on one line and shrink with their own
+   ellipsis instead of wrapping into a second chip row (hover still shows the
+   full call list). */
+.data--rows2 .toolcalls {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.data--rows2 .toolcall {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 table.data tr.rowlink {
@@ -509,7 +573,10 @@ td.mono {
   gap: 7px;
   padding: 2.5px 10px;
   border-radius: 999px;
-  font: 500 12px var(--font-mono);
+  /* Explicit line-height: with `normal`, the capsule's height would depend on
+     the renderer's font metrics (headless vs macOS CoreText differ by ~0.5px)
+     and row heights would drift from the skeleton's fixed 20px pills. */
+  font: 500 12px/15px var(--font-mono);
   white-space: nowrap;
 }
 
@@ -808,7 +875,9 @@ td.mono {
   margin: 30px auto;
 }
 
-/* ---------- skeletons ---------- */
+/* ---------- skeletons ----------
+   Variants match the exact footprint of the element they stand in for, so a
+   skeleton view and its loaded view have identical geometry. */
 
 .skeleton {
   position: relative;
@@ -816,6 +885,7 @@ td.mono {
   background: var(--surface-2);
   border-radius: 6px;
   flex: none;
+  max-width: 100%;
 }
 
 .skeleton::after {
@@ -838,16 +908,53 @@ td.mono {
   }
 }
 
-.skeleton-row {
-  display: flex;
-  gap: 14px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--line);
-  align-items: center;
+/* One line of text: 1em tall, baseline-aligned, inherits font-size — the line
+   box it creates is the same one the real text would create. */
+.skeleton--text {
+  display: inline-block;
+  height: 1em;
+  vertical-align: -0.16em;
+  border-radius: 5px;
 }
 
-.skeleton-row:last-child {
-  border-bottom: none;
+/* A text bar whose width comes from real (invisible) text instead of a guessed
+   pixel width — inside content-sized tracks (auto grid columns) the track then
+   solves to the same width loading as loaded. Still renders as a plain bar. */
+.skeleton--label {
+  width: auto;
+  color: transparent !important;
+  user-select: none;
+}
+
+/* A .pill: 12px mono + 5px vertical padding ≈ 20px capsule. */
+.skeleton--pill {
+  display: inline-block;
+  height: 20px;
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+/* A .btn / .btn--sm footprint (height set inline per size). */
+.skeleton--btn {
+  display: inline-block;
+  border-radius: var(--radius-s);
+  vertical-align: middle;
+}
+
+/* The custom checkbox. */
+.skeleton--check {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  vertical-align: middle;
+}
+
+/* An input/select. */
+.skeleton--ctl {
+  display: inline-block;
+  height: var(--ctl-h);
+  border-radius: var(--radius-s);
 }
 
 .toast-stack {
