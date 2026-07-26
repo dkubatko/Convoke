@@ -1,4 +1,5 @@
-import { CSSProperties, Fragment, ReactNode, useEffect, useRef, useState } from 'react'
+import { CSSProperties, Fragment, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { ToolCall } from '../lib/types'
 import { truncate } from '../lib/format'
 
@@ -509,10 +510,44 @@ export function HoverCard({ children, content, wide = false, align = 'left' }: {
   align?: 'left' | 'right'
 }) {
   const [pinned, setPinned] = useState(false)
+  const [shown, setShown] = useState(false)
   const ref = useRef<HTMLSpanElement>(null)
+  const popRef = useRef<HTMLSpanElement>(null)
+  // Viewport coordinates for the pop. It renders in a body-level portal with
+  // position: fixed — an in-place absolute pop gets clipped by any ancestor
+  // overflow (the .clamp1/.clamp2 cells every truncated message sits in).
+  const [pos, setPos] = useState<{ top: number; left?: number; right?: number } | null>(null)
   // Stable per-instance identity, so the "another card became active" broadcast
   // can tell self from others.
   const id = useRef<object>({})
+  const open = shown || pinned
+
+  const place = () => {
+    const r = ref.current?.getBoundingClientRect()
+    if (!r) return
+    setPos(
+      align === 'right'
+        ? { top: r.bottom + 8, right: window.innerWidth - r.right }
+        : { top: r.bottom + 8, left: r.left },
+    )
+  }
+
+  useLayoutEffect(() => {
+    if (open) place()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  // Fixed positioning goes stale when the page moves under the trigger.
+  useEffect(() => {
+    if (!open) return
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => {
+      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('resize', place)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   // Opening/entering any OTHER hovercard closes this pinned one.
   useEffect(() => {
@@ -523,11 +558,13 @@ export function HoverCard({ children, content, wide = false, align = 'left' }: {
     return () => document.removeEventListener('hovercard-active', onActive)
   }, [])
 
-  // While pinned, a click anywhere outside closes it.
+  // While pinned, a click anywhere outside (trigger and pop alike) closes it.
   useEffect(() => {
     if (!pinned) return
     const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setPinned(false)
+      const t = e.target as Node
+      if (ref.current?.contains(t) || popRef.current?.contains(t)) return
+      setPinned(false)
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
@@ -541,7 +578,17 @@ export function HoverCard({ children, content, wide = false, align = 'left' }: {
       ref={ref}
       className={`hovercard${pinned ? ' hovercard--pinned' : ''}`}
       tabIndex={0}
-      onMouseEnter={announce}
+      onMouseEnter={() => {
+        announce()
+        setShown(true)
+      }}
+      onMouseLeave={() => setShown(false)}
+      // :focus-visible so keyboard focus opens the pop but a mouse click's
+      // focus doesn't hold it open after unpinning.
+      onFocus={(e) => {
+        if (e.currentTarget.matches(':focus-visible')) setShown(true)
+      }}
+      onBlur={() => setShown(false)}
       onClick={() => {
         announce()
         setPinned((p) => !p)
@@ -557,16 +604,23 @@ export function HoverCard({ children, content, wide = false, align = 'left' }: {
       }}
     >
       {children}
-      <span
-        className={`hovercard-pop${wide ? ' hovercard-pop--wide' : ''}${align === 'right' ? ' hovercard-pop--right' : ''}`}
-        role="tooltip"
-        // Clicks inside the pinned popover (selecting text) must not bubble to
-        // the trigger's toggle or count as an outside click.
-        onClick={(e) => e.stopPropagation()}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        {content}
-      </span>
+      {open &&
+        pos &&
+        createPortal(
+          <span
+            ref={popRef}
+            className={`hovercard-pop${wide ? ' hovercard-pop--wide' : ''}${pinned ? ' hovercard-pop--pinned' : ''}`}
+            style={{ top: pos.top, left: pos.left, right: pos.right }}
+            role="tooltip"
+            // Clicks inside the pinned popover (selecting text) must not bubble
+            // to the trigger's toggle or count as an outside click.
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            {content}
+          </span>,
+          document.body,
+        )}
     </span>
   )
 }

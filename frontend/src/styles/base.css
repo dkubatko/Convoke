@@ -1506,10 +1506,12 @@ tr.member-row--changed td:first-child {
   display: inline-block;
   outline: none;
 }
+/* Rendered in a body-level portal with position: fixed (coordinates set
+   inline from the trigger's rect) so ancestor overflow clips — the
+   .clamp1/.clamp2 cells truncated messages live in — can't hide it. Mounted
+   only while open, so visibility is presence, not opacity. */
 .hovercard-pop {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
+  position: fixed;
   z-index: 20;
   display: block;
   width: max-content;
@@ -1519,23 +1521,20 @@ tr.member-row--changed td:first-child {
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow-2);
-  opacity: 0;
-  transform: translateY(-3px);
   pointer-events: none;
-  transition: opacity 0.12s ease, transform 0.12s ease;
   font-weight: 400;
   white-space: normal;
+  animation: hovercard-in 0.12s ease;
 }
-.hovercard:hover .hovercard-pop,
-.hovercard:focus-visible .hovercard-pop {
-  opacity: 1;
-  transform: translateY(0);
+@keyframes hovercard-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
 }
 /* Pinned (clicked open): stays visible and becomes interactive so its text can
    be selected and copied. An accent border signals the pinned state. */
-.hovercard--pinned .hovercard-pop {
-  opacity: 1;
-  transform: translateY(0);
+.hovercard-pop--pinned {
   pointer-events: auto;
   user-select: text;
   border-color: var(--accent);
@@ -1544,12 +1543,6 @@ tr.member-row--changed td:first-child {
 /* Wider popover for reading a paragraph of run output. */
 .hovercard-pop--wide {
   max-width: 460px;
-}
-/* Right-anchored: for triggers in a right-hand table column, so the popover
-   grows leftward and never pushes past the viewport edge. */
-.hovercard-pop--right {
-  left: auto;
-  right: 0;
 }
 
 /* Full-text / detail body shown inside a hovercard. Wraps, scrolls if very
