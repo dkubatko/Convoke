@@ -15,6 +15,7 @@ import {
   Message,
   MessageAttachment,
   Run,
+  RunMedia,
   SearchHit,
   ToolCall,
 } from '../lib/types'
@@ -34,6 +35,7 @@ import {
   HoverCard,
   HoverText,
   PageHead,
+  RunMediaChip,
   SkeletonButton,
   SkeletonCheckbox,
   SkeletonCol,
@@ -686,6 +688,7 @@ interface ActivityEntry {
   // rest on hover.
   detail: string
   tools: ToolCall[] | null
+  media: RunMedia[] | null
 }
 
 /** A fire and the agent run it queued are ONE event — merge them. */
@@ -712,6 +715,7 @@ function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
       error: !!(run?.error ?? f.error),
       detail: parts.join(' · '),
       tools: run?.tool_calls ?? null,
+      media: run?.media ?? null,
     }
   })
   for (const r of wf.recent_runs) {
@@ -723,6 +727,7 @@ function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
       error: !!r.error,
       detail: stripTags(r.error ?? r.response_text ?? ''),
       tools: r.tool_calls ?? null,
+      media: r.media ?? null,
     })
   }
   return entries.sort((a, b) => b.when.localeCompare(a.when))
@@ -798,7 +803,14 @@ function ExpandedWorkflow({ wf, chatId }: { wf: ChatWorkflow; chatId: number }) 
                     <StatusPill status={a.status} />
                   </td>
                   <td className={a.error ? 'field-error' : 'muted'} style={{ fontSize: 12.5 }}>
-                    <HoverText text={a.detail} max={110} />
+                    {a.media?.length ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <RunMediaChip media={a.media} />
+                        <HoverText text={a.detail} max={110} />
+                      </div>
+                    ) : (
+                      <HoverText text={a.detail} max={110} />
+                    )}
                   </td>
                   <td className="toolcall-cell" style={{ width: 160 }}>
                     <ToolCalls calls={a.tools} />
@@ -1423,9 +1435,22 @@ function RunsTab({ chatId }: { chatId: number }) {
                   </div>
                 </td>
                 <td className={r.error ? 'field-error' : 'muted'}>
-                  <div className="clamp2">
-                    <HoverText text={stripTags(r.error ?? r.response_text ?? '')} max={90} />
-                  </div>
+                  {r.media?.length ? (
+                    // Chip row + one clamped text line — same 2-line budget as
+                    // the bare clamp2, so the pinned row height holds.
+                    <>
+                      <div style={{ display: 'flex', alignItems: 'center', height: '1lh' }}>
+                        <RunMediaChip media={r.media} />
+                      </div>
+                      <div className="clamp1">
+                        <HoverText text={stripTags(r.error ?? r.response_text ?? '')} max={90} />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="clamp2">
+                      <HoverText text={stripTags(r.error ?? r.response_text ?? '')} max={90} />
+                    </div>
+                  )}
                 </td>
                 <td className="toolcall-cell">
                   <ToolCalls calls={r.tool_calls} />

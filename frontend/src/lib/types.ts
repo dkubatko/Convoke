@@ -76,6 +76,14 @@ export interface ToolCall {
   ok: boolean
 }
 
+// One media item an agent run attached to its reply; ok reflects whether it
+// actually reached the chat. Absent/null on runs that attached nothing.
+export interface RunMedia {
+  kind: string // photo | video
+  source: string // history | url
+  ok: boolean
+}
+
 export interface Run {
   id: number
   trigger: string
@@ -83,6 +91,7 @@ export interface Run {
   request_text: string
   response_text: string | null
   tool_calls: ToolCall[] | null
+  media: RunMedia[] | null
   error: string | null
   created_at: string
   finished_at: string | null
@@ -235,6 +244,7 @@ export interface ChatWorkflowRun {
   error: string | null
   response_text: string | null
   tool_calls: ToolCall[] | null
+  media: RunMedia[] | null
   created_at: string
 }
 

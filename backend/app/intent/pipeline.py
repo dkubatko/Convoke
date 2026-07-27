@@ -78,7 +78,6 @@ from app.threads import unmonitored_threads
 from app.models import (
     AgentRun,
     Chat,
-    ChatThread,
     ImportJob,
     IntentCursor,
     IntentEpisode,

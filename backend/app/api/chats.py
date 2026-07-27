@@ -502,6 +502,7 @@ class RunOut(BaseModel):
     request_text: str
     response_text: str | None
     tool_calls: list[dict] | None = None
+    media: list[dict] | None = None
     error: str | None
     created_at: datetime
     finished_at: datetime | None
@@ -535,6 +536,7 @@ async def recent_runs(
             request_text=run.request_text,
             response_text=run.response_text,
             tool_calls=run.tool_calls,
+            media=run.media,
             error=run.error,
             created_at=run.created_at,
             finished_at=run.finished_at,

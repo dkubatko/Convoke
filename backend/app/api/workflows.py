@@ -462,6 +462,7 @@ class ChatRunOut(BaseModel):
     error: str | None
     response_text: str | None
     tool_calls: list[dict] | None = None
+    media: list[dict] | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

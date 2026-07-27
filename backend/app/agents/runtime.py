@@ -26,15 +26,16 @@ from app.agents.models import (
     get_role_reasoning,
     reasoning_settings,
 )
-from app.agents.tools import AGENT_TOOLS
+from app.agents.tools import AGENT_TOOLS, MAX_RUN_ATTACHMENTS
 from app.intent.episodes import finish_run_episode
 from app.memory.chunker import render_ts
 from app.memory.embeddings import Embedder
 from app.members import clean_display_name, member_display_name
-from app.models import AgentRun, Bot, Chat, Message
+from app.models import AgentRun, Bot, Chat, IntentEpisode, Message
 from app.telegram.format import to_telegram_html
 from app.telegram.limiter import SendLimiter
-from app.telegram.sender import send_and_persist
+from app.telegram.media import OutgoingMedia
+from app.telegram.sender import send_and_persist, send_media_and_persist
 
 log = logging.getLogger("convoke.agent")
 
@@ -48,6 +49,11 @@ AGENT_RUN_DEADLINE_S = 900
 # calls with the "built-in" provider rather than an MCP server.
 BUILTIN_TOOL_NAMES = {getattr(t, "__name__", getattr(t, "name", "")) for t in AGENT_TOOLS}
 
+# Prompt style contract: every bullet states a behavior and when it applies —
+# generic principles that cover their use cases, never example lists that try
+# to enumerate them; no preambles, no restating what tool docstrings already
+# say, comprehensible by any model. (Format contracts live in schemas, not
+# prose — docs/architecture.md §3.4; this extends that rule to wordiness.)
 INSTRUCTIONS_TEMPLATE = """\
 You are {bot_name} (@{bot_username}), an assistant participating in the Telegram \
 group chat "{chat_title}". {invocation_line}
@@ -66,6 +72,11 @@ replies are annotated with "(replying to #id)" when the target is shown, or a \
 quoted "↳ replies to [#id] [time] Sender: …" line when it isn't. Use get_messages \
 to read any specific message by that id verbatim — e.g. a reply target or a \
 message cited in search results.
+- attach_media(message_id) re-sends a photo or video from this chat's history \
+by its #id; attach_media_url(url) attaches a web image by direct URL. \
+Attachments arrive as one album right after your text.
+- When your answer points at one specific past message, find its #id and call \
+set_reply_target(message_id) — your reply becomes a Telegram reply to it.
 - When a tool needs structured arguments, fill them from your own knowledge when \
 you are confident: a city becomes its coordinates, a place its timezone, a date \
 phrase a concrete date. Don't ask the user for technical values you can derive.
@@ -217,7 +228,8 @@ async def execute_run(
                 "task could be a follow-up to something already handled — prefer "
                 "updating or adjusting the earlier result over duplicating it. If you "
                 "conclude no action is warranted at all, reply with exactly "
-                "NO_ACTION: <one short reason> — nothing will be posted to the chat."
+                "NO_ACTION: <one short reason> — nothing will be posted to the chat "
+                "and any attached media or reply target is discarded."
                 if is_workflow
                 else "You were invoked by a member replying to one of your earlier "
                 "messages (shown last in the recent messages; its reply annotation "
@@ -334,21 +346,64 @@ async def execute_run(
             # bots can't re-read their own sends.
             run.status = "done"
             # Feedback loop: the episode that fired this run becomes
-            # `satisfied`, carrying what was done.
-            await finish_run_episode(session, run_id, reply_text, run.finished_at)
+            # `satisfied`, carrying what was done. Attach intent is annotated
+            # so future workflow-dedup reasoning can see media was part of
+            # the action (response_text stays the literal delivered text).
+            episode_summary = reply_text
+            if deps.media:
+                n = len(deps.media)
+                kinds = {m.kind for m in deps.media}
+                label = next(iter(kinds)) if len(kinds) == 1 else "media item"
+                episode_summary += f" [attaching {n} {label}{'s' if n != 1 else ''}]"
+            await finish_run_episode(session, run_id, episode_summary, run.finished_at)
             await session.commit()
+            # set_reply_target override: the text anchors to the chosen
+            # message in its thread; media follows the thread but never
+            # carries the reply link (the text does the pointing).
+            reply_to, send_thread = (
+                deps.reply_target
+                if deps.reply_target is not None
+                else (trigger_message_id, thread_id)
+            )
             delivered = 0
             try:
                 for part in split_reply(reply_text):
                     await limiter.acquire(chat.bot_id, chat.tg_chat_id)
                     await _send(
                         session, bot, chat, part,
-                        reply_to=trigger_message_id, thread_id=thread_id,
+                        reply_to=reply_to, thread_id=send_thread,
                     )
                     # Per-part commit: a part that landed is never lost to a
                     # failure sending the next one.
                     await session.commit()
                     delivered += 1
+                # Media only after ALL text parts landed — a half-delivered
+                # reply must not be decorated with the album it promised.
+                if deps.media:
+                    run.media = await _deliver_media(
+                        sessionmaker, bot, chat, limiter, deps.media,
+                        thread_id=send_thread, notify_reply_to=reply_to,
+                    )
+                    if any(not m["ok"] for m in run.media):
+                        run.error = (
+                            ((run.error + "; ") if run.error else "")
+                            + "some media failed to send"
+                        )
+                        # The episode was annotated "[attaching …]" before
+                        # delivery; correct the record so future workflow-dedup
+                        # reasoning doesn't assume the media landed.
+                        episode = (
+                            await session.execute(
+                                select(IntentEpisode).where(
+                                    IntentEpisode.agent_run_id == run_id
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if episode is not None and episode.execution_summary:
+                            episode.execution_summary = (
+                                episode.execution_summary + " (some media failed to send)"
+                            )[:500]
+                    await session.commit()
             except Exception as e:  # noqa: BLE001 — the outcome is already recorded
                 log.exception(
                     "agent run %s: delivery failed after %d part(s)", run_id, delivered
@@ -356,15 +411,16 @@ async def execute_run(
                 run.error = (
                     f"delivery failed after {delivered} part(s): {type(e).__name__}: {e}"
                 )
+                if deps.media:
+                    run.error += "; attached media skipped"
                 if delivered == 0:
                     # Nothing landed — silence reads as a crash, leave a trace.
                     try:
                         await limiter.acquire(chat.bot_id, chat.tg_chat_id)
                         await _send(
                             session, bot, chat,
-                            "Something went wrong and I couldn't finish that. "
-                            "The details are in Convoke's run log.",
-                            reply_to=trigger_message_id, thread_id=thread_id,
+                            "Something went wrong and I couldn't finish that.",
+                            reply_to=reply_to, thread_id=send_thread,
                         )
                     except Exception:  # noqa: BLE001 — recording matters more
                         log.warning(
@@ -382,8 +438,7 @@ async def execute_run(
                 await _fail(
                     session, run, f"{type(e).__name__}: {e}", bot, limiter, bot_row, chat,
                     # Silence reads as a crash — always leave a trace in the chat.
-                    notify="Something went wrong and I couldn't finish that. "
-                    "The details are in Convoke's run log.",
+                    notify="Something went wrong and I couldn't finish that.",
                 )
 
 
@@ -474,6 +529,88 @@ async def _send(session, bot, chat, text: str, reply_to: int | None = None, thre
         return await send_and_persist(
             session, bot, chat, html.escape(text), reply_to_message_id=reply_to, thread_id=thread_id
         )
+
+
+async def _deliver_media(
+    sessionmaker,
+    bot,
+    chat,
+    limiter,
+    items: list[OutgoingMedia],
+    thread_id: int | None,
+    notify_reply_to: int | None,
+) -> list[dict]:
+    """Deliver the run's attached media as ONE Telegram send, best-effort.
+    Returns the run.media summary [{"kind","source","ok"}]. Never raises.
+
+    Uses its own session so a failed attempt's rollback can't expire the
+    caller's run/chat instances. Ladder: send → RetryAfter sleep+retry →
+    on BadRequest with mixed sources, drop URL items (whose server-side
+    fetch can poison the whole album) and retry the file_id-only album once.
+    ONLY BadRequest walks the ladder: it means Telegram rejected the input,
+    so re-sending can't duplicate. Any other failure (network flake, second
+    RetryAfter) is terminal — the album may have landed server-side with the
+    response lost, and a retry or a failure notice would double-post or
+    contradict what the chat sees. Never falls back to per-item sends — one
+    media message is the delivery contract. On certain total failure a short
+    notice is posted so the chat isn't left waiting for media the text
+    promised."""
+    if len(items) > MAX_RUN_ATTACHMENTS:  # tools cap; belt against races
+        log.warning(
+            "media list over cap (%d), truncating to %d", len(items), MAX_RUN_ATTACHMENTS
+        )
+        items = list(items[:MAX_RUN_ATTACHMENTS])
+    batches = [items]
+    history_only = [i for i in items if i.source == "history"]
+    if history_only and len(history_only) < len(items):
+        batches.append(history_only)
+    delivered: list[OutgoingMedia] = []
+    ambiguous = False  # a send whose outcome Telegram never confirmed
+    async with sessionmaker() as session:
+        for batch in batches:
+            try:
+                await limiter.acquire(chat.bot_id, chat.tg_chat_id)
+                try:
+                    await send_media_and_persist(
+                        session, bot, chat, batch, thread_id=thread_id
+                    )
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after)
+                    await limiter.acquire(chat.bot_id, chat.tg_chat_id)
+                    await send_media_and_persist(
+                        session, bot, chat, batch, thread_id=thread_id
+                    )
+                await session.commit()
+                delivered = batch
+                break
+            except TelegramBadRequest:
+                log.warning(
+                    "media delivery rejected (%d item(s))", len(batch), exc_info=True
+                )
+                # Discard the failed attempt's half-added rows (send raised
+                # before persist, but stay safe against persist-time errors).
+                await session.rollback()
+                # → next (URL-dropped) batch, if any
+            except Exception:  # noqa: BLE001 — media failure must not fail the run
+                log.exception("media delivery failed (%d item(s))", len(batch))
+                await session.rollback()
+                ambiguous = True
+                break
+        if not delivered and not ambiguous:
+            try:
+                await limiter.acquire(chat.bot_id, chat.tg_chat_id)
+                await _send(
+                    session, bot, chat, "Media attachment failed.",
+                    reply_to=notify_reply_to, thread_id=thread_id,
+                )
+                await session.commit()
+            except Exception:  # noqa: BLE001 — recording matters more
+                log.warning(
+                    "could not send media-failure notice to chat %s", chat.tg_chat_id
+                )
+    return [
+        {"kind": i.kind, "source": i.source, "ok": i in delivered} for i in items
+    ]
 
 
 async def _fail(session, run, error: str, bot, limiter, bot_row, chat, notify: str | None = None):

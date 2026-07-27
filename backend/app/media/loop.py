@@ -38,7 +38,7 @@ RETRY_BACKOFF_S = 60  # × attempts
 
 IMAGE_KINDS = ("photo", "sticker", "image_document")
 AUDIO_KINDS = ("voice", "audio")
-VIDEO_KINDS = ("video", "video_note")
+VIDEO_KINDS = ("video", "video_note", "animation")
 
 _AUDIO_FILENAMES = {"audio/ogg": "voice.ogg", "audio/mpeg": "audio.mp3", "audio/mp4": "audio.m4a"}
 

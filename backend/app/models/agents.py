@@ -128,6 +128,10 @@ class AgentRun(Base):
     # {"tool": name, "args": <truncated json>, "ok": bool}. Null on old rows /
     # runs that predate capture; [] means the agent called no tools.
     tool_calls: Mapped[list | None] = mapped_column(JSONVariant, nullable=True)
+    # Media the run attached to its reply: [{"kind", "source", "ok"}], written
+    # after delivery (ok reflects what actually reached the chat). Null on
+    # runs that predate the feature or attached nothing.
+    media: Mapped[list | None] = mapped_column(JSONVariant, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

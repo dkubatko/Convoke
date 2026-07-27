@@ -21,7 +21,9 @@ from app.models.base import Base
 BOT_STATUSES = ("active", "disabled", "error")
 CHAT_STATUSES = ("pending_auth", "authorized", "left")
 MESSAGE_SOURCES = ("live", "import", "self")
-ATTACHMENT_KINDS = ("photo", "video", "voice", "video_note", "sticker", "image_document", "audio")
+ATTACHMENT_KINDS = (
+    "photo", "video", "animation", "voice", "video_note", "sticker", "image_document", "audio",
+)
 ATTACHMENT_STATUSES = ("pending", "described", "failed", "skipped")
 
 JSONVariant = JSON().with_variant(JSONB(), "postgresql")

@@ -11,6 +11,7 @@ from app.members import refresh_chat_memory_names, set_override_name
 from app.memory.chunker import render_for_chat, render_ts
 from app.memory.store import search_chat_history as store_search
 from app.models import ChatMember, IntentEpisode, Message, Note
+from app.telegram.media import OutgoingMedia
 from app.threads import unmonitored_threads
 
 MAX_NOTES_RETURNED = 8
@@ -19,6 +20,11 @@ MAX_MESSAGES_FETCHED = 30
 # A context window is same-thread by construction; the cap keeps one call's
 # render bounded (~41 messages) while still covering a whole conversation burst.
 MAX_CONTEXT_RADIUS = 20
+# Telegram album maximum — attachments beyond it couldn't ship as one send,
+# and one send is the delivery contract (never per-item messages).
+MAX_RUN_ATTACHMENTS = 10
+ATTACHABLE_KINDS = ("photo", "video")
+MAX_ATTACH_URL_LEN = 2048
 
 
 def _parse_day(value: str | None, end_of_day: bool) -> datetime | None:
@@ -169,6 +175,129 @@ async def inspect_media(ctx: RunContext[AgentDeps], message_id: int, question: s
         ):
             return f"#{message_id}: not in Convoke's stored history for this chat."
         return await inspect_attachment(session, ctx.deps.chat_id, message_id, question)
+
+
+async def attach_media(ctx: RunContext[AgentDeps], message_id: int) -> str:
+    """Attach a photo or video from this chat's history to your reply — it is
+    re-sent to the chat right after your text, without you needing to see the
+    file. Pass the #id of the message carrying the media (album items each
+    have their own #id — attach each one you want). Up to 10 per reply;
+    multiple attachments are delivered together as one album in attach order.
+    Media from imported history can't be re-sent (source files were discarded
+    after description), and only photos/videos qualify — not voice messages,
+    video notes, or stickers."""
+    if any(m.src_tg_message_id == message_id for m in ctx.deps.media):
+        return f"The media from #{message_id} is already attached."
+    if len(ctx.deps.media) >= MAX_RUN_ATTACHMENTS:
+        return (
+            f"Attachment limit reached ({MAX_RUN_ATTACHMENTS} per reply) — "
+            f"#{message_id} was not added."
+        )
+    async with ctx.deps.sessionmaker() as session:
+        anchor = (
+            await session.execute(
+                select(Message).where(
+                    Message.chat_id == ctx.deps.chat_id,
+                    Message.tg_message_id == message_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if anchor is None or (anchor.thread_id or 0) in await unmonitored_threads(
+            session, ctx.deps.chat_id
+        ):
+            return f"#{message_id}: not in Convoke's stored history for this chat."
+        att = anchor.attachment
+    if att is None:
+        return f"#{message_id} carries no media."
+    if att.kind == "video_note":
+        return (
+            f"#{message_id} is a video note — Telegram doesn't allow re-sending "
+            "those as reply attachments."
+        )
+    if att.kind == "animation":
+        return (
+            f"#{message_id} is a GIF/animation — Telegram doesn't allow re-sending "
+            "those as reply attachments."
+        )
+    if att.kind not in ATTACHABLE_KINDS:
+        return (
+            f"Only photos and videos can be attached; #{message_id} has "
+            f"{att.kind.replace('_', ' ')} media."
+        )
+    if att.file_id is None:
+        return (
+            f"#{message_id}'s media came from a history import — the file was "
+            "discarded after description and can't be re-sent."
+        )
+    described = att.status == "described"
+    # Re-check dedupe/cap: pydantic-ai runs a turn's tool calls concurrently,
+    # and the session await above makes the top-of-function check-then-act
+    # racy — another attach may have appended while this one slept.
+    if any(m.src_tg_message_id == message_id for m in ctx.deps.media):
+        return f"The media from #{message_id} is already attached."
+    if len(ctx.deps.media) >= MAX_RUN_ATTACHMENTS:
+        return (
+            f"Attachment limit reached ({MAX_RUN_ATTACHMENTS} per reply) — "
+            f"#{message_id} was not added."
+        )
+    ctx.deps.media.append(
+        OutgoingMedia(
+            kind=att.kind,
+            source="history",
+            file_id=att.file_id,
+            src_tg_message_id=message_id,
+            described=described,
+            description=att.description if described else None,
+            transcript=att.transcript if described else None,
+        )
+    )
+    return f"Attached the {att.kind} from #{message_id} — it will be sent right after your reply."
+
+
+async def attach_media_url(ctx: RunContext[AgentDeps], url: str) -> str:
+    """Attach an image from the internet to your reply by URL. Must be a
+    direct link to a static image (https://… ending in the image itself —
+    jpg/png/webp, under 5 MB); page URLs and animated GIFs won't work —
+    Telegram fetches the URL when your reply is sent and the attachment is
+    dropped if it isn't a fetchable image. Delivered right after your text,
+    together with any other attachments (max 10 per reply)."""
+    url = url.strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return "Only http(s) URLs can be attached — pass a direct image link."
+    if len(url) > MAX_ATTACH_URL_LEN:
+        return f"That URL is too long (over {MAX_ATTACH_URL_LEN} characters)."
+    if any(m.url == url for m in ctx.deps.media):
+        return "That image URL is already attached."
+    if len(ctx.deps.media) >= MAX_RUN_ATTACHMENTS:
+        return f"Attachment limit reached ({MAX_RUN_ATTACHMENTS} per reply) — nothing added."
+    ctx.deps.media.append(OutgoingMedia(kind="photo", source="url", url=url))
+    return (
+        "Attached the image URL — Telegram will fetch it when your reply is "
+        "sent (direct image links only, ≤5 MB)."
+    )
+
+
+async def set_reply_target(ctx: RunContext[AgentDeps], message_id: int) -> str:
+    """Make your reply a Telegram reply to a specific past message instead of
+    the one that triggered you. Use whenever your answer points at one
+    particular message — pass its #id (from transcripts/search). Your text
+    carries the reply, in that message's topic; attached media follows without
+    its own reply link. Calling again replaces the target."""
+    async with ctx.deps.sessionmaker() as session:
+        anchor = (
+            await session.execute(
+                select(Message).where(
+                    Message.chat_id == ctx.deps.chat_id,
+                    Message.tg_message_id == message_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if anchor is None or (anchor.thread_id or 0) in await unmonitored_threads(
+            session, ctx.deps.chat_id
+        ):
+            return f"#{message_id}: not in Convoke's stored history for this chat."
+        ctx.deps.reply_target = (message_id, anchor.thread_id)
+    return f"Your reply will be sent as a Telegram reply to #{message_id}."
 
 
 async def get_messages(ctx: RunContext[AgentDeps], message_ids: list[int]) -> str:
@@ -431,6 +560,9 @@ AGENT_TOOLS = [
     get_conversation_context,
     get_messages_by_date,
     inspect_media,
+    attach_media,
+    attach_media_url,
+    set_reply_target,
     remember,
     recall,
     past_workflow_actions,

@@ -3,7 +3,7 @@ import { api } from '../lib/api'
 import { stripTags, timeAgo } from '../lib/format'
 import { Bot, Chat, GlobalRun, RoleAssignment, Workflow } from '../lib/types'
 import { useQuery } from '../hooks/useQuery'
-import { Card, EmptyState, ErrorNote, HoverText, PageHead, SkeletonCol, SkeletonText, StatusPill, TableHead, TableSkeleton, ToolCalls } from '../components/ui'
+import { Card, EmptyState, ErrorNote, HoverText, PageHead, RunMediaChip, SkeletonCol, SkeletonText, StatusPill, TableHead, TableSkeleton, ToolCalls } from '../components/ui'
 
 /* Shared column spec for skeleton and loaded table (fixed layout) — widths
    match what auto layout solved for typical data, keeping the look unchanged. */
@@ -122,9 +122,22 @@ export default function Overview() {
                       <StatusPill status={r.status} />
                     </td>
                     <td className="muted">
-                      <div className="clamp2">
-                        <HoverText text={stripTags(r.error ?? r.response_text ?? r.request_text)} max={90} />
-                      </div>
+                      {r.media?.length ? (
+                        // Chip row + one clamped line — same 2-line budget as
+                        // the bare clamp2, so the pinned row height holds.
+                        <>
+                          <div style={{ display: 'flex', alignItems: 'center', height: '1lh' }}>
+                            <RunMediaChip media={r.media} />
+                          </div>
+                          <div className="clamp1">
+                            <HoverText text={stripTags(r.error ?? r.response_text ?? r.request_text)} max={90} />
+                          </div>
+                        </>
+                      ) : (
+                        <div className="clamp2">
+                          <HoverText text={stripTags(r.error ?? r.response_text ?? r.request_text)} max={90} />
+                        </div>
+                      )}
                     </td>
                     <td className="toolcall-cell">
                       <ToolCalls calls={r.tool_calls} />

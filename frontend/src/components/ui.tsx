@@ -1,6 +1,6 @@
 import { CSSProperties, Fragment, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ToolCall } from '../lib/types'
+import { RunMedia, ToolCall } from '../lib/types'
 import { truncate } from '../lib/format'
 
 /* Small shared primitives. Anything used on two or more pages lives here. */
@@ -645,6 +645,22 @@ export function TabBar<T extends string>({ tabs, active, onSelect }: {
         </button>
       ))}
     </div>
+  )
+}
+
+/** Media an agent run attached to its reply, as one pill ("photo ×3") — warn
+    tone when any item failed to send. flex:none so it can sit inside clamped
+    run cells without breaking their pinned row height. */
+export function RunMediaChip({ media }: { media: RunMedia[] | null | undefined }) {
+  if (!media || media.length === 0) return null
+  const kinds = new Set(media.map((m) => m.kind))
+  const label = kinds.size === 1 ? [...kinds][0] : 'media'
+  const allOk = media.every((m) => m.ok)
+  return (
+    <span className={`pill pill--${allOk ? 'accent' : 'warn'}`} style={{ flex: 'none' }}>
+      {label}
+      {media.length > 1 ? ` ×${media.length}` : ''}
+    </span>
   )
 }
 
