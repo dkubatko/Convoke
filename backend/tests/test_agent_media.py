@@ -137,7 +137,7 @@ def media_model(tool_calls: list[tuple[str, dict]], text: str = "here you go"):
 
 
 async def seed_media_messages(db_sessionmaker, chat_id: int):
-    """#2 described photo, #3 imported photo (no file_id), #4 video note,
+    """#2 described photo, #3 imported photo (no file_id, source=import), #4 video note,
     #5 pending photo, #6 described video, #7 photo in unmonitored thread 55,
     #8 described photo (spare for cap tests), #9 animation (GIF), #10 plain
     message in monitored forum thread 77."""
@@ -146,7 +146,8 @@ async def seed_media_messages(db_sessionmaker, chat_id: int):
         rows = {}
         for tg in (1, 2, 3, 4, 5, 6, 8, 9):
             m = Message(chat_id=chat_id, tg_message_id=tg, sender_name="Alice",
-                        text="", sent_at=t0)
+                        text="", sent_at=t0,
+                        source="import" if tg == 3 else "live")
             s.add(m)
             rows[tg] = m
         m7 = Message(chat_id=chat_id, tg_message_id=7, thread_id=55, sender_name="Alice",
@@ -250,6 +251,13 @@ async def test_set_reply_target_tool(db_sessionmaker, bot_row):
     fake = MediaFakeBot()
     chat = await authorize_chat(db_sessionmaker, fake, bot_row)
     await seed_media_messages(db_sessionmaker, chat.id)
+    async with db_sessionmaker() as s:
+        # Pre-migration import: exports carry the basic-group era with
+        # negative synthetic ids nothing in Telegram can resolve.
+        s.add(Message(chat_id=chat.id, tg_message_id=-11, sender_name="Alice",
+                      text="from before the migration", source="import",
+                      sent_at=datetime(2025, 5, 1, 12, 0, tzinfo=timezone.utc)))
+        await s.commit()
     deps = AgentDeps(sessionmaker=db_sessionmaker, embedder=FakeEmbedder(),
                      chat_id=chat.id, run_id=1)
     ctx = SimpleNamespace(deps=deps)
@@ -259,10 +267,15 @@ async def test_set_reply_target_tool(db_sessionmaker, bot_row):
     # last call wins
     await set_reply_target(ctx, 6)
     assert deps.reply_target == (6, None)
-    # unknown id and unmonitored thread leave the target unchanged
+    # post-migration imported ids are the chat's real message ids — targetable
+    assert "reply to #3" in (await set_reply_target(ctx, 3))
+    assert deps.reply_target == (3, None)
+    # unknown id, unmonitored thread, and pre-migration (negative-id) imports
+    # leave the target unchanged
     assert "not in Convoke's stored history" in (await set_reply_target(ctx, 99))
     assert "not in Convoke's stored history" in (await set_reply_target(ctx, 7))
-    assert deps.reply_target == (6, None)
+    assert "migration" in (await set_reply_target(ctx, -11))
+    assert deps.reply_target == (3, None)
 
 
 async def run_agent_with(db_sessionmaker, bot_row, fake, monkeypatch, tool_calls,

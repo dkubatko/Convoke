@@ -282,7 +282,10 @@ async def set_reply_target(ctx: RunContext[AgentDeps], message_id: int) -> str:
     the one that triggered you. Use whenever your answer points at one
     particular message — pass its #id (from transcripts/search). Your text
     carries the reply, in that message's topic; attached media follows without
-    its own reply link. Calling again replaces the target."""
+    its own reply link. Calling again replaces the target. Imported messages
+    with negative ids predate this group's migration to a supergroup and
+    can't be reply-linked — quote those in your text instead; other imported
+    ids reply-link normally."""
     async with ctx.deps.sessionmaker() as session:
         anchor = (
             await session.execute(
@@ -296,6 +299,19 @@ async def set_reply_target(ctx: RunContext[AgentDeps], message_id: int) -> str:
             session, ctx.deps.chat_id
         ):
             return f"#{message_id}: not in Convoke's stored history for this chat."
+        # Imported ids are stored verbatim from the export. Post-migration
+        # ids are the chat's real message ids (corroborated id-for-id against
+        # live capture at import), so they reply-link fine even though the
+        # bot never saw them — and a stale one degrades to a plain send via
+        # allow_sending_without_reply. But a basic-group→supergroup migration
+        # restarts the id sequence: the pre-migration era arrives with
+        # negative synthetic ids nothing in Telegram can resolve.
+        if anchor.source == "import" and message_id < 0:
+            return (
+                f"#{message_id} predates this group's migration to a supergroup — "
+                "its id no longer exists in Telegram, so it can't be reply-linked. "
+                "Quote it in your text instead."
+            )
         ctx.deps.reply_target = (message_id, anchor.thread_id)
     return f"Your reply will be sent as a Telegram reply to #{message_id}."
 
