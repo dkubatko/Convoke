@@ -43,6 +43,10 @@ log = logging.getLogger("convoke.agent")
 TELEGRAM_MESSAGE_LIMIT = 4096
 # Under Telegram's ~5s display so the indicator doesn't flicker between sends.
 CHAT_ACTION_INTERVAL_S = 4
+# A forum's General topic. Its messages arrive without a message_thread_id and
+# sends must omit it (Telegram rejects 1), but a chat action without it isn't
+# shown in General — chat actions alone need the id spelled out.
+GENERAL_TOPIC_ID = 1
 MAX_REPLY_PARTS = 3
 # Hard cap on one model run. It executes holding the chat lock and a global
 # concurrency slot — unbounded, a wedged provider could stall the whole loop.
@@ -265,11 +269,16 @@ async def execute_run(
             workflow_id=run.workflow_id if is_workflow else None,
         )
 
+        action_thread = (
+            GENERAL_TOPIC_ID if thread_id is None and chat.is_forum else thread_id
+        )
         if is_workflow:
             # A single blip: a workflow may conclude NO_ACTION and post
             # nothing, and a long "typing…" that ends in silence misleads.
             try:
-                await bot.send_chat_action(chat.tg_chat_id, "typing", message_thread_id=thread_id)
+                await bot.send_chat_action(
+                    chat.tg_chat_id, "typing", message_thread_id=action_thread
+                )
             except Exception:  # noqa: BLE001 — cosmetic
                 pass
         else:
@@ -281,7 +290,7 @@ async def execute_run(
                 ChatActionSender(
                     bot=bot,
                     chat_id=chat.tg_chat_id,
-                    message_thread_id=thread_id,
+                    message_thread_id=action_thread,
                     interval=CHAT_ACTION_INTERVAL_S,
                 )
             )

@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from app.agents.deps import AgentDeps
 from app.agents.models import probe_image
+from app.agents.runtime import execute_run
 from app.agents.tools import MAX_RUN_ATTACHMENTS, edit_image, generate_image
 from app.core.crypto import encrypt
 from app.media import imagegen
@@ -22,15 +23,18 @@ from app.memory.embeddings import FakeEmbedder
 from app.models import (
     AgentRun,
     Bot,
+    Chat,
     ConnectedModel,
     Message,
     MessageAttachment,
     ModelRoleAssignment,
 )
+from app.telegram.limiter import SendLimiter
 from app.telegram.media import OutgoingMedia
 
 from tests.test_agent import authorize_chat
 from tests.test_agent_media import MediaFakeBot, run_agent_with, seed_media_messages
+from tests.test_handlers import message_update, run_update
 
 PNG = b"\x89PNG\r\n\x1a\nfake-image"
 
@@ -296,3 +300,28 @@ async def test_chat_action_kept_alive_and_stopped(db_sessionmaker, bot_row, monk
 async def test_probe_image_unreachable_fails():
     ok, detail = await probe_image("http://127.0.0.1:9/v1", "gpt-image", None)
     assert not ok and "Couldn't reach" in detail
+
+
+
+async def test_chat_action_targets_forum_general_topic(db_sessionmaker, bot_row, monkeypatch):
+    """General-topic messages carry no thread id, but a chat action without
+    one isn't displayed in a forum's General — it must name topic 1, while
+    the reply itself still omits it."""
+    fake = MediaFakeBot()
+    await run_agent_with(db_sessionmaker, bot_row, fake, monkeypatch, [])
+    assert fake.action_threads == [None]  # non-forum chat: no topic id
+
+    async with db_sessionmaker() as s:
+        chat = (await s.execute(select(Chat))).scalar_one()
+        chat.is_forum = True
+        await s.commit()
+    fake.action_threads.clear()
+    await run_update(db_sessionmaker, fake, bot_row, message_update(4, 21, "@convoke_bot again"))
+    async with db_sessionmaker() as s:
+        run_id = (
+            await s.execute(select(AgentRun.id).where(AgentRun.status == "pending"))
+        ).scalar_one()
+    await execute_run(db_sessionmaker, FakeEmbedder(), SendLimiter(), fake, run_id)
+    assert fake.action_threads == [1]
+    reply = [e for e in fake.events if e[0] == "text"][-1]
+    assert reply[2].get("message_thread_id") is None

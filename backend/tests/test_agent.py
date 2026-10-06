@@ -27,9 +27,11 @@ class AgentFakeBot(FakeBot):
     def __init__(self, member_status: str = "administrator"):
         super().__init__(member_status)
         self.actions: list[str] = []
+        self.action_threads: list[int | None] = []
 
-    async def send_chat_action(self, chat_id, action, **kwargs):
+    async def send_chat_action(self, chat_id, action, message_thread_id=None, **kwargs):
         self.actions.append(action)
+        self.action_threads.append(message_thread_id)
 
 
 @pytest.fixture
