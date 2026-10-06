@@ -1,12 +1,16 @@
 """Memory tools attached to every agent run."""
 
+import logging
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from pydantic_ai import RunContext
 from sqlalchemy import func, select, true
 
 from app.agents.deps import AgentDeps
-from app.core.config import get_tzinfo
+from app.agents.models import ProviderNotConfigured, get_provider
+from app.core.config import get_settings, get_tzinfo
+from app.media import imagegen
 from app.members import refresh_chat_memory_names, set_override_name
 from app.memory.chunker import render_for_chat, render_ts
 from app.memory.store import search_chat_history as store_search
@@ -25,6 +29,11 @@ MAX_CONTEXT_RADIUS = 20
 MAX_RUN_ATTACHMENTS = 10
 ATTACHABLE_KINDS = ("photo", "video")
 MAX_ATTACH_URL_LEN = 2048
+# Source formats the images/edits endpoint accepts; Telegram photos are JPEG.
+EDITABLE_MIMES = ("image/jpeg", "image/png", "image/webp")
+MAX_EDIT_SOURCES = 8
+
+log = logging.getLogger("convoke.agent")
 
 
 def _parse_day(value: str | None, end_of_day: bool) -> datetime | None:
@@ -274,6 +283,137 @@ async def attach_media_url(ctx: RunContext[AgentDeps], url: str) -> str:
     return (
         "Attached the image URL — Telegram will fetch it when your reply is "
         "sent (direct image links only, ≤5 MB)."
+    )
+
+
+async def generate_image(
+    ctx: RunContext[AgentDeps],
+    prompt: str,
+    orientation: Literal["square", "landscape", "portrait"] | None = None,
+) -> str:
+    """Create a new image from a text description and attach it to your
+    reply. The image model sees ONLY this prompt — not the chat — so write it
+    complete and specific: subject, style, composition, mood, and any text to
+    render quoted verbatim. Omit orientation to let the model choose. Takes
+    10–60s. To change or combine existing photos, use edit_image instead."""
+    prompt = prompt.strip()
+    if not prompt:
+        return "Pass a prompt describing the image."
+    return await _make_image(ctx, prompt, orientation, sources=[])
+
+
+async def edit_image(
+    ctx: RunContext[AgentDeps],
+    message_ids: list[int],
+    instruction: str,
+    orientation: Literal["square", "landscape", "portrait"] | None = None,
+) -> str:
+    """Edit photos from this chat and attach the result to your reply —
+    restyle, add/remove/change things, or combine several photos into one
+    image. Pass the #ids of the source photos (the main image first; up to
+    8) — images you generated or edited earlier qualify too. The image model
+    sees only the sources and your instruction, so make the instruction
+    self-contained. Omit orientation to keep the source's shape. Takes
+    10–60s. Works on photos and image files only — not videos, stickers, or
+    imported history."""
+    instruction = instruction.strip()
+    if not instruction:
+        return "Pass an instruction describing the edit."
+    ids = list(dict.fromkeys(message_ids))
+    if not ids:
+        return "Pass the #id of at least one source photo."
+    if len(ids) > MAX_EDIT_SOURCES:
+        return f"At most {MAX_EDIT_SOURCES} source photos per edit."
+    sources: list[tuple[str, str]] = []  # (file_id, mime)
+    async with ctx.deps.sessionmaker() as session:
+        hidden = await unmonitored_threads(session, ctx.deps.chat_id)
+        for mid in ids:
+            anchor = (
+                await session.execute(
+                    select(Message).where(
+                        Message.chat_id == ctx.deps.chat_id,
+                        Message.tg_message_id == mid,
+                    )
+                )
+            ).scalar_one_or_none()
+            if anchor is None or (anchor.thread_id or 0) in hidden:
+                return f"#{mid}: not in Convoke's stored history for this chat."
+            att = anchor.attachment
+            if att is None:
+                return f"#{mid} carries no media."
+            mime = att.mime or "image/jpeg"
+            if att.kind not in ("photo", "image_document") or mime not in EDITABLE_MIMES:
+                return (
+                    f"#{mid} has {att.kind.replace('_', ' ')} media — only photos and "
+                    "PNG/JPEG/WebP image files can be edited."
+                )
+            if att.file_id is None:
+                return (
+                    f"#{mid}'s media came from a history import — the file was "
+                    "discarded after description and can't be edited."
+                )
+            if (att.size_bytes or 0) > get_settings().media_max_download_bytes:
+                return f"#{mid}'s file is too large to download."
+            sources.append((att.file_id, mime))
+    return await _make_image(ctx, instruction, orientation, sources=sources, source_ids=ids)
+
+
+async def _make_image(
+    ctx: RunContext[AgentDeps],
+    prompt: str,
+    orientation: str | None,
+    sources: list[tuple[str, str]],
+    source_ids: list[int] | None = None,
+) -> str:
+    """Shared tail of generate_image/edit_image: check the cap BEFORE paying
+    for a generation, run it, queue the bytes as an attachment."""
+    if len(ctx.deps.media) >= MAX_RUN_ATTACHMENTS:
+        return f"Attachment limit reached ({MAX_RUN_ATTACHMENTS} per reply) — nothing created."
+    size = imagegen.IMAGE_SIZES.get(orientation) if orientation else None
+    ctx.deps.image_work(+1)
+    try:
+        async with ctx.deps.sessionmaker() as session:
+            try:
+                provider = await get_provider(session, "image")
+            except ProviderNotConfigured:
+                return "Image generation isn't set up — no image model is assigned in Convoke."
+            if sources:
+                raw = await imagegen.download_chat_files(
+                    session, ctx.deps.chat_id, [f for f, _ in sources]
+                )
+        if sources:
+            data = await imagegen.edit(
+                provider, [(b, m) for b, (_, m) in zip(raw, sources)], prompt, size
+            )
+        else:
+            data = await imagegen.generate(provider, prompt, size)
+    except Exception as e:  # noqa: BLE001 — tool output, never an exception
+        log.warning("image %s failed: %s", "edit" if sources else "generation", e)
+        detail = str(e) if isinstance(e, imagegen.ImageGenError) else type(e).__name__
+        return f"Image {'edit' if sources else 'generation'} failed — {detail}"
+    finally:
+        ctx.deps.image_work(-1)
+    # Re-check the cap: concurrent attach calls may have filled it while the
+    # model ran. The generation is paid for either way; nothing to undo.
+    if len(ctx.deps.media) >= MAX_RUN_ATTACHMENTS:
+        return f"Attachment limit reached ({MAX_RUN_ATTACHMENTS} per reply) — image not added."
+    if source_ids:
+        refs = ", ".join(f"#{i}" for i in source_ids)
+        description = f"Image the bot edited from {refs}. Instruction: {prompt}"
+    else:
+        description = f"Image the bot generated. Prompt: {prompt}"
+    ctx.deps.media.append(
+        OutgoingMedia(
+            kind="photo",
+            source="generated",
+            data=data,
+            described=True,
+            description=description[: get_settings().media_description_max_chars],
+        )
+    )
+    return (
+        f"{'Edited' if sources else 'Generated'} the image — it will be sent right "
+        "after your reply. You can't see it; describe it only from what you asked for."
     )
 
 
@@ -578,6 +718,8 @@ AGENT_TOOLS = [
     inspect_media,
     attach_media,
     attach_media_url,
+    generate_image,
+    edit_image,
     set_reply_target,
     remember,
     recall,

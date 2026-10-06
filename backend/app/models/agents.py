@@ -11,7 +11,7 @@ RUN_STATUSES = ("pending", "running", "done", "declined", "error")
 
 # Execution roles a connected model can be assigned to. Embeddings is not a
 # role: chat memory embeds locally (sentence-transformers) by design.
-MODEL_ROLES = ("agent", "intent", "vision", "transcription", "video")
+MODEL_ROLES = ("agent", "intent", "vision", "transcription", "video", "image")
 
 # The capability a model must have for the role to work. The UI warns (but
 # does not block) when the assigned model lacks it.
@@ -21,6 +21,7 @@ ROLE_REQUIRED_CAPABILITY = {
     "vision": "vision",
     "transcription": "transcription",
     "video": "video",
+    "image": "image",
 }
 
 # Attachment kinds each media role unlocks — used to requeue skipped
@@ -50,8 +51,9 @@ class ConnectedModel(Base):
     # pass trivial probes and break on real workloads.
     api: Mapped[str] = mapped_column(Text, default="chat")
     api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # {"chat": bool, "vision": bool, "transcription": bool, "video": bool} —
-    # chat/vision/transcription come from probes; video is operator-declared.
+    # {"chat": bool, "vision": bool, "transcription": bool, "image": bool,
+    # "video": bool} — chat/vision/transcription/image come from probes; video
+    # is operator-declared.
     capabilities: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_test_detail: Mapped[str | None] = mapped_column(Text, nullable=True)

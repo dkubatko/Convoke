@@ -4,7 +4,7 @@ Lives apart from handlers/sender because both need `extract_attachment` and
 handlers already imports sender — a sender→handlers import would cycle.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from aiogram.types import Message as TgMessage
 
@@ -18,12 +18,15 @@ class OutgoingMedia:
     finishes. History items carry the re-sendable file_id (and the source
     attachment's description, so the re-send is never re-described); URL items
     carry only the URL — Telegram's servers fetch it at send time (our worker
-    never downloads agent-supplied URLs)."""
+    never downloads agent-supplied URLs); generated items carry the image
+    model's output bytes, uploaded at send time, plus their prompt as the
+    description."""
 
     kind: str  # "photo" | "video"
-    source: str  # "history" | "url"
+    source: str  # "history" | "url" | "generated"
     file_id: str | None = None  # history source
     url: str | None = None  # url source (photos only)
+    data: bytes | None = field(default=None, repr=False)  # generated source
     src_tg_message_id: int | None = None
     # Source attachment was already described — the flag, not text truthiness,
     # decides re-describe: a described source with empty vision output must

@@ -21,6 +21,9 @@ from tests.test_handlers import (
 
 
 class AgentFakeBot(FakeBot):
+    # aiogram's ChatActionSender logs bot.id; a real Bot derives it from the token.
+    id = 999
+
     def __init__(self, member_status: str = "administrator"):
         super().__init__(member_status)
         self.actions: list[str] = []

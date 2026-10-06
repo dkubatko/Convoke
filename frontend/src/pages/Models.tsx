@@ -31,13 +31,15 @@ const SUBTABS = ['Role assignment', 'Model library', 'Settings'] as const
 const MODEL_COLS: SkeletonCol[] = [
   { header: 'Name', w: '10.5%', kind: 'twoline', bar: 110, sub: 12 },
   { header: 'Endpoint', w: '19.5%', kind: 'mono', bar: '80%' },
-  { header: 'Capabilities', w: '29%', kind: 'pills', n: 4 },
+  { header: 'Capabilities', w: '29%', kind: 'pills', n: 5 },
   { header: 'Roles', w: '19.5%', kind: 'pill' },
   { header: 'Tested', w: '8%', bar: 70 },
   { header: '', w: '13.5%', kind: 'actions' },
 ]
 
-const CAPABILITIES = ['chat', 'vision', 'transcription', 'video'] as const
+const CAPABILITIES = ['chat', 'vision', 'transcription', 'image', 'video'] as const
+// Capabilities the Test button probes (video is operator-declared).
+const PROBED = ['chat', 'vision', 'transcription', 'image'] as const
 
 const ROLES: { role: string; title: string; blurb: string; recommended: string; note?: string }[] = [
   {
@@ -75,6 +77,13 @@ const ROLES: { role: string; title: string; blurb: string; recommended: string; 
       'Optional: a model that accepts video input directly. Unset: videos are described from thumbnail + sampled frames + audio transcript instead.',
     recommended: 'a video-native VLM served by vLLM (Qwen3-VL class)',
     note: 'Most setups leave this unassigned.',
+  },
+  {
+    role: 'image',
+    title: 'Image — the hands',
+    blurb:
+      'Optional: generates and edits images when asked, via an OpenAI-compatible /images endpoint. Unset: the agent can only re-send existing photos and web images.',
+    recommended: 'an image model (gpt-image-2.5-flare class)',
   },
 ]
 
@@ -123,7 +132,7 @@ type TestState =
   | { phase: 'failed'; detail: string }
 
 function testPassed(t: TestState): boolean {
-  return t.phase === 'done' && (t.result.chat.ok || t.result.vision.ok || t.result.transcription.ok)
+  return t.phase === 'done' && PROBED.some((cap) => t.result[cap].ok)
 }
 
 function ModelLibrary({
@@ -186,6 +195,7 @@ function ModelLibrary({
           chat: test.result.chat.ok,
           vision: test.result.vision.ok,
           transcription: test.result.transcription.ok,
+          image: test.result.image.ok,
           video,
         },
       })
@@ -222,12 +232,11 @@ function ModelLibrary({
           chat: result.chat.ok,
           vision: result.vision.ok,
           transcription: result.transcription.ok,
+          image: result.image.ok,
           video: m.capabilities.video ?? false, // operator-declared, not probed
         },
       })
-      const up = CAPABILITIES.filter(
-        (c) => c !== 'video' && result[c as keyof ModelTestResult].ok,
-      )
+      const up = PROBED.filter((c) => result[c].ok)
       toast(up.length ? 'ok' : 'err', `${m.name}: ${up.length ? `responds (${up.join(', ')})` : result.chat.detail}`)
       onChanged()
     } catch (err) {
@@ -325,7 +334,7 @@ function ModelLibrary({
           </div>
           {test.phase === 'done' && (
             <div className="stack" style={{ gap: 6 }}>
-              {(['chat', 'vision', 'transcription'] as const).map((cap) => (
+              {PROBED.map((cap) => (
                 <p key={cap} style={{ margin: 0 }}>
                   <span className={`pill ${test.result[cap].ok ? 'pill--ok' : 'pill--idle'}`}>
                     <span className="lamp" aria-hidden />
@@ -342,7 +351,7 @@ function ModelLibrary({
           {test.phase === 'failed' && <p className="field-error">{test.detail}</p>}
           {test.phase === 'idle' && (
             <p className="muted" style={{ fontSize: 12.5 }}>
-              Testing probes chat, vision, and transcription so the library knows what this model can do.
+              Testing probes chat, vision, transcription, and image generation so the library knows what this model can do.
             </p>
           )}
         </form>
@@ -453,7 +462,7 @@ function RoleAssignments({
 function requiredCapability(meta: (typeof ROLES)[number], assignment?: RoleAssignment) {
   return (
     assignment?.required_capability ??
-    (['vision', 'transcription', 'video'].includes(meta.role) ? meta.role : 'chat')
+    (['vision', 'transcription', 'video', 'image'].includes(meta.role) ? meta.role : 'chat')
   )
 }
 

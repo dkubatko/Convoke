@@ -80,7 +80,7 @@ export interface ToolCall {
 // actually reached the chat. Absent/null on runs that attached nothing.
 export interface RunMedia {
   kind: string // photo | video
-  source: string // history | url
+  source: string // history | url | generated
   ok: boolean
 }
 
@@ -143,6 +143,7 @@ export interface ModelTestResult {
   chat: CapabilityProbe
   vision: CapabilityProbe
   transcription: CapabilityProbe
+  image: CapabilityProbe
 }
 
 export type EmbedderRole = 'intent' | 'memory'

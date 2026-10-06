@@ -13,6 +13,8 @@ from app.media.assets import TEST_PNG, TEST_WAV
 from app.models import ConnectedModel, ModelRoleAssignment
 
 TEST_TIMEOUT_S = 20
+# Image generation is slow even at low quality.
+IMAGE_PROBE_TIMEOUT_S = 90
 
 
 class ProviderNotConfigured(RuntimeError):
@@ -205,17 +207,49 @@ async def probe_transcription(base_url: str, model_name: str, api_key: str | Non
     return False, f"HTTP {resp.status_code}: {resp.text[:150]}"
 
 
+async def probe_image(base_url: str, model_name: str, api_key: str | None) -> tuple[bool, str]:
+    """Generate one small low-quality image via the OpenAI-compatible
+    /images/generations endpoint. Unlike the other probes this one is billed
+    when it passes (about a cent) — but only image models pass, and a chat
+    model is rejected before any generation happens."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=IMAGE_PROBE_TIMEOUT_S) as client:
+            resp = await client.post(
+                f"{base_url.rstrip('/')}/images/generations",
+                headers=headers,
+                json={
+                    "model": model_name,
+                    "prompt": "A plain red square.",
+                    "n": 1,
+                    "size": "1024x1024",
+                    "quality": "low",
+                },
+            )
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        return False, f"Couldn't reach {base_url}."
+    except httpx.TimeoutException:
+        return False, f"No image within {IMAGE_PROBE_TIMEOUT_S}s."
+    except Exception as e:  # noqa: BLE001 — surface as a failed probe
+        return False, f"{type(e).__name__}: {str(e)[:150]}"
+    if resp.status_code == 200:
+        return True, "Image endpoint generated a test image."
+    return False, f"HTTP {resp.status_code}: {resp.text[:150]}"
+
+
 async def probe_capabilities(
     base_url: str, model_name: str, api_key: str | None, api: str = "chat"
 ) -> dict[str, tuple[bool, str]]:
-    """Run the chat, vision, and transcription probes concurrently. A model is
-    worth saving if any passes (a whisper server fails the chat probe by
-    design). Video capability is operator-declared — probing video content
-    parts is unreliable across gateways. Transcription is a separate
-    endpoint, untouched by the chat-vs-responses dialect."""
-    chat, vision, transcription = await asyncio.gather(
+    """Run the chat, vision, transcription, and image probes concurrently. A
+    model is worth saving if any passes (a whisper server or an image model
+    fails the chat probe by design). Video capability is operator-declared —
+    probing video content parts is unreliable across gateways. Transcription
+    and image generation are separate endpoints, untouched by the
+    chat-vs-responses dialect."""
+    chat, vision, transcription, image = await asyncio.gather(
         probe_endpoint(base_url, model_name, api_key, api),
         probe_vision(base_url, model_name, api_key, api),
         probe_transcription(base_url, model_name, api_key),
+        probe_image(base_url, model_name, api_key),
     )
-    return {"chat": chat, "vision": vision, "transcription": transcription}
+    return {"chat": chat, "vision": vision, "transcription": transcription, "image": image}

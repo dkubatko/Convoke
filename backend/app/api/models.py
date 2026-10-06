@@ -1,8 +1,8 @@
 """Model library + role assignments.
 
 The library holds many OpenAI-compatible endpoints with probed capability
-flags; each execution role (agent / intent / vision / transcription / video)
-is assigned one. Replaces the old role-keyed /api/providers contract."""
+flags; each execution role (agent / intent / vision / transcription / video /
+image) is assigned one. Replaces the old role-keyed /api/providers contract."""
 
 from datetime import datetime, timezone
 
@@ -66,6 +66,7 @@ class ModelTestOut(BaseModel):
     chat: CapabilityProbe
     vision: CapabilityProbe
     transcription: CapabilityProbe
+    image: CapabilityProbe
 
 
 class RoleAssignmentIn(BaseModel):
@@ -121,8 +122,8 @@ async def list_models(session: AsyncSession = Depends(get_session)) -> list[Mode
 async def test_model(
     body: ModelTestIn, session: AsyncSession = Depends(get_session)
 ) -> ModelTestOut:
-    """Probe chat, vision, and transcription concurrently so a typo'd URL or
-    bad key is caught — and modality flags detected — before saving."""
+    """Probe chat, vision, transcription, and image concurrently so a typo'd
+    URL or bad key is caught — and modality flags detected — before saving."""
     api_key = body.api_key
     stored = await session.get(ConnectedModel, body.model_id) if body.model_id is not None else None
     if api_key is None and stored is not None and stored.api_key_encrypted:

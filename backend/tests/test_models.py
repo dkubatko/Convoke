@@ -58,7 +58,7 @@ async def test_role_assignment_resolves_get_provider(client, db_sessionmaker):
             await get_provider(s, "intent")
 
     roles = {r["role"]: r for r in (await client.get("/api/model-roles")).json()}
-    assert set(roles) == {"agent", "intent", "vision", "transcription", "video"}
+    assert set(roles) == {"agent", "intent", "vision", "transcription", "video", "image"}
     assert roles["agent"]["model_name"] == "llama"
     assert roles["intent"]["model_id"] is None
 

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from aiogram import Bot as AiogramBot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.utils.chat_action import ChatActionSender
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import RetryPromptPart, ToolCallPart
@@ -40,6 +41,8 @@ from app.telegram.sender import send_and_persist, send_media_and_persist
 log = logging.getLogger("convoke.agent")
 
 TELEGRAM_MESSAGE_LIMIT = 4096
+# Under Telegram's ~5s display so the indicator doesn't flicker between sends.
+CHAT_ACTION_INTERVAL_S = 4
 MAX_REPLY_PARTS = 3
 # Hard cap on one model run. It executes holding the chat lock and a global
 # concurrency slot — unbounded, a wedged provider could stall the whole loop.
@@ -73,7 +76,9 @@ quoted "↳ replies to [#id] [time] Sender: …" line when it isn't. Use get_mes
 to read any specific message by that id verbatim — e.g. a reply target or a \
 message cited in search results.
 - attach_media(message_id) re-sends a photo or video from this chat's history \
-by its #id; attach_media_url(url) attaches a web image by direct URL. \
+by its #id; attach_media_url(url) attaches a web image by direct URL; \
+generate_image creates a new image and edit_image changes or combines photos \
+from the chat — use these when asked to draw, create, or alter an image. \
 Attachments arrive as one album right after your text.
 - When your answer points at one specific past message, find its #id and call \
 set_reply_target(message_id) — your reply becomes a Telegram reply to it.
@@ -141,6 +146,8 @@ async def execute_run(
     # send must mark the run error and (best-effort) notify — otherwise it
     # shows 'running' forever.
     provider = None
+    # Holds the chat-action sender; closed on every exit path.
+    chat_action = AsyncExitStack()
     try:
         async with sessionmaker() as session:
             # chat/bot_row from the first block are detached but readable;
@@ -258,10 +265,26 @@ async def execute_run(
             workflow_id=run.workflow_id if is_workflow else None,
         )
 
-        try:
-            await bot.send_chat_action(chat.tg_chat_id, "typing", message_thread_id=thread_id)
-        except Exception:  # noqa: BLE001 — cosmetic
-            pass
+        if is_workflow:
+            # A single blip: a workflow may conclude NO_ACTION and post
+            # nothing, and a long "typing…" that ends in silence misleads.
+            try:
+                await bot.send_chat_action(chat.tg_chat_id, "typing", message_thread_id=thread_id)
+            except Exception:  # noqa: BLE001 — cosmetic
+                pass
+        else:
+            # Telegram clears a chat action after ~5s; aiogram's sender
+            # re-sends it until closed, so a member who invoked the bot sees
+            # it working until the reply has fully landed. A failed send ends
+            # the indicator (cosmetic), never the run.
+            deps.chat_action = await chat_action.enter_async_context(
+                ChatActionSender(
+                    bot=bot,
+                    chat_id=chat.tg_chat_id,
+                    message_thread_id=thread_id,
+                    interval=CHAT_ACTION_INTERVAL_S,
+                )
+            )
 
         # MCP connections open for exactly the duration of the run. Toolsets
         # are entered one by one so a single unreachable server drops out of
@@ -380,6 +403,7 @@ async def execute_run(
                 # Media only after ALL text parts landed — a half-delivered
                 # reply must not be decorated with the album it promised.
                 if deps.media:
+                    deps.image_work(+1)  # uploads read as "sending photo…"
                     run.media = await _deliver_media(
                         sessionmaker, bot, chat, limiter, deps.media,
                         thread_id=send_thread, notify_reply_to=reply_to,
@@ -429,6 +453,7 @@ async def execute_run(
                 await session.commit()
     except Exception as e:  # noqa: BLE001 — any failure ends the run cleanly
         log.exception("agent run %s failed", run_id)
+        await chat_action.aclose()
         if provider is not None:  # may fail before resolution
             evict_model(provider)  # a poisoned pooled client must not survive the retry
         async with sessionmaker() as session:
@@ -440,6 +465,8 @@ async def execute_run(
                     # Silence reads as a crash — always leave a trace in the chat.
                     notify="Something went wrong and I couldn't finish that.",
                 )
+    finally:
+        await chat_action.aclose()
 
 
 def _resolve_provider(
@@ -546,7 +573,8 @@ async def _deliver_media(
     Uses its own session so a failed attempt's rollback can't expire the
     caller's run/chat instances. Ladder: send → RetryAfter sleep+retry →
     on BadRequest with mixed sources, drop URL items (whose server-side
-    fetch can poison the whole album) and retry the file_id-only album once.
+    fetch can poison the whole album) and retry the rest (file_ids and
+    generated uploads) once.
     ONLY BadRequest walks the ladder: it means Telegram rejected the input,
     so re-sending can't duplicate. Any other failure (network flake, second
     RetryAfter) is terminal — the album may have landed server-side with the
@@ -561,9 +589,9 @@ async def _deliver_media(
         )
         items = list(items[:MAX_RUN_ATTACHMENTS])
     batches = [items]
-    history_only = [i for i in items if i.source == "history"]
-    if history_only and len(history_only) < len(items):
-        batches.append(history_only)
+    without_urls = [i for i in items if i.source != "url"]
+    if without_urls and len(without_urls) < len(items):
+        batches.append(without_urls)
     delivered: list[OutgoingMedia] = []
     ambiguous = False  # a send whose outcome Telegram never confirmed
     async with sessionmaker() as session:
