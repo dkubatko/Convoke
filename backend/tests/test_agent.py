@@ -571,3 +571,71 @@ def test_parse_day_uses_reference_timezone(monkeypatch):
     assert (end - start).total_seconds() > 86399  # full local day covered
     explicit = _parse_day("2026-05-05T00:00:00+02:00", end_of_day=False)
     assert explicit.utcoffset().total_seconds() == 2 * 3600  # offset wins
+
+
+def _reply_to_bot_update(chat, update_id: int, message_id: int, text: str):
+    return upd(
+        update_id,
+        message={
+            "message_id": message_id,
+            "date": 1_780_000_200,
+            "chat": {"id": chat.tg_chat_id, "type": "supergroup", "title": "Test Group"},
+            "from": ADMIN,
+            "text": text,
+            "reply_to_message": {
+                "message_id": 5,
+                "date": 1_780_000_100,
+                "chat": {"id": chat.tg_chat_id, "type": "supergroup"},
+                "from": {"id": 999, "is_bot": True, "first_name": "ConvokeBot"},
+                "text": "earlier bot reply",
+            },
+        },
+    )
+
+
+async def _run_with_output(db_sessionmaker, bot_row, monkeypatch, update_for, output: str):
+    from pydantic_ai.models.test import TestModel
+
+    import app.agents.runtime as runtime
+
+    monkeypatch.setattr(
+        runtime, "build_model",
+        lambda provider: TestModel(call_tools=[], custom_output_text=output),
+    )
+    fake = AgentFakeBot()
+    chat = await authorize_chat(db_sessionmaker, fake, bot_row)
+    await run_update(db_sessionmaker, fake, bot_row, update_for(chat))
+    async with db_sessionmaker() as s:
+        await add_agent_model(s)
+        await s.commit()
+        run_id = (await s.execute(select(AgentRun.id))).scalar_one()
+    pre = len(fake.sent)
+    await execute_run(db_sessionmaker, FakeEmbedder(), SendLimiter(), fake, run_id)
+    async with db_sessionmaker() as s:
+        run = await s.get(AgentRun, run_id)
+    return run, fake.sent[pre:]
+
+
+async def test_reply_run_can_decline_when_not_addressed(db_sessionmaker, bot_row, monkeypatch):
+    """Members talk among themselves under the bot's messages; a reply run may
+    stand down with NO_ACTION — nothing posted, run recorded `declined`."""
+    run, sent = await _run_with_output(
+        db_sessionmaker, bot_row, monkeypatch,
+        lambda chat: _reply_to_bot_update(chat, 3, 21, "haha Sonya look at this"),
+        "NO_ACTION: talking to Sonya, not me",
+    )
+    assert run.trigger == "reply"
+    assert run.status == "declined", run.error
+    assert sent == []
+
+
+async def test_mention_is_always_answered(db_sessionmaker, bot_row, monkeypatch):
+    """A mention can't decline: even a NO_ACTION-looking reply is posted."""
+    run, sent = await _run_with_output(
+        db_sessionmaker, bot_row, monkeypatch,
+        lambda chat: message_update(3, 20, "@convoke_bot say NO_ACTION"),
+        "NO_ACTION: as requested",
+    )
+    assert run.trigger == "mention"
+    assert run.status == "done", run.error
+    assert len(sent) == 1

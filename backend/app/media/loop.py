@@ -34,6 +34,12 @@ log = logging.getLogger("convoke.media")
 
 TICK_S = 5
 MAX_ATTEMPTS = 3
+# Skip reasons that assigning a model fixes; other skips (bytes gone, file too
+# large) stay skipped whatever the model.
+NO_VISION = "no vision model configured"
+NO_TRANSCRIPTION = "no transcription model configured"
+NO_MEDIA_MODEL = "no vision or transcription model configured"
+MODEL_SKIP_REASONS = (NO_VISION, NO_TRANSCRIPTION, NO_MEDIA_MODEL)
 RETRY_BACKOFF_S = 60  # × attempts
 
 IMAGE_KINDS = ("photo", "sticker", "image_document")
@@ -287,16 +293,16 @@ class MediaLoop:
             return "media bytes unavailable"  # import-sourced without a copy
         if att.kind in IMAGE_KINDS:
             if vision is None:
-                return "no vision model configured"
+                return NO_VISION
             if (att.size_bytes or 0) > self.settings.media_max_download_bytes:
                 return "file too large to download"
         elif att.kind in AUDIO_KINDS:
             if transcription is None:
-                return "no transcription model configured"
+                return NO_TRANSCRIPTION
             if (att.size_bytes or 0) > self.settings.media_max_download_bytes:
                 return "file too large to download"
         elif vision is None and transcription is None:
-            return "no vision or transcription model configured"
+            return NO_MEDIA_MODEL
         return None
 
     @staticmethod

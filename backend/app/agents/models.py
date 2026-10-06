@@ -13,6 +13,9 @@ from app.media.assets import TEST_PNG, TEST_WAV
 from app.models import ConnectedModel, ModelRoleAssignment
 
 TEST_TIMEOUT_S = 20
+# Output room for the chat/vision probes. Reasoning models think before the
+# first output token; a 16-token cap made them fail probes they'd pass.
+PROBE_MAX_TOKENS = 1024
 # Image generation is slow even at low quality.
 IMAGE_PROBE_TIMEOUT_S = 90
 
@@ -125,7 +128,7 @@ async def probe_endpoint(
 ) -> tuple[bool, str]:
     """Fire one tiny completion at an endpoint to prove it's real before the
     operator saves it. Returns (ok, human-readable detail)."""
-    agent = Agent(_make_model(base_url, model_name, api_key, api), model_settings={"max_tokens": 16})
+    agent = Agent(_make_model(base_url, model_name, api_key, api), model_settings={"max_tokens": PROBE_MAX_TOKENS})
     try:
         result = await asyncio.wait_for(agent.run("Reply with exactly: OK"), TEST_TIMEOUT_S)
     except TimeoutError:
@@ -167,7 +170,7 @@ async def probe_vision(
 ) -> tuple[bool, str]:
     """Send a tiny in-code PNG; a model that accepts image parts is
     vision-capable (we assert HTTP acceptance, not that it *sees* well)."""
-    agent = Agent(_make_model(base_url, model_name, api_key, api), model_settings={"max_tokens": 16})
+    agent = Agent(_make_model(base_url, model_name, api_key, api), model_settings={"max_tokens": PROBE_MAX_TOKENS})
     try:
         result = await asyncio.wait_for(
             agent.run(

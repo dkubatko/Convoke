@@ -12,6 +12,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.models import probe_capabilities, probe_reasoning
+from app.media.loop import MODEL_SKIP_REASONS
 from app.core.crypto import decrypt, encrypt
 from app.core.db import get_session
 from app.core.security import require_operator
@@ -256,12 +257,17 @@ async def assign_role(
         assignment.model_id = model.id
         assignment.reasoning_effort = effort
 
-    # Media that was skipped for lack of a model gets another chance now.
+    # Media that was skipped for lack of a model gets another chance now —
+    # only that: media skipped because its bytes are gone stays skipped.
     kinds = ROLE_ATTACHMENT_KINDS.get(role)
     if kinds:
         await session.execute(
             update(MessageAttachment)
-            .where(MessageAttachment.status == "skipped", MessageAttachment.kind.in_(kinds))
+            .where(
+                MessageAttachment.status == "skipped",
+                MessageAttachment.kind.in_(kinds),
+                MessageAttachment.error.in_(MODEL_SKIP_REASONS),
+            )
             .values(status="pending", attempts=0, error=None)
         )
     await session.commit()

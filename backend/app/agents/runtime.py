@@ -245,7 +245,11 @@ async def execute_run(
                 else "You were invoked by a member replying to one of your earlier "
                 "messages (shown last in the recent messages; its reply annotation "
                 "identifies the message being replied to — fetch it with "
-                "get_messages if you need the full text)."
+                "get_messages if you need the full text). A reply to you is not "
+                "always addressed to you — members also talk among themselves under "
+                "your messages. If this one isn't meant for you or needs no answer "
+                "from you, reply with exactly NO_ACTION: <one short reason> — "
+                "nothing will be posted to the chat."
                 if is_reply
                 else "You were invoked by a member's message (shown last in the recent messages)."
             )
@@ -353,7 +357,9 @@ async def execute_run(
         # nothing to the chat; the run records the decision as `declined` and
         # the episode is satisfied with the reason, so the topic won't
         # immediately re-fire (and the classifier sees WHY nothing happened).
-        declined = is_workflow and reply_text.upper().startswith("NO_ACTION")
+        # Workflow runs and replies to the bot may decline; a mention is
+        # always answered.
+        declined = (is_workflow or is_reply) and reply_text.upper().startswith("NO_ACTION")
 
         tool_calls = extract_tool_calls(result, server_prefixes, BUILTIN_TOOL_NAMES)
 

@@ -110,7 +110,14 @@ async def test_assigning_media_role_requeues_skipped_attachments(client, db_sess
             chat_id=chat.id, tg_message_id=2, kind="voice", file_id="f2", file_unique_id="u2",
             status="skipped", error="no transcription model configured", attempts=1,
         )
-        s.add_all([msg, voice])
+        gone = Message(chat_id=chat.id, tg_message_id=3, sender_name="A", text="",
+                       sent_at=datetime.now(timezone.utc))
+        gone.attachment = MessageAttachment(
+            chat_id=chat.id, tg_message_id=3, kind="photo", file_id=None, file_unique_id="u3",
+            import_path="photos/x.jpg", status="skipped",
+            error="file missing from import archive",
+        )
+        s.add_all([msg, voice, gone])
         await s.commit()
 
     model_id = (await client.post("/api/models", json=VISION_MODEL)).json()["id"]
@@ -122,6 +129,9 @@ async def test_assigning_media_role_requeues_skipped_attachments(client, db_sess
         assert photo_att.attempts == 0 and photo_att.error is None
         voice_att = (await s.get(Message, voice.id)).attachment
         assert voice_att.status == "skipped"  # different role — untouched
+        gone_att = (await s.get(Message, gone.id)).attachment
+        assert gone_att.status == "skipped"  # bytes gone — no model can fix that
+        assert gone_att.error == "file missing from import archive"
 
 
 async def test_probe_unreachable_endpoint_fails_with_direction():
