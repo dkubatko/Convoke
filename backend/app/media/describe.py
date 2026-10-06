@@ -12,8 +12,9 @@ from pathlib import Path
 
 import httpx
 from pydantic_ai import Agent, BinaryContent
+from pydantic_ai.exceptions import ModelHTTPError
 
-from app.agents.models import build_model
+from app.agents.models import build_model, reasoning_settings
 from app.core.config import get_settings
 from app.core.crypto import decrypt
 from app.models import ConnectedModel
@@ -65,6 +66,12 @@ INSPECT_FRAMES_PROMPT = (
 
 INSPECT_MAX_CHARS = 1500  # answers return to the agent's context — keep them bounded
 
+# A runaway guard, not a length control: the prompts ask for short text and
+# the char limits above trim what's kept. The model never sees this number.
+# Reasoning models spend it on thinking before writing — OpenAI has no
+# separate thinking cap — so it must leave them room.
+MAX_OUTPUT_TOKENS = 4000
+
 
 class Describer:
     """The media loop's model seam; tests substitute a fake."""
@@ -72,17 +79,40 @@ class Describer:
     def __init__(self) -> None:
         self.settings = get_settings()
 
+    async def _vision_call(self, provider: ConnectedModel, effort: str | None, parts) -> str:
+        """One vision call at the role's reasoning level. A 400 rejecting the
+        reasoning parameter (drift since it was validated at assignment)
+        retries once without it — the same rule agent runs follow."""
+        for level in dict.fromkeys([effort, None]):
+            agent = Agent(
+                build_model(provider),
+                model_settings={"max_tokens": MAX_OUTPUT_TOKENS, **reasoning_settings(level)},
+            )
+            try:
+                result = await asyncio.wait_for(agent.run(parts), DESCRIBE_TIMEOUT_S)
+                return (result.output or "").strip()
+            except ModelHTTPError as e:
+                rejected = e.status_code == 400 and "reasoning" in str(e).lower()
+                if level is None or not rejected:
+                    raise
+                log.warning("vision model rejected reasoning_effort=%r; retrying without", level)
+        raise AssertionError("unreachable")
+
     async def describe_image(
-        self, provider: ConnectedModel, data: bytes, mime: str, caption: str = ""
+        self,
+        provider: ConnectedModel,
+        data: bytes,
+        mime: str,
+        caption: str = "",
+        effort: str | None = None,
     ) -> str:
         prompt = IMAGE_PROMPT.format(max_chars=self.settings.media_description_max_chars)
         if caption:
             prompt += f'\nThe sender captioned it: "{caption[:200]}"'
-        agent = Agent(build_model(provider), model_settings={"max_tokens": 300})
-        result = await asyncio.wait_for(
-            agent.run([prompt, BinaryContent(data, media_type=mime)]), DESCRIBE_TIMEOUT_S
+        text = await self._vision_call(
+            provider, effort, [prompt, BinaryContent(data, media_type=mime)]
         )
-        return (result.output or "").strip()[: self.settings.media_description_max_chars]
+        return text[: self.settings.media_description_max_chars]
 
     async def describe_frames(
         self,
@@ -90,6 +120,7 @@ class Describer:
         frames: list[bytes],
         caption: str = "",
         transcript: str | None = None,
+        effort: str | None = None,
     ) -> str:
         """Fallback video description: thumbnail + sampled frames as a
         multi-image vision call, composed with the audio transcript."""
@@ -100,13 +131,17 @@ class Describer:
         )
         if caption:
             prompt += f'\nThe sender captioned it: "{caption[:200]}"'
-        agent = Agent(build_model(provider), model_settings={"max_tokens": 300})
         parts = [prompt, *(BinaryContent(f, media_type="image/jpeg") for f in frames)]
-        result = await asyncio.wait_for(agent.run(parts), DESCRIBE_TIMEOUT_S)
-        return (result.output or "").strip()[: self.settings.media_description_max_chars]
+        text = await self._vision_call(provider, effort, parts)
+        return text[: self.settings.media_description_max_chars]
 
     async def describe_video_native(
-        self, provider: ConnectedModel, data: bytes, mime: str, caption: str = ""
+        self,
+        provider: ConnectedModel,
+        data: bytes,
+        mime: str,
+        caption: str = "",
+        effort: str | None = None,
     ) -> str:
         """Video-native path (behind the `video` role): vLLM-convention
         video_url content part on a raw chat/completions call — pydantic-ai's
@@ -121,7 +156,8 @@ class Describer:
         b64 = base64.b64encode(data).decode()
         payload = {
             "model": provider.model_name,
-            "max_tokens": 300,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            **({"reasoning_effort": effort} if effort else {}),
             "messages": [
                 {
                     "role": "user",
@@ -141,16 +177,21 @@ class Describer:
         return text[: self.settings.media_description_max_chars]
 
     async def answer_about_image(
-        self, provider: ConnectedModel, data: bytes, mime: str, question: str, caption: str = ""
+        self,
+        provider: ConnectedModel,
+        data: bytes,
+        mime: str,
+        question: str,
+        caption: str = "",
+        effort: str | None = None,
     ) -> str:
         prompt = INSPECT_IMAGE_PROMPT.format(question=question[:500])
         if caption:
             prompt += f'\nThe sender captioned it: "{caption[:200]}"'
-        agent = Agent(build_model(provider), model_settings={"max_tokens": 700})
-        result = await asyncio.wait_for(
-            agent.run([prompt, BinaryContent(data, media_type=mime)]), DESCRIBE_TIMEOUT_S
+        text = await self._vision_call(
+            provider, effort, [prompt, BinaryContent(data, media_type=mime)]
         )
-        return (result.output or "").strip()[:INSPECT_MAX_CHARS]
+        return text[:INSPECT_MAX_CHARS]
 
     async def answer_about_frames(
         self,
@@ -159,6 +200,7 @@ class Describer:
         question: str,
         transcript: str | None = None,
         caption: str = "",
+        effort: str | None = None,
     ) -> str:
         transcript_line = f'\nThe audio says: "{transcript[:800]}"' if transcript else ""
         prompt = INSPECT_FRAMES_PROMPT.format(
@@ -166,10 +208,9 @@ class Describer:
         )
         if caption:
             prompt += f'\nThe sender captioned it: "{caption[:200]}"'
-        agent = Agent(build_model(provider), model_settings={"max_tokens": 700})
         parts = [prompt, *(BinaryContent(f, media_type="image/jpeg") for f in frames)]
-        result = await asyncio.wait_for(agent.run(parts), DESCRIBE_TIMEOUT_S)
-        return (result.output or "").strip()[:INSPECT_MAX_CHARS]
+        text = await self._vision_call(provider, effort, parts)
+        return text[:INSPECT_MAX_CHARS]
 
     async def sample_frames(self, data: bytes, count: int, duration_s: int | None) -> list[bytes]:
         """Evenly sample up to `count` JPEG frames via ffmpeg. Best-effort:

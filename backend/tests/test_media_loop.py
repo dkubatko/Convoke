@@ -42,19 +42,21 @@ class FakeDescriber:
         self.fail_times = fail_times
         self.sampled = sampled or []  # what ffmpeg "extracts"
         self.calls: list[tuple] = []
+        self.efforts: list[str | None] = []
 
-    async def describe_image(self, provider, data, mime, caption=""):
+    async def describe_image(self, provider, data, mime, caption="", effort=None):
         self.calls.append(("image", data, mime, caption))
+        self.efforts.append(effort)
         if self.fail_times > 0:
             self.fail_times -= 1
             raise RuntimeError("model exploded")
         return f"described({data.decode()})"
 
-    async def describe_frames(self, provider, frames, caption="", transcript=None):
+    async def describe_frames(self, provider, frames, caption="", transcript=None, effort=None):
         self.calls.append(("frames", frames, caption, transcript))
         return f"video-desc({len(frames)} frames, audio={transcript is not None})"
 
-    async def describe_video_native(self, provider, data, mime, caption=""):
+    async def describe_video_native(self, provider, data, mime, caption="", effort=None):
         self.calls.append(("native", data, mime, caption))
         return "native-video-desc"
 
@@ -249,7 +251,7 @@ async def test_backlog_drains_in_parallel(db_sessionmaker):
             self.in_flight = 0
             self.peak = 0
 
-        async def describe_image(self, provider, data, mime, caption=""):
+        async def describe_image(self, provider, data, mime, caption="", effort=None):
             self.in_flight += 1
             self.peak = max(self.peak, self.in_flight)
             await asyncio.sleep(0.05)
@@ -264,3 +266,46 @@ async def test_backlog_drains_in_parallel(db_sessionmaker):
     async with db_sessionmaker() as s:
         statuses = (await s.execute(select(MessageAttachment.status))).scalars().all()
         assert statuses == ["described"] * 3
+
+
+async def test_vision_role_reasoning_effort_reaches_the_model(db_sessionmaker):
+    """The effort set on the vision role applies to description calls — it
+    used to be accepted in the UI but ignored here."""
+    bot_id, _ = await seed(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        (await s.get(ModelRoleAssignment, "vision")).reasoning_effort = "low"
+        await s.commit()
+    describer = FakeDescriber()
+    loop, _ = make_loop(db_sessionmaker, bot_id, describer)
+    await loop._tick()
+    assert describer.efforts == ["low"]
+
+
+async def test_describer_sends_effort_with_room_and_drops_rejected_effort(monkeypatch):
+    """Vision calls carry the role's effort and a cap with room for reasoning;
+    a provider that rejects the effort gets one retry without it."""
+    from pydantic_ai.exceptions import ModelHTTPError
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    import app.media.describe as describe
+
+    seen: list[dict] = []
+
+    def fn(messages, info):
+        settings = dict(info.model_settings or {})
+        seen.append(settings)
+        if settings.get("openai_reasoning_effort") == "xhigh":
+            raise ModelHTTPError(400, "m", body="Unsupported value: 'reasoning_effort'")
+        return ModelResponse(parts=[TextPart("  a frog on a lily pad  ")])
+
+    monkeypatch.setattr(describe, "build_model", lambda provider: FunctionModel(fn))
+    d = describe.Describer()
+    out = await d.describe_image(None, b"img", "image/jpeg", effort="low")
+    assert out == "a frog on a lily pad"
+    assert seen[-1]["openai_reasoning_effort"] == "low"
+    assert seen[-1]["max_tokens"] == describe.MAX_OUTPUT_TOKENS >= 2000
+
+    seen.clear()
+    assert await d.describe_image(None, b"img", "image/jpeg", effort="xhigh")
+    assert [x.get("openai_reasoning_effort") for x in seen] == ["xhigh", None]

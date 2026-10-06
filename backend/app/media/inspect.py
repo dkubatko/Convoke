@@ -17,7 +17,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.models import ProviderNotConfigured, get_provider
+from app.agents.models import ProviderNotConfigured, get_provider, get_role_reasoning
 from app.core.config import get_settings
 from app.core.crypto import decrypt
 from app.media.describe import Describer
@@ -70,6 +70,7 @@ async def inspect_attachment(
     describer = describer or Describer()
     try:
         vision = await get_provider(session, "vision")
+        effort = await get_role_reasoning(session, "vision")
     except ProviderNotConfigured:
         return (
             (stored_text + "\n" if stored_text else "")
@@ -96,7 +97,8 @@ async def inspect_attachment(
                 return (stored_text + "\n" if stored_text else "") + "File too large to download."
             data = await download(att.file_id)
             answer = await describer.answer_about_image(
-                vision, data, att.mime or _image_mime(att.kind), question, caption
+                vision, data, att.mime or _image_mime(att.kind), question, caption,
+                effort=effort,
             )
         else:  # video / video_note / documents: frames + stored transcript
             frames: list[bytes] = []
@@ -119,7 +121,7 @@ async def inspect_attachment(
                 )
             answer = (
                 await describer.answer_about_frames(
-                    vision, frames, question, att.transcript, caption
+                    vision, frames, question, att.transcript, caption, effort=effort
                 )
                 + note
             )

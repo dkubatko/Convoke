@@ -21,7 +21,12 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.models import ProviderNotConfigured, evict_model, get_provider
+from app.agents.models import (
+    ProviderNotConfigured,
+    evict_model,
+    get_provider,
+    get_role_reasoning,
+)
 from app.core.config import get_settings
 from app.core.crypto import decrypt
 from app.core.runtime_settings import effective_settings
@@ -123,6 +128,10 @@ class MediaLoop:
             vision = await self._resolve(session, "vision")
             transcription = await self._resolve(session, "transcription")
             video = await self._resolve(session, "video")
+            efforts = {
+                "vision": await get_role_reasoning(session, "vision"),
+                "video": await get_role_reasoning(session, "video"),
+            }
             for att, bot_row in due[:concurrency]:
                 skip_reason = self._skip_reason(att, vision, transcription)
                 if skip_reason:
@@ -152,7 +161,7 @@ class MediaLoop:
 
         # Phase 2 — understand: parallel downloads + model calls, no session.
         results = await asyncio.gather(
-            *(self._understand(w, vision, transcription, video) for w in work),
+            *(self._understand(w, vision, transcription, video, efforts) for w in work),
             return_exceptions=True,
         )
 
@@ -220,11 +229,13 @@ class MediaLoop:
         vision: ConnectedModel | None,
         transcription: ConnectedModel | None,
         video: ConnectedModel | None,
+        efforts: dict[str, str | None],
     ) -> Understood:
         if w.kind in IMAGE_KINDS:
             data = await self._load_bytes(w)
             description = await self.describer.describe_image(
-                vision, data, w.mime or _image_mime(w.kind), w.caption
+                vision, data, w.mime or _image_mime(w.kind), w.caption,
+                effort=efforts["vision"],
             )
             return Understood(description=description)
         if w.kind in AUDIO_KINDS:
@@ -234,7 +245,7 @@ class MediaLoop:
                 transcription, data, _AUDIO_FILENAMES.get(mime, "audio.ogg"), mime
             )
             return Understood(transcript=transcript)
-        return await self._understand_video(w, vision, transcription, video)
+        return await self._understand_video(w, vision, transcription, video, efforts)
 
     async def _understand_video(
         self,
@@ -242,6 +253,7 @@ class MediaLoop:
         vision: ConnectedModel | None,
         transcription: ConnectedModel | None,
         video: ConnectedModel | None,
+        efforts: dict[str, str | None],
     ) -> Understood:
         """video / video_note. Native path when a video-capable model is
         assigned; otherwise thumbnail + ffmpeg-sampled frames + audio
@@ -259,7 +271,7 @@ class MediaLoop:
 
         if video is not None and data:
             out.description = await self.describer.describe_video_native(
-                video, data, mime, w.caption
+                video, data, mime, w.caption, effort=efforts["video"]
             )
         elif vision is not None:
             frames: list[bytes] = []
@@ -273,7 +285,7 @@ class MediaLoop:
                 )
             if frames:
                 out.description = await self.describer.describe_frames(
-                    vision, frames, w.caption, out.transcript
+                    vision, frames, w.caption, out.transcript, effort=efforts["vision"]
                 )
                 if not data:
                     out.description = (
