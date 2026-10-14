@@ -35,6 +35,13 @@ export interface MessageAttachment {
   transcript: string | null
   error: string | null
   duration_s: number | null
+  file_name: string | null
+}
+
+// A poll or structured content (location, checklist…), rendered server-side.
+export interface MessageContent {
+  kind: string
+  summary: string
 }
 
 export interface Message {
@@ -46,6 +53,7 @@ export interface Message {
   source: string
   reply_to: { sender_name: string; text: string } | null
   attachment: MessageAttachment | null
+  content: MessageContent | null
 }
 
 export interface SearchHit {

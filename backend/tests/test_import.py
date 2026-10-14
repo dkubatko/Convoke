@@ -259,7 +259,8 @@ def test_parse_export_message_media_only():
     )
     assert not_included.media.path is None
     doc = parse_export_message(export_media_msg(4, file="files/report.pdf", mime="application/pdf"))
-    assert doc is None  # non-image document with no text → still dropped
+    # A generic file is recorded by name, its bytes never kept.
+    assert doc.media.kind == "file" and doc.media.path is None
 
 
 async def test_zip_import_creates_pending_attachments(db_sessionmaker, tmp_path, monkeypatch):

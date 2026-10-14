@@ -17,16 +17,36 @@ from aiogram.types import (
     ChatMemberUpdated,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    PollAnswer,
     Update,
 )
 from aiogram.types import Message as TgMessage
+from aiogram.types import Poll as TgPoll
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.media.render import message_body
 from app.members import member_display_name, upsert_member
 from app.memory.chunker import reply_quote
-from app.models import AgentRun, AuthNonce, Bot, Chat, ChatThread, Message
+from app.memory.store import mark_chunks_stale
+from app.models import (
+    AgentRun,
+    AuthNonce,
+    Bot,
+    Chat,
+    ChatThread,
+    ChunkState,
+    Message,
+    MessageAttachment,
+    Poll,
+    PollVote,
+)
+from app.telegram.content import (
+    apply_poll_snapshot,
+    checklist_tasks,
+    extract_content,
+    poll_from_tg,
+)
 from app.telegram.media import extract_attachment
 from app.telegram.sender import send_and_persist
 
@@ -60,6 +80,10 @@ async def handle_update(session: AsyncSession, bot: AiogramBot, bot_row: Bot, up
         await handle_edited_message(session, bot_row, update.edited_message)
     elif update.message is not None:
         await handle_message(session, bot_row, update.message)
+    elif update.poll is not None:
+        await handle_poll(session, update.poll)
+    elif update.poll_answer is not None:
+        await handle_poll_answer(session, update.poll_answer)
 
 
 async def _handle_migration(session: AsyncSession, bot_row: Bot, msg: TgMessage) -> None:
@@ -219,10 +243,15 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
     # Forum-topic service events carry the topic name — the only channel the
     # Bot API exposes it through. Capture before the no-content drop below.
     await _capture_thread_title(session, chat, msg)
+    # Likewise service events that change an earlier message's content
+    # (poll options added/removed, checklist tasks ticked/added).
+    await _apply_content_events(session, chat, msg)
 
     text = msg.text or msg.caption or ""
     attachment = extract_attachment(msg)
-    if not text and attachment is None:
+    content = extract_content(msg)
+    if not text and attachment is None and content is None and msg.poll is None:
+        _log_dropped(chat, msg)
         return
 
     existing = (
@@ -244,17 +273,16 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
         sender_id=msg.from_user.id if msg.from_user else None,
         sender_name=msg.from_user.full_name if msg.from_user else "",
         text=text,
+        content=content,
         sent_at=msg.date.astimezone(timezone.utc),
         source="live",
     )
-    if attachment is not None:
-        attachment.chat_id = chat.id
-        attachment.tg_message_id = msg.message_id
     # Assign even when None: _ensure_reply_target's SELECT autoflushes this
-    # pending row, and message_body reads .attachment right after — an
+    # pending row, and message_body reads .attachment/.poll right after — an
     # uninitialized selectin relationship would lazy-load, illegal in async.
-    message.attachment = attachment  # cascades on session.add(message)
+    _attach_media(message, chat, msg, bot_row, attachment)  # cascades on session.add
     session.add(message)
+    await _refresh_memory_if_late(session, chat.id, msg.message_id)
 
     if msg.from_user is not None:
         # Keep the member identity current: latest name wins, and the @handle
@@ -345,7 +373,8 @@ async def _ensure_reply_target(
         return row
     text = target.text or target.caption or ""
     attachment = extract_attachment(target)
-    if not text and attachment is None:
+    content = extract_content(target)
+    if not text and attachment is None and content is None and target.poll is None:
         return None  # service messages (topic created, pins…) aren't content
     row = Message(
         chat_id=chat.id,
@@ -357,18 +386,169 @@ async def _ensure_reply_target(
         sender_id=target.from_user.id if target.from_user else None,
         sender_name=target.from_user.full_name if target.from_user else "",
         text=text,
+        content=content,
         sent_at=target.date.astimezone(timezone.utc),
         source="live",
     )
+    # Always assign (even None): message_body reads .attachment/.poll on this
+    # still-pending row, and an uninitialized selectin relationship would
+    # lazy-load — illegal in async context.
+    _attach_media(row, chat, target, None, attachment)
+    session.add(row)
+    await _refresh_memory_if_late(session, chat.id, target.message_id)
+    return row
+
+
+def _attach_media(
+    row: Message,
+    chat: Chat,
+    msg: TgMessage,
+    bot_row: Bot | None,
+    attachment: MessageAttachment | None,
+) -> None:
+    """Hang the message's attachment and poll (each possibly None) off a new
+    row. bot_row None: the sender is checked against the chat's bot instead."""
     if attachment is not None:
         attachment.chat_id = chat.id
-        attachment.tg_message_id = target.message_id
-    # Always assign (even None): message_body reads .attachment on this still-
-    # pending row, and an uninitialized selectin relationship would lazy-load —
-    # illegal in async context.
+        attachment.tg_message_id = msg.message_id
     row.attachment = attachment
-    session.add(row)
-    return row
+    poll = None
+    if msg.poll is not None:
+        bot_tg_id = bot_row.tg_bot_id if bot_row is not None else None
+        sender = msg.from_user
+        poll = poll_from_tg(
+            msg.poll,
+            sent_by_bot=sender is not None
+            and sender.is_bot
+            and (bot_tg_id is None or sender.id == bot_tg_id),
+            sent_at=msg.date.astimezone(timezone.utc),
+        )
+        poll.chat_id = chat.id
+        poll.tg_message_id = msg.message_id
+    row.poll = poll
+
+
+async def _refresh_memory_if_late(session: AsyncSession, chat_id: int, tg_message_id: int) -> None:
+    """A message stored after the chunker already passed its id (a reply
+    target seen late, a backfilled update) lands inside an existing chunk's
+    range; mark that chunk stale so its re-render picks the message up."""
+    state = await session.get(ChunkState, chat_id)
+    if state is not None and state.last_tg_message_id >= tg_message_id:
+        await mark_chunks_stale(session, chat_id, tg_message_id)
+
+
+def _log_dropped(chat: Chat, msg: TgMessage) -> None:
+    """Nothing storable: service events (joins, pins…) — or a content type
+    Convoke doesn't know yet, which must show in the logs, not vanish."""
+    fields = sorted(
+        msg.model_fields_set
+        - {"message_id", "date", "chat", "from_user", "message_thread_id", "is_topic_message",
+           "reply_to_message", "sender_chat", "entities", "has_protected_content",
+           "author_signature", "sender_tag", "sender_boost_count", "via_bot", "forward_origin"}
+    )
+    log.info("chat %s: message %s stored nothing (fields: %s)",
+             chat.id, msg.message_id, ", ".join(fields) or "none")
+
+
+async def _stored_message(session: AsyncSession, chat_id: int, tg_message_id: int) -> Message | None:
+    return (
+        await session.execute(
+            select(Message).where(Message.chat_id == chat_id, Message.tg_message_id == tg_message_id)
+        )
+    ).scalar_one_or_none()
+
+
+async def _apply_content_events(session: AsyncSession, chat: Chat, msg: TgMessage) -> None:
+    """Service messages that mutate an earlier message's poll or checklist.
+    The target is referenced by id; one Convoke never stored is skipped."""
+    actor = msg.from_user.full_name if msg.from_user else None
+    for event, add in ((msg.poll_option_added, True), (msg.poll_option_deleted, False)):
+        if event is None or event.poll_message is None:
+            continue
+        target = await _stored_message(session, chat.id, event.poll_message.message_id)
+        if target is None or target.poll is None:
+            continue
+        poll = target.poll
+        others = [o for o in poll.options if o["id"] != event.option_persistent_id]
+        if add:
+            known = poll.counts_at is not None
+            others.append(
+                {"id": event.option_persistent_id, "text": event.option_text,
+                 "votes": 0 if known else None}
+            )
+        poll.options = others  # reassign: JSON columns don't track in-place edits
+        await mark_chunks_stale(session, chat.id, target.tg_message_id)
+
+    done, added = msg.checklist_tasks_done, msg.checklist_tasks_added
+    for event in (done, added):
+        if event is None or event.checklist_message is None:
+            continue
+        target = await _stored_message(session, chat.id, event.checklist_message.message_id)
+        if target is None or not target.content or target.content.get("type") != "checklist":
+            continue
+        tasks = [dict(t) for t in target.content.get("tasks", [])]
+        if event is done:
+            on = set(done.marked_as_done_task_ids or [])
+            off = set(done.marked_as_not_done_task_ids or [])
+            for t in tasks:
+                if t["id"] in on:
+                    t["done"], t["done_by"] = True, actor
+                elif t["id"] in off:
+                    t["done"], t["done_by"] = False, None
+        else:
+            have = {t["id"] for t in tasks}
+            tasks += [t for t in checklist_tasks(added.tasks) if t["id"] not in have]
+        target.content = {**target.content, "tasks": tasks}
+        await mark_chunks_stale(session, chat.id, target.tg_message_id)
+
+
+async def handle_poll(session: AsyncSession, tg_poll: TgPoll) -> None:
+    """A full poll snapshot: Telegram sends these for the bot's own polls on
+    every vote, and for any poll when it's stopped. No chat or message in the
+    update — the stored poll id is the only link."""
+    rows = (
+        await session.execute(select(Poll).where(Poll.tg_poll_id == tg_poll.id))
+    ).scalars().all()
+    if not rows:
+        log.info("poll update for unknown poll %s", tg_poll.id)
+        return
+    now = _utcnow()
+    for row in rows:
+        if apply_poll_snapshot(row, tg_poll, now):
+            await mark_chunks_stale(session, row.chat_id, row.tg_message_id)
+
+
+async def handle_poll_answer(session: AsyncSession, answer: PollAnswer) -> None:
+    """One voter's current choice in a non-anonymous poll the bot sent. Empty
+    option_ids is a retracted vote."""
+    rows = (
+        await session.execute(select(Poll).where(Poll.tg_poll_id == answer.poll_id))
+    ).scalars().all()
+    if not rows:
+        log.info("poll answer for unknown poll %s", answer.poll_id)
+        return
+    if answer.user is not None:
+        voter_id, voter_name = answer.user.id, answer.user.full_name
+    elif answer.voter_chat is not None:
+        voter_id, voter_name = answer.voter_chat.id, answer.voter_chat.title or ""
+    else:
+        return
+    for row in rows:
+        ids = list(answer.option_persistent_ids or [])
+        if not ids and answer.option_ids:
+            # Pre-persistent-id payload: map positions onto the stored options.
+            ids = [row.options[i]["id"] for i in answer.option_ids if i < len(row.options)]
+        vote = await session.get(PollVote, (row.id, voter_id))
+        if not ids:
+            if vote is not None:
+                await session.delete(vote)
+            continue
+        if vote is None:
+            vote = PollVote(poll_id=row.id, voter_id=voter_id)
+            session.add(vote)
+        vote.voter_name = voter_name
+        vote.option_ids = ids
+        vote.voted_at = _utcnow()
 
 
 def _agent_trigger(msg: TgMessage, bot_row: Bot, text: str) -> str | None:
@@ -399,20 +579,26 @@ async def handle_edited_message(session: AsyncSession, bot_row: Bot, msg: TgMess
     if chat is None or chat.status != "authorized":
         return
     text = msg.text or msg.caption or ""
-    if not text and extract_attachment(msg) is None:
+    content = extract_content(msg)
+    if not text and extract_attachment(msg) is None and content is None and msg.poll is None:
         return
-    existing = (
-        await session.execute(
-            select(Message).where(
-                Message.chat_id == chat.id, Message.tg_message_id == msg.message_id
-            )
-        )
-    ).scalar_one_or_none()
+    existing = await _stored_message(session, chat.id, msg.message_id)
     if existing is None:
         # Edit of a message we never saw (sent before authorization) — store it now.
         await handle_message(session, bot_row, msg)
         return
-    from app.memory.store import mark_chunks_stale
+    if content is not None:
+        moved = (
+            content.get("type") == "location"
+            and existing.content is not None
+            and existing.content.get("live_period")
+        )
+        existing.content = content
+        if moved:
+            # A live location reporting its new position — Telegram sends
+            # these as edits, often for hours. The transcript reads the latest
+            # point; memory keeps the original (no re-embed per move).
+            return
 
     existing.text = text
     await mark_chunks_stale(session, chat.id, msg.message_id)

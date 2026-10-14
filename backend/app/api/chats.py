@@ -12,7 +12,7 @@ from app.core.db import get_session, get_sessionmaker
 from app.core.tasks import spawn
 from app.core.security import require_operator
 from app.ingest.history_import import delete_import, run_import
-from app.media.render import message_body
+from app.media.render import content_annotation, message_body, poll_annotation
 from app.members import (
     load_member_names,
     refresh_chat_memory_names,
@@ -49,8 +49,16 @@ class AttachmentOut(BaseModel):
     transcript: str | None
     error: str | None
     duration_s: int | None
+    file_name: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class ContentOut(BaseModel):
+    """A poll or structured content (location, checklist…), pre-rendered."""
+
+    kind: str
+    summary: str
 
 
 class MessageOut(BaseModel):
@@ -63,6 +71,7 @@ class MessageOut(BaseModel):
     # The quoted original when this message is a Telegram reply.
     reply_to: ReplyPreview | None = None
     attachment: AttachmentOut | None = None
+    content: ContentOut | None = None
 
     model_config = {"from_attributes": True}
 
@@ -398,9 +407,21 @@ async def recent_messages(
             id=m.id, tg_message_id=m.tg_message_id, sender_name=display(m),
             text=m.text, sent_at=m.sent_at, source=m.source, reply_to=preview(m),
             attachment=AttachmentOut.model_validate(m.attachment) if m.attachment else None,
+            content=_content_out(m),
         )
         for m in rows
     ]  # newest first
+
+
+def _content_out(m: Message) -> ContentOut | None:
+    if m.poll is not None:
+        return ContentOut(kind="poll", summary=poll_annotation(m.poll)[1:-1])
+    if m.content:
+        return ContentOut(
+            kind=str(m.content.get("type", "content")).replace("_", " "),
+            summary=content_annotation(m.content)[1:-1],
+        )
+    return None
 
 
 class MediaStatusOut(BaseModel):

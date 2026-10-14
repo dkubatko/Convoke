@@ -131,6 +131,7 @@ async def send_media_and_persist(
         # still-pending row, and an uninitialized selectin relationship would
         # lazy-load — illegal in async context.
         row.attachment = att
+        row.poll = None
         session.add(row)
     return sent_list
 

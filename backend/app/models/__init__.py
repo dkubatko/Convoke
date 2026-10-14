@@ -13,6 +13,8 @@ from app.models.telegram import (
     MemoryGap,
     Message,
     MessageAttachment,
+    Poll,
+    PollVote,
 )
 from app.models.workflows import (
     ChatEvalState,
@@ -48,6 +50,8 @@ __all__ = [
     "MessageAttachment",
     "ModelRoleAssignment",
     "Note",
+    "Poll",
+    "PollVote",
     "ChatSetting",
     "PendingFire",
     "RuntimeSetting",

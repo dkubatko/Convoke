@@ -10,6 +10,9 @@ from aiogram.types import Message as TgMessage
 
 from app.models import MessageAttachment
 
+# Skip reason for "file" attachments: not an error, a reading mode.
+FILE_ON_DEMAND = "read on demand"
+
 
 @dataclass
 class OutgoingMedia:
@@ -133,4 +136,19 @@ def extract_attachment(msg: TgMessage) -> MessageAttachment | None:
             size_bytes=d.file_size,
             thumb_file_id=d.thumbnail.file_id if d.thumbnail else None,
         )
-    return None  # non-image documents, polls, locations… stay out of scope
+    if msg.document:
+        # Any other file: never described by the pipeline (no model reads a
+        # zip or a spreadsheet into a one-line index entry) — the agent reads
+        # supported formats on demand with inspect_media.
+        d = msg.document
+        return MessageAttachment(
+            kind="file",
+            file_id=d.file_id,
+            file_unique_id=d.file_unique_id,
+            mime=d.mime_type,
+            size_bytes=d.file_size,
+            file_name=d.file_name,
+            status="skipped",
+            error=FILE_ON_DEMAND,
+        )
+    return None  # polls, locations… are content, not media (app.telegram.content)

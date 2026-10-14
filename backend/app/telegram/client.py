@@ -2,7 +2,11 @@ from aiogram import Bot as AiogramBot
 from aiogram.client.default import DefaultBotProperties
 
 # Updates Convoke consumes. Anything else is discarded server-side by Telegram.
-ALLOWED_UPDATES = ["message", "edited_message", "my_chat_member", "callback_query"]
+# poll / poll_answer: vote snapshots and per-user votes for the bot's own
+# polls, and the final state of any poll when it's stopped.
+ALLOWED_UPDATES = [
+    "message", "edited_message", "my_chat_member", "callback_query", "poll", "poll_answer",
+]
 
 
 def make_bot(token: str) -> AiogramBot:

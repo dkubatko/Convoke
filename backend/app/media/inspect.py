@@ -10,9 +10,16 @@ transcript is already the full content.
 Hard limits inherited from the pipeline: import-sourced media has no bytes
 (describe-then-discard, file_id=NULL) and the Bot API caps downloads at
 ~20MB (videos degrade to thumbnail + stored transcript).
+
+Generic files ("file" kind) are never described; inspection returns their
+text (plain-text formats and PDFs) for the agent to read itself — no model
+call, and the question is answered by the agent from the text.
 """
 
+import asyncio
+import io
 import logging
+from pathlib import PurePosixPath
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +33,53 @@ from app.models import Bot, Chat, Message, MessageAttachment
 from app.telegram.client import make_bot
 
 log = logging.getLogger("convoke.media")
+
+# Enough for a long document's substance without flooding the run's context.
+MAX_FILE_CHARS = 30_000
+_TEXT_MIMES = (
+    "application/json", "application/xml", "application/x-yaml", "application/yaml",
+    "application/javascript", "application/x-sh", "application/sql", "application/csv",
+)
+_TEXT_SUFFIXES = {
+    ".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".log", ".ini",
+    ".toml", ".html", ".htm", ".py", ".js", ".ts", ".sql", ".sh", ".ics", ".vcf", ".srt",
+}
+
+
+def file_text(data: bytes, mime: str | None, name: str | None) -> str | None:
+    """A file's text, or None for formats that can't be read as text."""
+    mime = (mime or "").lower()
+    suffix = PurePosixPath(name or "").suffix.lower()
+    if mime == "application/pdf" or suffix == ".pdf":
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(data))
+        pages = [(p.extract_text() or "").strip() for p in reader.pages]
+        return "\n\n".join(f"--- page {i} ---\n{t}" for i, t in enumerate(pages, 1) if t)
+    if mime.startswith("text/") or mime in _TEXT_MIMES or suffix in _TEXT_SUFFIXES:
+        return data.decode("utf-8", errors="replace")
+    return None
+
+
+async def _inspect_file(att: MessageAttachment, bot, max_bytes: int) -> str:
+    name = att.file_name or "unnamed file"
+    if att.file_id is None:
+        return f"{name} came from a history import — the file itself isn't available."
+    if (att.size_bytes or 0) > max_bytes:
+        return f"{name} is too large to download."
+    buf = await bot.download(att.file_id)
+    data = buf.read() if buf is not None else b""
+    text = await asyncio.to_thread(file_text, data, att.mime, att.file_name)
+    if text is None:
+        return f"{name} ({att.mime or 'unknown type'}) can't be read as text — only text-based files and PDFs can."
+    text = text.strip()
+    if not text:
+        return f"{name} has no extractable text (a scanned PDF or an empty file)."
+    note = ""
+    if len(text) > MAX_FILE_CHARS:
+        note = f"\n\n[truncated: showing the first {MAX_FILE_CHARS} of {len(text)} characters]"
+        text = text[:MAX_FILE_CHARS]
+    return f"Contents of {name}:\n\n{text}{note}"
 
 
 async def inspect_attachment(
@@ -58,6 +112,21 @@ async def inspect_attachment(
     if att.kind in AUDIO_KINDS:
         # The transcript IS the content — no model call needed.
         return stored_text or "Not transcribed yet (or transcription failed)."
+
+    if att.kind == "file":
+        bot_row = (
+            await session.execute(
+                select(Bot).join(Chat, Chat.bot_id == Bot.id).where(Chat.id == chat_id)
+            )
+        ).scalar_one()
+        bot = make_bot(decrypt(bot_row.token_encrypted))
+        try:
+            return await _inspect_file(att, bot, get_settings().media_max_download_bytes)
+        except Exception as e:  # noqa: BLE001 — tool output, never an exception
+            log.warning("inspect_media failed for file #%d: %s", tg_message_id, e)
+            return f"Reading the file failed ({type(e).__name__})."
+        finally:
+            await bot.session.close()
 
     if att.file_id is None:
         return (

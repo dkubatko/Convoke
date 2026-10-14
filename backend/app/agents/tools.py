@@ -11,10 +11,10 @@ from app.agents.deps import AgentDeps
 from app.agents.models import ProviderNotConfigured, get_provider
 from app.core.config import get_settings, get_tzinfo
 from app.media import imagegen
-from app.members import refresh_chat_memory_names, set_override_name
+from app.members import load_member_names, refresh_chat_memory_names, set_override_name
 from app.memory.chunker import render_for_chat, render_ts
 from app.memory.store import search_chat_history as store_search
-from app.models import ChatMember, IntentEpisode, Message, Note
+from app.models import ChatMember, IntentEpisode, Message, Note, Poll
 from app.telegram.media import OutgoingMedia
 from app.threads import unmonitored_threads
 
@@ -165,9 +165,10 @@ async def inspect_media(ctx: RunContext[AgentDeps], message_id: int, question: s
     stored description is a short index entry and often lacks the detail
     asked about. Photos/videos are re-read by the vision model with your
     question (videos as sampled frames + audio transcript); voice returns
-    its full transcript. Costs a model call — use when the stored
-    description in the transcript doesn't answer. Unavailable for media from
-    imported history (source files were discarded after description)."""
+    its full transcript; a [file …] returns its text (text-based formats and
+    PDFs) for you to read. Costs a model call for photos/videos — use when
+    the stored description in the transcript doesn't answer. Unavailable for
+    media from imported history (source files were discarded)."""
     from app.media.inspect import inspect_attachment
 
     async with ctx.deps.sessionmaker() as session:
@@ -184,6 +185,76 @@ async def inspect_media(ctx: RunContext[AgentDeps], message_id: int, question: s
         ):
             return f"#{message_id}: not in Convoke's stored history for this chat."
         return await inspect_attachment(session, ctx.deps.chat_id, message_id, question)
+
+
+async def get_poll(ctx: RunContext[AgentDeps], message_id: int) -> str:
+    """Read a poll's current state by the #id of its message: options, vote
+    counts and — for non-anonymous polls you sent — who voted for what, plus
+    whether it's closed. The transcript's [poll …] line shows only the
+    question and options; call this whenever votes or results matter."""
+    async with ctx.deps.sessionmaker() as session:
+        msg = (
+            await session.execute(
+                select(Message).where(
+                    Message.chat_id == ctx.deps.chat_id,
+                    Message.tg_message_id == message_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if msg is None or (msg.thread_id or 0) in await unmonitored_threads(
+            session, ctx.deps.chat_id
+        ):
+            return f"#{message_id}: not in Convoke's stored history for this chat."
+        if msg.poll is None:
+            return f"#{message_id} is not a poll."
+        names = await load_member_names(session, ctx.deps.chat_id)
+        author = (
+            names.get(msg.sender_id) if msg.sender_id is not None else None
+        ) or msg.sender_name or "unknown"
+        return format_poll(msg.poll, author, msg.source, names)
+
+
+def format_poll(p: Poll, author: str, source: str, names: dict[int, str]) -> str:
+    by = "sent by you" if p.sent_by_bot else f"by {author}"
+    lines = [f"Poll #{p.tg_message_id} ({by}): «{p.question}»"]
+    if p.description:
+        lines.append(p.description)
+    traits = ["closed" if p.closed else "open"]
+    if p.type == "quiz":
+        traits.append("quiz")
+    if p.multiple_answers:
+        traits.append("multiple answers")
+    if p.anonymous is not None:
+        traits.append("anonymous" if p.anonymous else "public votes")
+    if not p.closed and p.close_date is not None:
+        traits.append(f"closes {render_ts(p.close_date)}")
+    lines.append(" · ".join(traits))
+
+    voters: dict[str, list[str]] = {}
+    for v in p.votes:
+        name = names.get(v.voter_id) or v.voter_name or str(v.voter_id)
+        for oid in v.option_ids:
+            voters.setdefault(oid, []).append(name)
+    for o in p.options:
+        line = f"• {o['text']}"
+        if o.get("votes") is not None:
+            line += f" — {o['votes']}"
+            if voters.get(o["id"]):
+                line += ": " + ", ".join(voters[o["id"]])
+        lines.append(line)
+
+    if p.counts_at is None:
+        lines.append(
+            "Votes: unknown — Telegram doesn't report votes on members' polls to "
+            "bots while they're open; the final tally arrives if the poll is closed."
+        )
+    else:
+        when = "at the history export" if source == "import" else render_ts(p.counts_at)
+        total = f"{p.total_voters} voter{'s' if p.total_voters != 1 else ''}"
+        lines.append(f"{total} (as of {when}).")
+        if p.sent_by_bot and p.anonymous is False and not p.votes and p.total_voters:
+            lines.append("Individual votes cast before Convoke tracked them aren't known.")
+    return "\n".join(lines)
 
 
 async def attach_media(ctx: RunContext[AgentDeps], message_id: int) -> str:
@@ -716,6 +787,7 @@ AGENT_TOOLS = [
     get_conversation_context,
     get_messages_by_date,
     inspect_media,
+    get_poll,
     attach_media,
     attach_media_url,
     generate_image,

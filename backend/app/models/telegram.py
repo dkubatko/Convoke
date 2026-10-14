@@ -23,6 +23,13 @@ CHAT_STATUSES = ("pending_auth", "authorized", "left")
 MESSAGE_SOURCES = ("live", "import", "self")
 ATTACHMENT_KINDS = (
     "photo", "video", "animation", "voice", "video_note", "sticker", "image_document", "audio",
+    "file",
+)
+# Messages.content["type"]: Telegram's non-file content, stored structured and
+# rendered at read time (polls have their own table — see Poll).
+CONTENT_TYPES = (
+    "location", "venue", "contact", "dice", "checklist", "story", "game", "invoice",
+    "giveaway", "paid_media",
 )
 ATTACHMENT_STATUSES = ("pending", "described", "failed", "skipped")
 
@@ -190,12 +197,22 @@ class Message(Base):
     import_job_id: Mapped[int | None] = mapped_column(
         ForeignKey("import_jobs.id", ondelete="SET NULL"), nullable=True
     )
+    # Structured non-file content ({"type": CONTENT_TYPES, ...}): locations,
+    # contacts, checklists… Kept as data, not baked into text, so mutable
+    # content (live locations, checklist ticks) updates in place and every
+    # renderer reads the current state through message_body().
+    content: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
     # Loaded eagerly (selectin) so every renderer can annotate media without
     # signature changes; the vast majority of messages have no attachment.
     attachment: Mapped["MessageAttachment | None"] = relationship(
+        lazy="selectin", cascade="all, delete-orphan", passive_deletes=True
+    )
+    # Eager like attachment; message_body treats it as None when unloaded (a
+    # row built in code without one), so it never lazy-loads.
+    poll: Mapped["Poll | None"] = relationship(
         lazy="selectin", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -236,6 +253,7 @@ class MessageAttachment(Base):
     thumb_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     media_group_id: Mapped[str | None] = mapped_column(Text, nullable=True)  # album id, opaque
     sticker_emoji: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_name: Mapped[str | None] = mapped_column(Text, nullable=True)  # "file" kind
     description: Mapped[str | None] = mapped_column(Text, nullable=True)  # vision output
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)  # transcription output
     status: Mapped[str] = mapped_column(Text, default="pending")  # ATTACHMENT_STATUSES
@@ -246,6 +264,64 @@ class MessageAttachment(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class Poll(Base):
+    """A native Telegram poll carried by a message.
+
+    Votes reach bots only for polls the bot itself sent (`poll` snapshots and,
+    when not anonymous, per-user `poll_answer`s), plus a final `poll` snapshot
+    when a poll is stopped. For members' polls Telegram never reports votes,
+    so counts stay unknown (counts_at NULL) rather than a misleading zero.
+    Updates are keyed by tg_poll_id alone — not unique, since a forwarded poll
+    is the same poll in every chat it lands in."""
+
+    __tablename__ = "polls"
+    __table_args__ = (Index("ix_polls_tg_poll_id", "tg_poll_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), unique=True
+    )
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    tg_message_id: Mapped[int] = mapped_column(BigInteger)
+    tg_poll_id: Mapped[str | None] = mapped_column(Text, nullable=True)  # NULL: imported
+    question: Mapped[str] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # [{"id": persistent option id, "text": str, "votes": int | None}]
+    options: Mapped[list] = mapped_column(JSONVariant)
+    type: Mapped[str] = mapped_column(Text, default="regular")  # regular | quiz
+    # NULL when the source doesn't say (history exports omit these flags).
+    multiple_answers: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    anonymous: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    sent_by_bot: Mapped[bool] = mapped_column(Boolean, default=False)
+    closed: Mapped[bool] = mapped_column(Boolean, default=False)
+    close_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    total_voters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # When the vote counts were last known to be true; NULL = never reported.
+    counts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    votes: Mapped[list["PollVote"]] = relationship(
+        lazy="selectin", cascade="all, delete-orphan", passive_deletes=True,
+        order_by="PollVote.voted_at",
+    )
+
+
+class PollVote(Base):
+    """One voter's current choice in a non-anonymous poll the bot sent. A
+    changed vote replaces the row; a retracted vote deletes it."""
+
+    __tablename__ = "poll_votes"
+
+    poll_id: Mapped[int] = mapped_column(
+        ForeignKey("polls.id", ondelete="CASCADE"), primary_key=True
+    )
+    voter_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # user or chat id
+    voter_name: Mapped[str] = mapped_column(Text, default="")
+    option_ids: Mapped[list] = mapped_column(JSONVariant)  # persistent option ids
+    voted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class MemoryGap(Base):

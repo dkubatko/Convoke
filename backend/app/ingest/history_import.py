@@ -32,7 +32,9 @@ from app.models import (
     IntentCursor,
     Message,
     MessageAttachment,
+    Poll,
 )
+from app.telegram.media import FILE_ON_DEMAND
 
 log = logging.getLogger("convoke.import")
 
@@ -69,6 +71,7 @@ class ExportMedia:
     width: int | None = None
     height: int | None = None
     sticker_emoji: str | None = None
+    file_name: str | None = None
 
 
 @dataclass
@@ -81,6 +84,8 @@ class ExportMessage:
     thread_id: int | None = None
     reply_to_tg_message_id: int | None = None
     media: ExportMedia | None = None
+    content: dict | None = None  # Message.content shape
+    poll: dict | None = None  # Poll column values
     # from_id was "userN" — channel/anonymous-admin posts ("channelN") live in
     # a different id space and must never become chat_members rows.
     sender_is_user: bool = False
@@ -141,19 +146,105 @@ def parse_export_media(item: dict) -> ExportMedia | None:
         mime = item.get("mime_type")
         kind = _EXPORT_MEDIA_KINDS.get(media_type)
         if kind is None:
-            if not (mime or "").startswith("image/"):
-                return None  # generic documents stay out of scope
-            kind = "image_document"
+            kind = "image_document" if (mime or "").startswith("image/") else "file"
         return ExportMedia(
             kind=kind,
-            path=_export_file_path(item.get("file")),
+            # Generic files are recorded by name only — never kept (nothing
+            # describes them, and imported bytes exist only to be described).
+            path=None if kind == "file" else _export_file_path(item.get("file")),
             mime=mime,
             duration_s=duration,
             width=item.get("width"),
             height=item.get("height"),
             sticker_emoji=item.get("sticker_emoji"),
+            file_name=item.get("file_name") if kind == "file" else None,
         )
     return None
+
+
+def _coord(raw) -> float | None:
+    try:
+        return float(raw)  # ijson yields Decimal, which JSON columns can't store
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_export_content(item: dict) -> dict | None:
+    """Telegram Desktop's export fields for non-file content → Message.content.
+    Dice aren't exported; checklist completions arrive as separate service
+    events, so imported tasks carry done=None (unknown), never a false ☐."""
+    loc = item.get("location_information")
+    lat = _coord(loc.get("latitude")) if isinstance(loc, dict) else None
+    lon = _coord(loc.get("longitude")) if isinstance(loc, dict) else None
+    if "place_name" in item:
+        content = {"type": "venue", "title": item.get("place_name"), "address": item.get("address")}
+        if lat is not None and lon is not None:
+            content |= {"latitude": lat, "longitude": lon}
+        return content
+    if lat is not None and lon is not None:
+        content = {"type": "location", "latitude": lat, "longitude": lon}
+        if item.get("live_location_period_seconds"):
+            content["live_period"] = int(item["live_location_period_seconds"])
+        return content
+    contact = item.get("contact_information")
+    if isinstance(contact, dict):
+        return {
+            "type": "contact",
+            "first_name": contact.get("first_name") or "",
+            "last_name": contact.get("last_name") or None,
+            "phone_number": contact.get("phone_number") or None,
+            "user_id": None,
+        }
+    todo = item.get("todo_list")
+    if isinstance(todo, dict):
+        return {
+            "type": "checklist",
+            "title": flatten_text(todo.get("title", "")),
+            "tasks": [
+                {"id": _int(t.get("id")), "text": flatten_text(t.get("text", "")),
+                 "done": None, "done_by": None}
+                for t in todo.get("answers") or []
+                if isinstance(t, dict)
+            ],
+        }
+    if "game_title" in item:
+        return {"type": "game", "title": item.get("game_title")}
+    invoice = item.get("invoice_information")
+    if isinstance(invoice, dict):
+        return {"type": "invoice", "title": invoice.get("title")}
+    if "giveaway_information" in item:
+        return {"type": "giveaway", "prize": None, "winners": None}
+    return None
+
+
+def parse_export_poll(item: dict) -> dict | None:
+    """An exported poll → Poll column values. Counts are the exporter's view
+    at export time; a client that never voted sees only the total, so all-zero
+    options under a non-zero total mean "unknown", not zero."""
+    raw = item.get("poll")
+    if not isinstance(raw, dict):
+        return None
+    answers = [a for a in raw.get("answers") or [] if isinstance(a, dict)]
+    total = _int(raw.get("total_voters"))
+    votes = [_int(a.get("voters")) for a in answers]
+    known = not (total and not any(votes))
+    return {
+        "question": flatten_text(raw.get("question", "")),
+        "options": [
+            {"id": str(i), "text": flatten_text(a.get("text", "")),
+             "votes": v if known else None}
+            for i, (a, v) in enumerate(zip(answers, votes))
+        ],
+        "closed": bool(raw.get("closed")),
+        "total_voters": total,
+    }
+
+
+def _int(raw) -> int | None:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_export_message(item: dict) -> ExportMessage | None:
@@ -161,7 +252,9 @@ def parse_export_message(item: dict) -> ExportMessage | None:
         return None
     text = flatten_text(item.get("text", ""))
     media = parse_export_media(item)
-    if not text.strip() and media is None:
+    content = parse_export_content(item)
+    poll = parse_export_poll(item)
+    if not text.strip() and media is None and content is None and poll is None:
         return None
     try:
         msg_id = int(item["id"])
@@ -184,6 +277,8 @@ def parse_export_message(item: dict) -> ExportMessage | None:
         sent_at=sent_at,
         reply_to_tg_message_id=int(reply_to) if isinstance(reply_to, int) else None,
         media=media,
+        content=content,
+        poll=poll,
     )
 
 
@@ -447,6 +542,9 @@ async def _run_import(
     async with sessionmaker() as session:
         job = await session.get(ImportJob, job_id)
         chat = await session.get(Chat, job.chat_id)
+        # Exported poll counts are "as of the export"; the upload is the
+        # closest moment we know of.
+        uploaded_at = job.created_at
         job.status = "validating"
         await session.commit()
 
@@ -539,10 +637,19 @@ async def _run_import(
                 sender_id=m.sender_id,
                 sender_name=m.sender_name,
                 text=m.text,
+                content=m.content,
                 sent_at=m.sent_at,
                 source="import",
                 import_job_id=job_id,
             )
+            if m.poll is not None:
+                row.poll = Poll(
+                    chat_id=chat.id,
+                    tg_message_id=m.tg_message_id,
+                    sent_by_bot=m.sender_id is not None and m.sender_id == bot_tg_id,
+                    counts_at=uploaded_at if m.poll["total_voters"] is not None else None,
+                    **m.poll,
+                )
             if m.media is not None:
                 row.attachment = _import_attachment(
                     m.media, chat.id, m.tg_message_id, job_id, media_root, referenced_files
@@ -653,7 +760,12 @@ def _import_attachment(
         width=media.width,
         height=media.height,
         sticker_emoji=media.sticker_emoji,
+        file_name=media.file_name,
     )
+    if media.kind == "file":
+        att.status = "skipped"
+        att.error = f"{FILE_ON_DEMAND} — not available for imported history"
+        return att
     file = (media_root / media.path).resolve() if media_root and media.path else None
     if file is not None and not file.is_relative_to(job_media_dir(job_id).resolve()):
         # The export JSON is untrusted: a "../job_N_media/…" or absolute path

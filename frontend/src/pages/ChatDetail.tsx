@@ -14,6 +14,7 @@ import {
   Member,
   Message,
   MessageAttachment,
+  MessageContent,
   Run,
   RunMedia,
   SearchHit,
@@ -358,8 +359,9 @@ function MemoryTab({ chatId }: { chatId: number }) {
                         </div>
                       )}
                       {m.attachment && <AttachmentLine att={m.attachment} />}
+                      {m.content && <ContentLine content={m.content} />}
                       {m.text && (
-                        <div className={m.reply_to || m.attachment ? 'clamp1' : 'clamp2'}>
+                        <div className={m.reply_to || m.attachment || m.content ? 'clamp1' : 'clamp2'}>
                           <HoverText text={m.text} max={180} />
                         </div>
                       )}
@@ -409,10 +411,14 @@ function MemoryTab({ chatId }: { chatId: number }) {
 function AttachmentLine({ att }: { att: MessageAttachment }) {
   const dur = att.duration_s ? ` ${Math.floor(att.duration_s / 60)}:${String(att.duration_s % 60).padStart(2, '0')}` : ''
   const label = `${att.kind.replace('_', ' ')}${dur}`
-  const tone =
-    att.status === 'described' ? 'accent' : att.status === 'failed' ? 'err' : att.status === 'skipped' ? 'warn' : 'idle'
-  const body =
-    att.status === 'described'
+  // Files are never described — skipped is their normal state, not a warning.
+  const isFile = att.kind === 'file'
+  const tone = isFile
+    ? 'idle'
+    : att.status === 'described' ? 'accent' : att.status === 'failed' ? 'err' : att.status === 'skipped' ? 'warn' : 'idle'
+  const body = isFile
+    ? att.file_name ?? 'unnamed file'
+    : att.status === 'described'
       ? [att.description, att.transcript && `“${att.transcript}”`].filter(Boolean).join(' — ')
       : att.status === 'pending'
         ? 'description pending…'
@@ -423,6 +429,18 @@ function AttachmentLine({ att }: { att: MessageAttachment }) {
     <div style={{ display: 'flex', alignItems: 'center', gap: 6, height: '1lh', minWidth: 0 }}>
       <span className={`pill pill--${tone}`} style={{ flex: 'none' }}>{label}</span>
       <span className="muted clamp1" style={{ fontSize: 12.5 }}>{body}</span>
+    </div>
+  )
+}
+
+function ContentLine({ content }: { content: MessageContent }) {
+  return (
+    /* Same single-line geometry as AttachmentLine. */
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, height: '1lh', minWidth: 0 }}>
+      <span className="pill pill--accent" style={{ flex: 'none' }}>{content.kind}</span>
+      <span className="muted clamp1" style={{ fontSize: 12.5 }}>
+        <HoverText text={content.summary} max={160} />
+      </span>
     </div>
   )
 }

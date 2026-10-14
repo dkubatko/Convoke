@@ -316,15 +316,16 @@ async def test_voice_message_captured(db_sessionmaker, bot_row):
         assert att.mime == "audio/ogg"
 
 
-async def test_non_image_document_still_dropped(db_sessionmaker, bot_row):
+async def test_non_image_document_is_a_file_read_on_demand(db_sessionmaker, bot_row):
     fake = FakeBot(member_status="administrator")
     await authorize(db_sessionmaker, fake, bot_row)
     doc = {"file_id": "doc-1", "file_unique_id": "u-doc-1", "mime_type": "application/pdf", "file_name": "x.pdf"}
     await run_update(db_sessionmaker, fake, bot_row, media_update(3, 20, document=doc))
 
     async with db_sessionmaker() as s:
-        rows = (await s.execute(select(Message).where(Message.source == "live"))).scalars().all()
-        assert rows == []
+        row = (await s.execute(select(Message).where(Message.source == "live"))).scalar_one()
+        # Never queued for description — inspect_media reads it when asked.
+        assert (row.attachment.kind, row.attachment.status) == ("file", "skipped")
 
 
 async def test_caption_edit_updates_text_keeps_attachment(db_sessionmaker, bot_row):
