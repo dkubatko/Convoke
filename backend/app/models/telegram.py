@@ -34,6 +34,8 @@ CONTENT_TYPES = (
 ATTACHMENT_STATUSES = ("pending", "described", "failed", "skipped")
 
 JSONVariant = JSON().with_variant(JSONB(), "postgresql")
+# For nullable JSON columns: None is SQL NULL, not a stored JSON 'null'.
+NullableJSON = JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")
 
 
 class Bot(Base):
@@ -201,7 +203,7 @@ class Message(Base):
     # contacts, checklists… Kept as data, not baked into text, so mutable
     # content (live locations, checklist ticks) updates in place and every
     # renderer reads the current state through message_body().
-    content: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
+    content: Mapped[dict | None] = mapped_column(NullableJSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

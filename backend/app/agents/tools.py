@@ -15,6 +15,7 @@ from app.members import load_member_names, refresh_chat_memory_names, set_overri
 from app.memory.chunker import render_for_chat, render_ts
 from app.memory.store import search_chat_history as store_search
 from app.models import ChatMember, IntentEpisode, Message, Note, Poll
+from app.telegram.actions import REACTION_EMOJI, OutgoingAction, normalize_emoji
 from app.telegram.media import OutgoingMedia
 from app.threads import unmonitored_threads
 
@@ -32,6 +33,11 @@ MAX_ATTACH_URL_LEN = 2048
 # Source formats the images/edits endpoint accepts; Telegram photos are JPEG.
 EDITABLE_MIMES = ("image/jpeg", "image/png", "image/webp")
 MAX_EDIT_SOURCES = 8
+# Polls, locations, reactions and poll closes queued by one run.
+MAX_RUN_ACTIONS = 5
+MAX_POLL_OPTIONS = 12  # Bot API limits
+MAX_POLL_QUESTION = 300
+MAX_POLL_OPTION = 100
 
 log = logging.getLogger("convoke.agent")
 
@@ -255,6 +261,133 @@ def format_poll(p: Poll, author: str, source: str, names: dict[int, str]) -> str
         if p.sent_by_bot and p.anonymous is False and not p.votes and p.total_voters:
             lines.append("Individual votes cast before Convoke tracked them aren't known.")
     return "\n".join(lines)
+
+
+def _queue(ctx: RunContext[AgentDeps], action: OutgoingAction) -> str | None:
+    """Queue an action, or explain why not."""
+    if len(ctx.deps.actions) >= MAX_RUN_ACTIONS:
+        return f"Action limit reached ({MAX_RUN_ACTIONS} per reply) — nothing added."
+    ctx.deps.actions.append(action)
+    return None
+
+
+async def _stored_in_chat(ctx: RunContext[AgentDeps], session, message_id: int) -> Message | None:
+    msg = (
+        await session.execute(
+            select(Message).where(
+                Message.chat_id == ctx.deps.chat_id, Message.tg_message_id == message_id
+            )
+        )
+    ).scalar_one_or_none()
+    if msg is None or (msg.thread_id or 0) in await unmonitored_threads(session, ctx.deps.chat_id):
+        return None
+    return msg
+
+
+async def send_poll(
+    ctx: RunContext[AgentDeps],
+    question: str,
+    options: list[str],
+    multiple_answers: bool = False,
+    anonymous: bool = False,
+    description: str | None = None,
+    close_at: datetime | None = None,
+) -> str:
+    """Post a native Telegram poll in this chat, right after your reply. Use
+    it when members need to pick or vote on something (dates, places,
+    options). Keep it non-anonymous unless asked otherwise: then you can see
+    who voted for what with get_poll — votes on polls members post themselves
+    are invisible to you. Up to 12 options; close_at (ISO datetime) closes it
+    automatically."""
+    question = question.strip()
+    options = [o.strip() for o in options if o and o.strip()]
+    if not question or len(question) > MAX_POLL_QUESTION:
+        return f"The question must be 1–{MAX_POLL_QUESTION} characters."
+    if not options or len(options) > MAX_POLL_OPTIONS:
+        return f"A poll needs 1–{MAX_POLL_OPTIONS} options."
+    if any(len(o) > MAX_POLL_OPTION for o in options):
+        return f"Each option must be at most {MAX_POLL_OPTION} characters."
+    if len(set(options)) != len(options):
+        return "Options must be distinct."
+    close_date = None
+    if close_at is not None:
+        if close_at.tzinfo is None:
+            close_at = close_at.replace(tzinfo=get_tzinfo())
+        delta = (close_at - datetime.now(timezone.utc)).total_seconds()
+        if not 5 <= delta <= 2_628_000:  # Telegram: 5s to ~30 days ahead
+            return "close_at must be between a few seconds and 30 days from now."
+        close_date = int(close_at.timestamp())
+    err = _queue(ctx, OutgoingAction("poll", {
+        "question": question, "options": options, "multiple_answers": multiple_answers,
+        "anonymous": anonymous, "description": (description or "").strip() or None,
+        "close_date": close_date,
+    }))
+    return err or "The poll will be posted right after your reply."
+
+
+async def close_poll(ctx: RunContext[AgentDeps], message_id: int) -> str:
+    """Close one of your own polls (by its #id) so no more votes are accepted;
+    the final results become fixed. Only polls you sent can be closed."""
+    async with ctx.deps.sessionmaker() as session:
+        msg = await _stored_in_chat(ctx, session, message_id)
+    if msg is None:
+        return f"#{message_id}: not in Convoke's stored history for this chat."
+    if msg.poll is None:
+        return f"#{message_id} is not a poll."
+    if not msg.poll.sent_by_bot:
+        return "Only polls you sent can be closed — this one was posted by a member."
+    if msg.poll.closed:
+        return f"Poll #{message_id} is already closed."
+    if any(a.kind == "close_poll" and a.params["message_id"] == message_id for a in ctx.deps.actions):
+        return f"Poll #{message_id} will already be closed."
+    err = _queue(ctx, OutgoingAction("close_poll", {"message_id": message_id}))
+    return err or f"Poll #{message_id} will be closed right after your reply."
+
+
+async def react(ctx: RunContext[AgentDeps], message_id: int, emoji: str) -> str:
+    """Put an emoji reaction on a message by its #id. Use it to acknowledge,
+    agree, or celebrate when a reaction fits better than words — it can be
+    your whole answer. One reaction per message (a second replaces the
+    first); only Telegram's standard reaction emoji work, e.g. 👍 ❤ 🔥 🎉 😁
+    🤔 👀 🙏 👌 💯 🤝 😢 😱 🏆 ✍."""
+    emoji = normalize_emoji(emoji)
+    if emoji not in REACTION_EMOJI:
+        return (
+            f"{emoji!r} isn't an allowed reaction. Options: " + " ".join(sorted(REACTION_EMOJI))
+        )
+    async with ctx.deps.sessionmaker() as session:
+        if await _stored_in_chat(ctx, session, message_id) is None:
+            return f"#{message_id}: not in Convoke's stored history for this chat."
+    ctx.deps.actions[:] = [
+        a for a in ctx.deps.actions
+        if not (a.kind == "reaction" and a.params["message_id"] == message_id)
+    ]
+    err = _queue(ctx, OutgoingAction("reaction", {"message_id": message_id, "emoji": emoji}))
+    return err or f"Will react {emoji} to #{message_id}."
+
+
+async def send_location(
+    ctx: RunContext[AgentDeps],
+    latitude: float,
+    longitude: float,
+    place_name: str | None = None,
+    address: str | None = None,
+) -> str:
+    """Send a map pin in this chat, right after your reply — e.g. where to
+    meet. With place_name and address it's sent as a named venue card."""
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return "Those coordinates are out of range."
+    place_name, address = (place_name or "").strip(), (address or "").strip()
+    if place_name and address:
+        action = OutgoingAction("venue", {
+            "latitude": latitude, "longitude": longitude, "title": place_name, "address": address,
+        })
+    elif place_name or address:
+        return "A venue needs both place_name and address — or neither, for a plain pin."
+    else:
+        action = OutgoingAction("location", {"latitude": latitude, "longitude": longitude})
+    err = _queue(ctx, action)
+    return err or "The location will be sent right after your reply."
 
 
 async def attach_media(ctx: RunContext[AgentDeps], message_id: int) -> str:
@@ -793,6 +926,10 @@ AGENT_TOOLS = [
     generate_image,
     edit_image,
     set_reply_target,
+    send_poll,
+    close_poll,
+    react,
+    send_location,
     remember,
     recall,
     past_workflow_actions,

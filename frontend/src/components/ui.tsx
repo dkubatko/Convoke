@@ -648,13 +648,15 @@ export function TabBar<T extends string>({ tabs, active, onSelect }: {
   )
 }
 
-/** Media an agent run attached to its reply, as one pill ("photo ×3") — warn
-    tone when any item failed to send. flex:none so it can sit inside clamped
-    run cells without breaking their pinned row height. */
+/** Media and chat actions (polls, reactions…) an agent run delivered with its
+    reply, as one pill ("photo ×3") — warn tone when any item failed. flex:none
+    so it can sit inside clamped run cells without breaking their pinned row
+    height. */
 export function RunMediaChip({ media }: { media: RunMedia[] | null | undefined }) {
   if (!media || media.length === 0) return null
   const kinds = new Set(media.map((m) => m.kind))
-  const label = kinds.size === 1 ? [...kinds][0] : 'media'
+  const label =
+    kinds.size === 1 ? [...kinds][0] : media.every((m) => m.source === 'action') ? 'actions' : 'media'
   const allOk = media.every((m) => m.ok)
   const generated = media.filter((m) => m.source === 'generated').length
   return (

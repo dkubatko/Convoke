@@ -33,6 +33,7 @@ from app.memory.chunker import render_ts
 from app.memory.embeddings import Embedder
 from app.members import clean_display_name, member_display_name
 from app.models import AgentRun, Bot, Chat, IntentEpisode, Message
+from app.telegram.actions import OutgoingAction, perform
 from app.telegram.format import to_telegram_html
 from app.telegram.limiter import SendLimiter
 from app.telegram.media import OutgoingMedia
@@ -48,6 +49,8 @@ CHAT_ACTION_INTERVAL_S = 4
 # shown in General — chat actions alone need the id spelled out.
 GENERAL_TOPIC_ID = 1
 MAX_REPLY_PARTS = 3
+# The agent's "my action is the answer" reply: post no text.
+NO_TEXT = "NO_TEXT"
 # Hard cap on one model run. It executes holding the chat lock and a global
 # concurrency slot — unbounded, a wedged provider could stall the whole loop.
 AGENT_RUN_DEADLINE_S = 900
@@ -86,6 +89,11 @@ from the chat — use these when asked to draw, create, or alter an image. \
 Attachments arrive as one album right after your text.
 - When your answer points at one specific past message, find its #id and call \
 set_reply_target(message_id) — your reply becomes a Telegram reply to it.
+- Polls show in the transcript as [poll …] with question and options only; use \
+get_poll whenever votes or results matter. send_poll, send_location, react and \
+close_poll take effect right after your text; when one of them says everything \
+(a reaction acknowledging a message, the poll a member asked for), reply with \
+exactly NO_TEXT and no text is posted.
 - When a tool needs structured arguments, fill them from your own knowledge when \
 you are confident: a city becomes its coordinates, a place its timezone, a date \
 phrase a concrete date. Don't ask the user for technical values you can derive.
@@ -352,7 +360,11 @@ async def execute_run(
                     raise TimeoutError(
                         f"run exceeded the {AGENT_RUN_DEADLINE_S}s deadline"
                     ) from None
+        # NO_TEXT: the run's reaction/poll/media is the whole answer. Honoured
+        # only when something else is delivered — silence would read as a crash.
         reply_text = (result.output or "").strip() or "(no reply)"
+        if reply_text.upper() == NO_TEXT:
+            reply_text = "" if deps.actions or deps.media else "(no reply)"
         # The agent's structured way to stand down: a NO_ACTION reply posts
         # nothing to the chat; the run records the decision as `declined` and
         # the episode is satisfied with the reason, so the topic won't
@@ -393,6 +405,8 @@ async def execute_run(
                 kinds = {m.kind for m in deps.media}
                 label = next(iter(kinds)) if len(kinds) == 1 else "media item"
                 episode_summary += f" [attaching {n} {label}{'s' if n != 1 else ''}]"
+            if deps.actions:
+                episode_summary += " [" + "; ".join(a.label() for a in deps.actions) + "]"
             await finish_run_episode(session, run_id, episode_summary, run.finished_at)
             await session.commit()
             # set_reply_target override: the text anchors to the chosen
@@ -443,6 +457,21 @@ async def execute_run(
                                 episode.execution_summary + " (some media failed to send)"
                             )[:500]
                     await session.commit()
+                # Actions last: a poll or pin belongs after the text that
+                # introduces it, and a half-delivered reply must not be
+                # followed by the poll it promised.
+                if deps.actions:
+                    outcomes = await _deliver_actions(
+                        sessionmaker, bot, chat, limiter, deps.actions,
+                        thread_id=send_thread, notify_reply_to=reply_to,
+                    )
+                    run.media = (run.media or []) + outcomes
+                    if any(not o["ok"] for o in outcomes):
+                        run.error = (
+                            ((run.error + "; ") if run.error else "")
+                            + "some actions failed"
+                        )
+                    await session.commit()
             except Exception as e:  # noqa: BLE001 — the outcome is already recorded
                 log.exception(
                     "agent run %s: delivery failed after %d part(s)", run_id, delivered
@@ -452,6 +481,8 @@ async def execute_run(
                 )
                 if deps.media:
                     run.error += "; attached media skipped"
+                if deps.actions:
+                    run.error += "; actions skipped"
                 if delivered == 0:
                     # Nothing landed — silence reads as a crash, leave a trace.
                     try:
@@ -654,6 +685,54 @@ async def _deliver_media(
     return [
         {"kind": i.kind, "source": i.source, "ok": i in delivered} for i in items
     ]
+
+
+async def _deliver_actions(
+    sessionmaker,
+    bot,
+    chat,
+    limiter,
+    actions: list[OutgoingAction],
+    thread_id: int | None,
+    notify_reply_to: int | None,
+) -> list[dict]:
+    """Perform the run's queued actions in order, each best-effort in its own
+    transaction. Returns run.media-shaped outcomes ({"kind", "source":
+    "action", "ok"}). Never raises. Same retry rule as media: one RetryAfter
+    wait, and only a BadRequest (Telegram rejected the input — nothing was
+    sent) is certain enough to tell the chat a promised poll or pin failed."""
+    outcomes = []
+    async with sessionmaker() as session:
+        for action in actions:
+            ok = False
+            try:
+                await limiter.acquire(chat.bot_id, chat.tg_chat_id)
+                try:
+                    await perform(session, bot, chat, action, thread_id)
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after)
+                    await limiter.acquire(chat.bot_id, chat.tg_chat_id)
+                    await perform(session, bot, chat, action, thread_id)
+                await session.commit()
+                ok = True
+            except TelegramBadRequest as e:
+                log.warning("action %s rejected: %s", action.kind, e)
+                await session.rollback()
+                if action.kind != "reaction":  # a missing reaction promises nothing
+                    try:
+                        await limiter.acquire(chat.bot_id, chat.tg_chat_id)
+                        await _send(
+                            session, bot, chat, f"Couldn't {action.failure_label()} — Telegram refused it.",
+                            reply_to=notify_reply_to, thread_id=thread_id,
+                        )
+                        await session.commit()
+                    except Exception:  # noqa: BLE001 — recording matters more
+                        log.warning("could not send action-failure notice")
+            except Exception:  # noqa: BLE001 — an action failure must not fail the run
+                log.exception("action %s failed", action.kind)
+                await session.rollback()
+            outcomes.append({"kind": action.kind.replace("_", " "), "source": "action", "ok": ok})
+    return outcomes
 
 
 async def _fail(session, run, error: str, bot, limiter, bot_row, chat, notify: str | None = None):

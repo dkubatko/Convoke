@@ -84,11 +84,12 @@ export interface ToolCall {
   ok: boolean
 }
 
-// One media item an agent run attached to its reply; ok reflects whether it
-// actually reached the chat. Absent/null on runs that attached nothing.
+// One media item or chat action (poll, location, reaction, poll close) an
+// agent run delivered with its reply; ok reflects whether it actually reached
+// the chat. Absent/null on runs that delivered nothing.
 export interface RunMedia {
-  kind: string // photo | video
-  source: string // history | url | generated
+  kind: string // photo | video | poll | location | venue | reaction | close poll
+  source: string // history | url | generated | action
   ok: boolean
 }
 

@@ -4,6 +4,7 @@ from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.memory.embeddings import Embedder
+from app.telegram.actions import OutgoingAction
 from app.telegram.media import OutgoingMedia
 
 
@@ -21,6 +22,9 @@ class AgentDeps:
     # after the model run finishes — delivery is post-hoc, so tools can only
     # accumulate.
     media: list[OutgoingMedia] = field(default_factory=list)
+    # Polls, locations, reactions, poll closes (send_poll / send_location /
+    # react / close_poll) — performed after the text and media, same contract.
+    actions: list[OutgoingAction] = field(default_factory=list)
     # (tg_message_id, thread_id) override from set_reply_target: the text
     # reply anchors to this message in its thread; media follows the thread
     # but never carries the reply link.

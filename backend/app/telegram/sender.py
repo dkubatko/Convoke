@@ -11,6 +11,7 @@ from aiogram.types import Message as TgMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Chat, Message
+from app.telegram.content import extract_content, poll_from_tg
 from app.telegram.media import OutgoingMedia, extract_attachment
 
 
@@ -142,3 +143,30 @@ def _media_ref(item: OutgoingMedia) -> str | BufferedInputFile:
     if item.data is not None:
         return BufferedInputFile(item.data, filename="image.png")
     return item.file_id or item.url
+
+
+def persist_sent(session: AsyncSession, chat: Chat, sent: TgMessage) -> Message:
+    """Store a bot-sent poll/location/venue as source='self' (bots never get
+    their own messages back from getUpdates). A poll is linked by its id here
+    — the vote updates that follow carry nothing else."""
+    sent_at = sent.date.astimezone(timezone.utc)
+    row = Message(
+        chat_id=chat.id,
+        tg_message_id=sent.message_id,
+        thread_id=sent.message_thread_id,
+        sender_id=sent.from_user.id if sent.from_user else None,
+        sender_name=sent.from_user.full_name if sent.from_user else "",
+        text=sent.text or sent.caption or "",
+        content=extract_content(sent),
+        sent_at=sent_at,
+        source="self",
+    )
+    row.attachment = None
+    poll = None
+    if sent.poll is not None:
+        poll = poll_from_tg(sent.poll, sent_by_bot=True, sent_at=sent_at)
+        poll.chat_id = chat.id
+        poll.tg_message_id = sent.message_id
+    row.poll = poll
+    session.add(row)
+    return row
