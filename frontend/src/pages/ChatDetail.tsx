@@ -20,6 +20,7 @@ import {
   SearchHit,
   ToolCall,
 } from '../lib/types'
+import type { AgentTask, ChatIdentity } from '../lib/types'
 import { dedupLabel, funnel, stageStory, statusChip } from '../lib/intent'
 import { EpisodeList } from '../components/Episodes'
 import SettingsEditor from '../components/SettingsEditor'
@@ -29,6 +30,7 @@ import { useConfirm } from '../components/ConfirmDialog'
 import {
   Card,
   Check,
+  Field,
   Chip,
   EmptyState,
   ErrorNote,
@@ -69,7 +71,10 @@ const RUN_COLS: SkeletonCol[] = [
   { header: 'Tool calls', w: '16.5%', kind: 'pill' },
 ]
 
-const TABS = ['Memory', 'Members', 'Workflows', 'Threads', 'Import history', 'Tools', 'Agent runs', 'Settings'] as const
+const TABS = [
+  'Memory', 'Members', 'Identity', 'Workflows', 'Agent tasks', 'Threads', 'Import history', 'Tools',
+  'Agent runs', 'Settings',
+] as const
 
 export default function ChatDetail() {
   const { chatId } = useParams()
@@ -123,7 +128,9 @@ export default function ChatDetail() {
           remount, which would leak per-chat state (dismissed-gaps init). */}
       {tab === 'Memory' && <MemoryTab key={id} chatId={id} />}
       {tab === 'Members' && <MembersTab chatId={id} />}
+      {tab === 'Identity' && <IdentityTab key={id} chatId={id} />}
       {tab === 'Workflows' && <WorkflowsTab chatId={id} />}
+      {tab === 'Agent tasks' && <AgentTasksTab chatId={id} />}
       {tab === 'Threads' && <ThreadsTab chatId={id} />}
       {tab === 'Import history' && <ImportTab chatId={id} />}
       {tab === 'Tools' && <ToolsTab chatId={id} />}
@@ -751,6 +758,41 @@ function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
   return entries.sort((a, b) => b.when.localeCompare(a.when))
 }
 
+/** Past runs in this chat, newest first — shared by workflows and agent tasks. */
+function ActivityTable({ entries }: { entries: ActivityEntry[] }) {
+  if (entries.length === 0) return null
+  return (
+    <div>
+      <div className="card-title">Activity in this chat</div>
+      <table className="data">
+        <tbody>
+          {entries.map((a) => (
+            <tr key={a.key}>
+              <td style={{ width: 100 }} className="mono muted">{timeAgo(a.when)}</td>
+              <td style={{ width: 170 }}>
+                <StatusPill status={a.status} />
+              </td>
+              <td className={a.error ? 'field-error' : 'muted'} style={{ fontSize: 12.5 }}>
+                {a.media?.length ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                    <RunMediaChip media={a.media} />
+                    <HoverText text={a.detail} max={110} />
+                  </div>
+                ) : (
+                  <HoverText text={a.detail} max={110} />
+                )}
+              </td>
+              <td className="toolcall-cell" style={{ width: 160 }}>
+                <ToolCalls calls={a.tools} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 /** The chat's live view of a workflow: what it's doing right now and what it's
     done here. Configuration lives on the workflow page (linked), not inline. */
 function ExpandedWorkflow({ wf, chatId }: { wf: ChatWorkflow; chatId: number }) {
@@ -809,36 +851,7 @@ function ExpandedWorkflow({ wf, chatId }: { wf: ChatWorkflow; chatId: number }) 
         </dl>
       )}
 
-      {activity.length > 0 && (
-        <div>
-          <div className="card-title">Activity in this chat</div>
-          <table className="data">
-            <tbody>
-              {activity.map((a) => (
-                <tr key={a.key}>
-                  <td style={{ width: 100 }} className="mono muted">{timeAgo(a.when)}</td>
-                  <td style={{ width: 170 }}>
-                    <StatusPill status={a.status} />
-                  </td>
-                  <td className={a.error ? 'field-error' : 'muted'} style={{ fontSize: 12.5 }}>
-                    {a.media?.length ? (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                        <RunMediaChip media={a.media} />
-                        <HoverText text={a.detail} max={110} />
-                      </div>
-                    ) : (
-                      <HoverText text={a.detail} max={110} />
-                    )}
-                  </td>
-                  <td className="toolcall-cell" style={{ width: 160 }}>
-                    <ToolCalls calls={a.tools} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <ActivityTable entries={activity} />
 
       <p className="muted" style={{ fontSize: 12 }}>
         {wf.type === 'intent' && (
@@ -848,6 +861,300 @@ function ExpandedWorkflow({ wf, chatId }: { wf: ChatWorkflow; chatId: number }) 
         )}
         <Link to={`/workflows/${wf.id}`}>Configure this workflow →</Link>
       </p>
+    </div>
+  )
+}
+
+
+/* ---------------- Identity ---------------- */
+
+/** Who the bot is in this chat. Only the identity is editable; the system
+    rules (formatting, tools) are appended server-side and never shown. */
+function IdentityTab({ chatId }: { chatId: number }) {
+  const toast = useToast()
+  const info = useQuery<ChatIdentity>(() => api.get(`/api/chats/${chatId}/identity`), [chatId])
+  const [text, setText] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    if (info.data && text === null) setText(info.data.identity)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [info.data])
+
+  if (info.loading || text === null) {
+    return (
+      <Card>
+        <div role="status" aria-label="Loading" className="stack" style={{ gap: 10 }}>
+          <SkeletonText w="40%" />
+          <SkeletonText w="100%" />
+          <SkeletonText w="90%" />
+          <SkeletonText w="70%" />
+        </div>
+      </Card>
+    )
+  }
+  if (info.error) return <ErrorNote message={info.error} onRetry={() => void info.refetch()} />
+  const d = info.data!
+  const dirty = text !== d.identity
+  const isDefault = text.trim() === d.default.trim()
+
+  async function save(next: string | null) {
+    setSaving(true)
+    try {
+      const out = await api.put<ChatIdentity>(`/api/chats/${chatId}/identity`, { identity: next })
+      setText(out.identity)
+      toast('ok', out.customized ? 'Identity saved' : 'Identity reset to the default')
+      void info.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t save the identity')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card>
+      <div className="page-head-row">
+        <div className="card-title" style={{ margin: 0 }}>Who the bot is in this chat</div>
+        <span className={`pill pill--${d.customized ? 'accent' : 'idle'}`}>
+          <span className="lamp" aria-hidden />
+          {d.customized ? 'custom' : 'default'}
+        </span>
+      </div>
+      <p className="muted" style={{ fontSize: 12.5, margin: '6px 0 12px' }}>
+        Personality, tone, language, what to avoid. Formatting and tool rules are added
+        automatically and don’t need repeating here. Placeholders:{' '}
+        {Object.entries(d.placeholders).map(([k, v], i) => (
+          <span key={k}>
+            {i > 0 && ', '}
+            <code title={v}>{k}</code>
+          </span>
+        ))}
+        .
+      </p>
+      <Field label="Identity" hint={`${text.length} / ${d.max_chars} characters`}>
+        <textarea
+          rows={14}
+          value={text}
+          maxLength={d.max_chars}
+          onChange={(e) => setText(e.target.value)}
+        />
+      </Field>
+      <div className="row" style={{ gap: 8, marginTop: 12 }}>
+        <button
+          className="btn"
+          disabled={!dirty || saving || !text.trim()}
+          onClick={() => void save(isDefault ? null : text)}
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {dirty && (
+          <button className="btn btn--quiet" disabled={saving} onClick={() => setText(d.identity)}>
+            Discard changes
+          </button>
+        )}
+        {(d.customized || !isDefault) && (
+          <button className="btn btn--quiet" disabled={saving} onClick={() => void save(null)}>
+            Reset to default
+          </button>
+        )}
+      </div>
+    </Card>
+  )
+}
+
+/* ---------------- Agent tasks ---------------- */
+
+function taskSchedule(t: AgentTask): string {
+  if (t.kind === 'recurring') {
+    return `${t.cron}${t.ends_at ? ` · until ${shortDateTime(t.ends_at)}` : ''}`
+  }
+  return `once · ${t.run_at ? shortDateTime(t.run_at) : '—'}`
+}
+
+function taskActivity(t: AgentTask): ActivityEntry[] {
+  return t.recent_runs.map((r) => ({
+    key: `r${r.id}`,
+    when: r.created_at,
+    status: r.status,
+    error: !!r.error && r.status !== 'skipped',
+    detail: stripTags(r.error ?? r.response_text ?? ''),
+    tools: r.tool_calls ?? null,
+    media: r.media ?? null,
+  }))
+}
+
+/** Tasks the agent scheduled in this chat when members asked — reminders,
+    recurring posts. Created only through the bot; managed (paused, deleted)
+    here. */
+function AgentTasksTab({ chatId }: { chatId: number }) {
+  const toast = useToast()
+  const confirm = useConfirm()
+  const tasks = useQuery<AgentTask[]>(() => api.get(`/api/chats/${chatId}/tasks`), [chatId], {
+    pollMs: 3000,
+  })
+  const [expandedIds, setExpandedIds] = useState<number[]>([])
+
+  async function setEnabled(t: AgentTask, enabled: boolean) {
+    try {
+      await api.patch(`/api/chats/${chatId}/tasks/${t.id}`, { enabled })
+      toast('ok', enabled ? `Task #${t.id} resumed` : `Task #${t.id} paused`)
+      void tasks.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t update the task')
+    }
+  }
+
+  async function remove(t: AgentTask) {
+    const ok = await confirm({
+      title: `Delete task #${t.id}?`,
+      body: 'It won’t run again. Its past runs stay in Agent runs.',
+      actionLabel: 'Delete task',
+      danger: true,
+    })
+    if (!ok) return
+    try {
+      await api.delete(`/api/chats/${chatId}/tasks/${t.id}`)
+      toast('ok', `Deleted task #${t.id}`)
+      void tasks.refetch()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t delete the task')
+    }
+  }
+
+  if (tasks.loading) {
+    return (
+      <div className="stack" role="status" aria-label="Loading">
+        {[180, 140].map((w) => (
+          <Card key={w}>
+            <div className="page-head-row">
+              <div className="row" style={{ gap: 10 }}>
+                <h3 style={{ fontSize: 15, margin: 0 }}>
+                  <SkeletonText w={w} />
+                </h3>
+                <SkeletonPill w={70} />
+              </div>
+              <span className="row" style={{ gap: 8 }}>
+                <SkeletonButton sm w={64} />
+                <SkeletonButton sm w={74} />
+              </span>
+            </div>
+            <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+              <SkeletonText w="50%" />
+            </p>
+          </Card>
+        ))}
+      </div>
+    )
+  }
+  if (tasks.error) return <ErrorNote message={tasks.error} onRetry={() => void tasks.refetch()} />
+  const all = tasks.data ?? []
+  if (all.length === 0) {
+    return (
+      <Card pad={false}>
+        <EmptyState
+          title="No agent tasks yet"
+          hint="Ask the bot in this chat to remind you of something, or to post something on a schedule — its tasks appear here."
+        />
+      </Card>
+    )
+  }
+  const active = all.filter((t) => t.status === 'active')
+  const finished = all.filter((t) => t.status !== 'active')
+
+  const renderCard = (t: AgentTask) => {
+    const expanded = expandedIds.includes(t.id)
+    const running = t.recent_runs[0]?.status === 'running'
+    return (
+      <Card key={t.id}>
+        <div className="page-head-row">
+          <div className="row" style={{ gap: 10, minWidth: 0 }}>
+            <h3 style={{ fontSize: 15, margin: 0, minWidth: 0 }}>
+              <HoverText text={t.task} max={70} />
+            </h3>
+            <span className="pill pill--accent">
+              <span className="lamp" aria-hidden />
+              {t.kind}
+            </span>
+            {t.status !== 'active' ? (
+              <StatusPill status={t.status} />
+            ) : !t.enabled ? (
+              <StatusPill status="paused" />
+            ) : running ? (
+              <Chip label="acting now" tone="accent" live />
+            ) : null}
+          </div>
+          <span className="row" style={{ gap: 8 }}>
+            {t.status === 'active' && (
+              <button className="btn btn--quiet btn--sm" onClick={() => void setEnabled(t, !t.enabled)}>
+                {t.enabled ? 'Pause' : 'Resume'}
+              </button>
+            )}
+            <button
+              className="btn btn--quiet btn--sm"
+              aria-expanded={expanded}
+              onClick={() =>
+                setExpandedIds((ids) =>
+                  ids.includes(t.id) ? ids.filter((i) => i !== t.id) : [...ids, t.id],
+                )
+              }
+            >
+              {expanded ? 'Hide details ▾' : 'Details ▸'}
+            </button>
+            <button className="btn btn--quiet btn--sm" onClick={() => void remove(t)}>
+              Delete
+            </button>
+          </span>
+        </div>
+        {!expanded && (
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+            #{t.id} · {taskSchedule(t)}
+            {t.status === 'active' && t.enabled && t.next_fire_at && ` · next ${shortDateTime(t.next_fire_at)}`}
+            {t.created_by_name && ` · asked by ${t.created_by_name}`}
+          </p>
+        )}
+        {expanded && (
+          <div className="stack" style={{ gap: 14, marginTop: 12 }}>
+            <dl className="kv">
+              <dt>task</dt>
+              <dd style={{ fontFamily: 'var(--font-body)', whiteSpace: 'pre-wrap' }}>{t.task}</dd>
+              <dt>schedule</dt>
+              <dd>{taskSchedule(t)}</dd>
+              <dt>next run</dt>
+              <dd>
+                {t.status !== 'active'
+                  ? '—'
+                  : !t.enabled
+                    ? 'paused'
+                    : t.next_fire_at
+                      ? shortDateTime(t.next_fire_at)
+                      : '—'}
+              </dd>
+              <dt>created</dt>
+              <dd>
+                {shortDateTime(t.created_at)}
+                {t.created_by_name && ` by ${t.created_by_name}`}
+                {t.thread_id != null && ` · thread ${t.thread_id}`}
+              </dd>
+            </dl>
+            <ActivityTable entries={taskActivity(t)} />
+          </div>
+        )}
+      </Card>
+    )
+  }
+
+  return (
+    <div className="stack">
+      <Blind title="Active" count={active.length} defaultOpen>
+        {active.length === 0 ? (
+          <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+            Nothing scheduled right now.
+          </p>
+        ) : (
+          active.map(renderCard)
+        )}
+      </Blind>
+      {finished.length > 0 && <Blind title="Finished" count={finished.length}>{finished.map(renderCard)}</Blind>}
     </div>
   )
 }

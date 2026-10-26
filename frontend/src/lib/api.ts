@@ -48,6 +48,7 @@ export const api = {
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'POST', ...(body === undefined ? {} : json(body)) }),
   put: <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', ...json(body) }),
+  patch: <T>(path: string, body: unknown) => request<T>(path, { method: 'PATCH', ...json(body) }),
   delete: <T = void>(path: string) => request<T>(path, { method: 'DELETE' }),
   upload<T>(path: string, file: File): Promise<T> {
     const form = new FormData()

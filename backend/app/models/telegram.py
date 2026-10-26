@@ -79,6 +79,10 @@ class Chat(Base):
     authorized_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     authorized_by_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Operator-written identity (who the bot is in this chat). NULL = the
+    # default (app.agents.identity.DEFAULT_IDENTITY); the hidden system rules
+    # are appended to either.
+    identity: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

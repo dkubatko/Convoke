@@ -14,7 +14,8 @@ from app.media import imagegen
 from app.members import load_member_names, refresh_chat_memory_names, set_override_name
 from app.memory.chunker import render_for_chat, render_ts
 from app.memory.store import search_chat_history as store_search
-from app.models import ChatMember, IntentEpisode, Message, Note, Poll
+from app.models import AgentRun, AgentTask, ChatMember, IntentEpisode, Message, Note, Poll
+from app.scheduler import tasks as task_rules
 from app.telegram.actions import REACTION_EMOJI, OutgoingAction, normalize_emoji
 from app.telegram.media import OutgoingMedia
 from app.threads import unmonitored_threads
@@ -388,6 +389,119 @@ async def send_location(
         action = OutgoingAction("location", {"latitude": latitude, "longitude": longitude})
     err = _queue(ctx, action)
     return err or "The location will be sent right after your reply."
+
+
+async def schedule_task(
+    ctx: RunContext[AgentDeps],
+    task: str,
+    at: datetime | None = None,
+    repeat: str | None = None,
+    ends: datetime | None = None,
+) -> str:
+    """Schedule something for yourself to do later in this chat (and this
+    topic): a reminder, a check-in, a recurring post. When it's due you are
+    run again with `task` as your instructions and today's chat context, with
+    every tool available — so write `task` as a self-contained instruction to
+    your future self: what to do or post, for whom (names/@handles), and any
+    detail it needs (e.g. "Remind @gabby to bring the grill for Saturday's
+    BBQ at Dina's"). Give exactly one of:
+    - `at`: ISO datetime for a one-off (group's timezone when no offset);
+    - `repeat`: 5-field cron for a recurring task, in the group's timezone
+      (e.g. "0 9 * * 1" = Mondays 9:00), at most hourly; optional `ends`
+      (ISO datetime) stops it earlier than the default of one year.
+    Limits: at most a year ahead, at most 25 active tasks per chat. Confirm
+    to the member what you scheduled and when it first runs."""
+    task = (task or "").strip()
+    if not task:
+        return "The task needs instructions — what should happen when it's due?"
+    if len(task) > task_rules.MAX_TASK_CHARS:
+        return f"Keep the task under {task_rules.MAX_TASK_CHARS} characters."
+    now = datetime.now(timezone.utc)
+    try:
+        run_at, cron, ends_at, first = task_rules.plan_schedule(now, at, repeat, ends)
+    except task_rules.ScheduleError as e:
+        return f"Not scheduled: {e}"
+    async with ctx.deps.sessionmaker() as session:
+        run = await session.get(AgentRun, ctx.deps.run_id)
+        if run is None or run.trigger not in ("mention", "reply"):
+            # A task or workflow run can't create tasks: no self-replication.
+            return "Not scheduled: tasks can only be created when a member asks you directly."
+        if await task_rules.active_count(session, ctx.deps.chat_id) >= task_rules.MAX_ACTIVE_PER_CHAT:
+            return (
+                f"Not scheduled: this chat already has {task_rules.MAX_ACTIVE_PER_CHAT} active "
+                "tasks. Cancel one first (list_tasks shows them)."
+            )
+        who_id, who_name = None, ""
+        if run.trigger_tg_message_id is not None:
+            row = (
+                await session.execute(
+                    select(Message.sender_id, Message.sender_name).where(
+                        Message.chat_id == ctx.deps.chat_id,
+                        Message.tg_message_id == run.trigger_tg_message_id,
+                    )
+                )
+            ).first()
+            if row is not None:
+                who_id, who_name = row
+                names = await load_member_names(session, ctx.deps.chat_id)
+                who_name = names.get(who_id) or who_name or ""
+        row = AgentTask(
+            chat_id=ctx.deps.chat_id,
+            thread_id=run.thread_id,
+            task=task,
+            run_at=run_at,
+            cron=cron,
+            ends_at=ends_at,
+            next_fire_at=first,
+            created_by_user_id=who_id,
+            created_by_name=who_name,
+            created_run_id=run.id,
+        )
+        session.add(row)
+        await session.commit()
+        task_id = row.id
+    if cron:
+        return (
+            f"Scheduled task #{task_id}: recurring ({cron}), first run {render_ts(first)}, "
+            f"ends {render_ts(ends_at)}."
+        )
+    return f"Scheduled task #{task_id}: once, at {render_ts(first)}."
+
+
+async def list_tasks(ctx: RunContext[AgentDeps]) -> str:
+    """The scheduled tasks in this chat that haven't finished: id, schedule,
+    next run, who asked, and the instructions. Use it to answer "what's
+    scheduled?" or to find the id for cancel_task."""
+    async with ctx.deps.sessionmaker() as session:
+        rows = (
+            await session.execute(
+                select(AgentTask)
+                .where(AgentTask.chat_id == ctx.deps.chat_id, AgentTask.status == "active")
+                .order_by(AgentTask.next_fire_at)
+            )
+        ).scalars().all()
+    if not rows:
+        return "No scheduled tasks in this chat."
+    lines = []
+    for t in rows:
+        when = f"recurring ({t.cron})" if t.cron else "once"
+        nxt = render_ts(t.next_fire_at) if t.next_fire_at else "—"
+        paused = " [paused by the operator]" if not t.enabled else ""
+        by = f", asked by {t.created_by_name}" if t.created_by_name else ""
+        lines.append(f"- #{t.id} {when}, next {nxt}{paused}{by}: {t.task}")
+    return "\n".join(lines)
+
+
+async def cancel_task(ctx: RunContext[AgentDeps], task_id: int) -> str:
+    """Delete a scheduled task in this chat by its id (see list_tasks). Do it
+    when a member asks to cancel or stop something you scheduled."""
+    async with ctx.deps.sessionmaker() as session:
+        row = await session.get(AgentTask, task_id)
+        if row is None or row.chat_id != ctx.deps.chat_id:
+            return f"No task #{task_id} in this chat."
+        await session.delete(row)
+        await session.commit()
+    return f"Cancelled task #{task_id}."
 
 
 async def attach_media(ctx: RunContext[AgentDeps], message_id: int) -> str:
@@ -930,6 +1044,9 @@ AGENT_TOOLS = [
     close_poll,
     react,
     send_location,
+    schedule_task,
+    list_tasks,
+    cancel_task,
     remember,
     recall,
     past_workflow_actions,

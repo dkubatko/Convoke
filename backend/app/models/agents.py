@@ -7,7 +7,10 @@ from app.models.base import Base
 from app.models.memory import EmbeddingVariant
 from app.models.telegram import JSONVariant
 
-RUN_STATUSES = ("pending", "running", "done", "declined", "error")
+RUN_STATUSES = ("pending", "running", "done", "declined", "error", "skipped")
+# active: will fire; done: a one-off that fired; ended: a recurring task past
+# its end date.
+TASK_STATUSES = ("active", "done", "ended")
 
 # Execution roles a connected model can be assigned to. Embeddings is not a
 # role: chat memory embeds locally (sentence-transformers) by design.
@@ -116,10 +119,14 @@ class AgentRun(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
-    trigger: Mapped[str] = mapped_column(Text)  # mention | reply | workflow
+    trigger: Mapped[str] = mapped_column(Text)  # mention | reply | workflow | task
     # Set when trigger == 'workflow': which workflow queued this run.
     workflow_id: Mapped[int | None] = mapped_column(
         ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
+    )
+    # Set when trigger == 'task': which agent task queued this run.
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="SET NULL"), nullable=True
     )
     trigger_tg_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -141,3 +148,33 @@ class AgentRun(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentTask(Base):
+    """A task the agent scheduled for itself in one chat, at a member's
+    request: one-off (run_at) or recurring (cron, in the reference timezone).
+    When due, the scheduler queues an AgentRun (trigger 'task') in the chat
+    and thread it was created from. Per-chat — never assigned elsewhere."""
+
+    __tablename__ = "agent_tasks"
+    __table_args__ = (Index("ix_agent_tasks_due", "status", "next_fire_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    task: Mapped[str] = mapped_column(Text)
+    run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cron: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Recurring only: no fire after this (set to at most a year out).
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_fire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(Text, default="active")  # TASK_STATUSES
+    created_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_by_name: Mapped[str] = mapped_column(Text, default="")
+    # The run that scheduled it (no FK: agent_runs already references this table).
+    created_run_id: Mapped[int | None] = mapped_column(nullable=True)
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

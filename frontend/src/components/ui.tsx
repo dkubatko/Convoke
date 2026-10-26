@@ -454,6 +454,10 @@ const PILL_TONE: Record<string, string> = {
   validating: 'accent',
   ingesting: 'accent',
   cancelled: 'idle',
+  skipped: 'idle',
+  // agent tasks
+  ended: 'idle',
+  paused: 'warn',
   rejected: 'err',
   failed: 'err',
   error: 'err',

@@ -1,4 +1,4 @@
-from app.models.agents import AgentRun, ConnectedModel, ModelRoleAssignment, Note
+from app.models.agents import AgentRun, AgentTask, ConnectedModel, ModelRoleAssignment, Note
 from app.models.base import Base
 from app.models.mcp import ChatMcpServer, McpServer
 from app.models.memory import Chunk, ChunkState, EmbeddingState, ImportJob
@@ -29,6 +29,7 @@ from app.models.workflows import (
 __all__ = [
     "Base",
     "AgentRun",
+    "AgentTask",
     "AuthNonce",
     "Bot",
     "Chat",

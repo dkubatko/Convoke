@@ -342,3 +342,31 @@ export interface AppSetting {
   // N-stop control instead of a numeric input (the value stays hidden).
   step_labels?: string[] | null
 }
+
+// A chat's identity: who the bot is there. `identity` is the effective text
+// (custom, or the default); the hidden system rules are never sent here.
+export interface ChatIdentity {
+  identity: string
+  default: string
+  customized: boolean
+  placeholders: Record<string, string>
+  max_chars: number
+}
+
+// A task the agent scheduled in a chat at a member's request.
+export interface AgentTask {
+  id: number
+  task: string
+  kind: 'once' | 'recurring'
+  cron: string | null
+  run_at: string | null
+  ends_at: string | null
+  next_fire_at: string | null
+  enabled: boolean
+  status: string // active | done | ended
+  thread_id: number | null
+  created_by_name: string
+  created_at: string
+  last_fired_at: string | null
+  recent_runs: ChatWorkflowRun[]
+}

@@ -1,4 +1,4 @@
-"""Scheduled workflows: next_fire_at + croniter + a small tick loop.
+"""Scheduled workflows and agent tasks: next_fire_at + croniter + a small tick loop.
 
 Deliberately not APScheduler: 4.x is still pre-release, 3.x pickles jobs into
 its jobstore. A next_fire_at column is DB-native, restart-safe and trivially
@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import AgentRun, Chat, Workflow, WorkflowAssignment
+from app.scheduler.tasks import fire_due_tasks
 
 log = logging.getLogger("convoke.scheduler")
 
@@ -71,6 +72,7 @@ class ScheduleLoop:
                     continue
                 fired += await self._fire(session, wf)
                 wf.next_fire_at = next_fire(wf.cron, now)
+            fired += await fire_due_tasks(session, now)
             await session.commit()
         return fired
 
