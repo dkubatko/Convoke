@@ -117,7 +117,7 @@ async def _task_invocation(session, task_id: int | None, run_id: int) -> str:
             "exactly NO_ACTION: <one short reason>."
         )
     schedule = (
-        f"recurring, cron '{task.cron}' in the group's timezone"
+        f"recurring, cron '{task.cron}' in {task.timezone or 'the reference timezone'}"
         if task.cron
         else "one-off"
     )

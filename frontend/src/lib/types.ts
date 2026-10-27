@@ -359,6 +359,8 @@ export interface AgentTask {
   task: string
   kind: 'once' | 'recurring'
   cron: string | null
+  timezone: string | null
+  depth: number
   run_at: string | null
   ends_at: string | null
   next_fire_at: string | null

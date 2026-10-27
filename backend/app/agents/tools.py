@@ -397,6 +397,7 @@ async def schedule_task(
     at: datetime | None = None,
     repeat: str | None = None,
     ends: datetime | None = None,
+    timezone_name: str | None = None,
 ) -> str:
     """Schedule something for yourself to do later in this chat (and this
     topic): a reminder, a check-in, a recurring post. When it's due you are
@@ -405,10 +406,16 @@ async def schedule_task(
     your future self: what to do or post, for whom (names/@handles), and any
     detail it needs (e.g. "Remind @gabby to bring the grill for Saturday's
     BBQ at Dina's"). Give exactly one of:
-    - `at`: ISO datetime for a one-off (group's timezone when no offset);
-    - `repeat`: 5-field cron for a recurring task, in the group's timezone
-      (e.g. "0 9 * * 1" = Mondays 9:00), at most hourly; optional `ends`
-      (ISO datetime) stops it earlier than the default of one year.
+    - `at`: datetime for a one-off;
+    - `repeat`: 5-field cron for a recurring task (e.g. "0 9 * * 1" =
+      Mondays 9:00), at most hourly; optional `ends` stops it earlier than
+      the default of one year.
+    `timezone_name`: the IANA zone the schedule means (e.g.
+    "America/Los_Angeles") — pass it whenever the people asking live in a
+    known zone, and write `at`/`ends` as local wall-clock without an offset:
+    the zone's daylight-saving rules are applied for you. Without it, times
+    are read in the transcript timestamps' timezone. A task's own run may schedule a follow-up (e.g. check
+    traffic early, then set the final reminder), a few levels deep at most.
     Limits: at most a year ahead, at most 25 active tasks per chat. Confirm
     to the member what you scheduled and when it first runs."""
     task = (task or "").strip()
@@ -418,21 +425,37 @@ async def schedule_task(
         return f"Keep the task under {task_rules.MAX_TASK_CHARS} characters."
     now = datetime.now(timezone.utc)
     try:
-        run_at, cron, ends_at, first = task_rules.plan_schedule(now, at, repeat, ends)
+        run_at, cron, ends_at, first = task_rules.plan_schedule(
+            now, at, repeat, ends, timezone_name
+        )
     except task_rules.ScheduleError as e:
         return f"Not scheduled: {e}"
     async with ctx.deps.sessionmaker() as session:
         run = await session.get(AgentRun, ctx.deps.run_id)
-        if run is None or run.trigger not in ("mention", "reply"):
-            # A task or workflow run can't create tasks: no self-replication.
-            return "Not scheduled: tasks can only be created when a member asks you directly."
+        if run is None or run.trigger == "workflow":
+            return "Not scheduled: workflow runs can't create tasks."
+        parent = await session.get(AgentTask, run.task_id) if run.trigger == "task" else None
+        if run.trigger == "task":
+            # A follow-up of a task: one level deeper, bounded — the active
+            # cap can't stop a chain (each link finishes before the next).
+            depth = (parent.depth if parent is not None else task_rules.MAX_DEPTH) + 1
+            if depth > task_rules.MAX_DEPTH:
+                return (
+                    "Not scheduled: this task chain is already "
+                    f"{task_rules.MAX_DEPTH} follow-ups deep — that's the limit."
+                )
+        else:
+            depth = 0
         if await task_rules.active_count(session, ctx.deps.chat_id) >= task_rules.MAX_ACTIVE_PER_CHAT:
             return (
                 f"Not scheduled: this chat already has {task_rules.MAX_ACTIVE_PER_CHAT} active "
                 "tasks. Cancel one first (list_tasks shows them)."
             )
         who_id, who_name = None, ""
-        if run.trigger_tg_message_id is not None:
+        if parent is not None:
+            # A follow-up keeps the member who started the chain.
+            who_id, who_name = parent.created_by_user_id, parent.created_by_name
+        elif run.trigger_tg_message_id is not None:
             row = (
                 await session.execute(
                     select(Message.sender_id, Message.sender_name).where(
@@ -451,6 +474,8 @@ async def schedule_task(
             task=task,
             run_at=run_at,
             cron=cron,
+            timezone=timezone_name or None,
+            depth=depth,
             ends_at=ends_at,
             next_fire_at=first,
             created_by_user_id=who_id,
@@ -460,12 +485,14 @@ async def schedule_task(
         session.add(row)
         await session.commit()
         task_id = row.id
+    tz = task_rules.zone(timezone_name)
+    local = f"{first.astimezone(tz):%Y-%m-%d %H:%M %Z} ({tz.key})"
     if cron:
         return (
-            f"Scheduled task #{task_id}: recurring ({cron}), first run {render_ts(first)}, "
+            f"Scheduled task #{task_id}: recurring ({cron} in {tz.key}), first run {local}, "
             f"ends {render_ts(ends_at)}."
         )
-    return f"Scheduled task #{task_id}: once, at {render_ts(first)}."
+    return f"Scheduled task #{task_id}: once, at {local}."
 
 
 async def list_tasks(ctx: RunContext[AgentDeps]) -> str:
@@ -484,7 +511,7 @@ async def list_tasks(ctx: RunContext[AgentDeps]) -> str:
         return "No scheduled tasks in this chat."
     lines = []
     for t in rows:
-        when = f"recurring ({t.cron})" if t.cron else "once"
+        when = f"recurring ({t.cron} in {t.timezone or 'UTC'})" if t.cron else "once"
         nxt = render_ts(t.next_fire_at) if t.next_fire_at else "—"
         paused = " [paused by the operator]" if not t.enabled else ""
         by = f", asked by {t.created_by_name}" if t.created_by_name else ""

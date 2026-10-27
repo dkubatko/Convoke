@@ -4,10 +4,11 @@ Validation lives here so the agent tool and the API share one rulebook; the
 ScheduleLoop calls fire_due_tasks on its tick. Limits exist to stop a chat
 (or a prompt-injected agent) from turning the bot into a spam cannon:
 hourly at most, a year ahead at most, a bounded number per chat, and only
-member-invoked runs may create tasks (a task can't breed tasks).
+tasks only chain a few levels deep (MAX_DEPTH) — workflows can't create tasks.
 """
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 from sqlalchemy import func, select
@@ -20,6 +21,10 @@ MIN_LEAD = timedelta(minutes=1)
 MAX_HORIZON = timedelta(days=365)
 MIN_INTERVAL = timedelta(hours=1)
 MAX_ACTIVE_PER_CHAT = 25
+# Chain depth: 0 = a member asked; a task's run may schedule one level deeper.
+# The active cap alone can't stop a chain (each link finishes before the next
+# exists), so depth is what bounds "check again later" loops.
+MAX_DEPTH = 3
 MAX_TASK_CHARS = 2000
 # A fire later than this (worker down) is recorded as skipped, not run: a
 # "lunch in 10 minutes" reminder hours late is worse than none.
@@ -40,26 +45,38 @@ def utc(dt: datetime | None) -> datetime | None:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
-def _aware(dt: datetime) -> datetime:
-    # Naive datetimes mean the group's clock — the same reference timezone
-    # transcripts and cron fields use.
-    return dt.replace(tzinfo=get_tzinfo()) if dt.tzinfo is None else dt
+def zone(name: str | None) -> ZoneInfo:
+    """A task's zone: the named IANA zone, or the reference timezone."""
+    if not name:
+        return get_tzinfo()
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ScheduleError(
+            f"{name!r} isn't a timezone name — use an IANA name like America/Los_Angeles."
+        ) from None
 
 
-def cron_next(cron: str, after: datetime) -> datetime:
-    """Next fire strictly after `after`, cron fields in the reference
-    timezone; returned in UTC."""
-    local = croniter(cron, after.astimezone(get_tzinfo())).get_next(datetime)
+def _aware(dt: datetime, tz: ZoneInfo) -> datetime:
+    # A naive time is wall-clock in the task's zone (DST-correct); an explicit
+    # offset wins.
+    return dt.replace(tzinfo=tz) if dt.tzinfo is None else dt
+
+
+def cron_next(cron: str, after: datetime, tz_name: str | None = None) -> datetime:
+    """Next fire strictly after `after`, cron fields as wall-clock in the
+    task's zone (DST handled); returned in UTC."""
+    local = croniter(cron, after.astimezone(zone(tz_name))).get_next(datetime)
     return local.astimezone(timezone.utc)
 
 
-def check_cron(cron: str, now: datetime) -> datetime:
+def check_cron(cron: str, now: datetime, tz_name: str | None = None) -> datetime:
     """Validate a recurring schedule; returns its first fire (UTC)."""
     if not croniter.is_valid(cron) or len(cron.split()) != 5:
         raise ScheduleError(
             f"{cron!r} isn't a valid 5-field cron expression (minute hour day month weekday)."
         )
-    it = croniter(cron, now.astimezone(get_tzinfo()))
+    it = croniter(cron, now.astimezone(zone(tz_name)))
     fires = [it.get_next(datetime).astimezone(timezone.utc) for _ in range(INTERVAL_SAMPLES)]
     first = fires[0]
     if first - now > MAX_HORIZON:
@@ -75,23 +92,25 @@ def plan_schedule(
     at: datetime | None,
     repeat: str | None,
     ends: datetime | None,
+    tz_name: str | None = None,
 ) -> tuple[datetime | None, str | None, datetime | None, datetime]:
     """Validate a requested schedule → (run_at, cron, ends_at, next_fire_at)."""
+    tz = zone(tz_name)
     repeat = (repeat or "").strip() or None
     if (at is None) == (repeat is None):
         raise ScheduleError("Give exactly one of `at` (one-off) or `repeat` (recurring cron).")
     if at is not None:
         if ends is not None:
             raise ScheduleError("`ends` only applies to recurring tasks.")
-        at = _aware(at).astimezone(timezone.utc)
+        at = _aware(at, tz).astimezone(timezone.utc)
         if at - now < MIN_LEAD:
             raise ScheduleError("A one-off task must be at least a minute in the future.")
         if at - now > MAX_HORIZON:
             raise ScheduleError("A task can be scheduled at most a year ahead.")
         return at, None, None, at
-    first = check_cron(repeat, now)
+    first = check_cron(repeat, now, tz_name)
     cap = now + MAX_HORIZON
-    ends_at = cap if ends is None else _aware(ends).astimezone(timezone.utc)
+    ends_at = cap if ends is None else _aware(ends, tz).astimezone(timezone.utc)
     if ends_at > cap:
         raise ScheduleError("A recurring task can run for at most a year — pick an earlier end.")
     if ends_at < first:
@@ -115,7 +134,7 @@ def advance(task: AgentTask, now: datetime) -> None:
         task.status = "done"
         task.next_fire_at = None
         return
-    nxt = cron_next(task.cron, now)
+    nxt = cron_next(task.cron, now, task.timezone)
     ends_at = utc(task.ends_at)
     if ends_at is not None and nxt > ends_at:
         task.status = "ended"

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -165,6 +165,10 @@ class AgentTask(Base):
     task: Mapped[str] = mapped_column(Text)
     run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cron: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # IANA zone the cron (and a naive `at`) is read in; NULL = reference tz.
+    timezone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 0 = a member asked for it; n = scheduled by a run of a depth n-1 task.
+    depth: Mapped[int] = mapped_column(Integer, default=0)
     # Recurring only: no fire after this (set to at most a year out).
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     next_fire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

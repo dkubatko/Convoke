@@ -965,10 +965,11 @@ function IdentityTab({ chatId }: { chatId: number }) {
 /* ---------------- Agent tasks ---------------- */
 
 function taskSchedule(t: AgentTask): string {
+  const tz = t.timezone ? ` (${t.timezone})` : ''
   if (t.kind === 'recurring') {
-    return `${t.cron}${t.ends_at ? ` · until ${shortDateTime(t.ends_at)}` : ''}`
+    return `${t.cron}${tz}${t.ends_at ? ` · until ${shortDateTime(t.ends_at)}` : ''}`
   }
-  return `once · ${t.run_at ? shortDateTime(t.run_at) : '—'}`
+  return `once · ${t.run_at ? shortDateTime(t.run_at) : '—'}${tz}`
 }
 
 function taskActivity(t: AgentTask): ActivityEntry[] {
@@ -1134,6 +1135,7 @@ function AgentTasksTab({ chatId }: { chatId: number }) {
                 {shortDateTime(t.created_at)}
                 {t.created_by_name && ` by ${t.created_by_name}`}
                 {t.thread_id != null && ` · thread ${t.thread_id}`}
+                {t.depth > 0 && ` · follow-up (level ${t.depth})`}
               </dd>
             </dl>
             <ActivityTable entries={taskActivity(t)} />

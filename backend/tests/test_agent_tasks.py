@@ -16,7 +16,7 @@ from app.core.crypto import encrypt
 from app.memory.embeddings import FakeEmbedder
 from app.models import AgentRun, AgentTask, Bot, Chat
 from app.scheduler.loop import ScheduleLoop
-from app.scheduler.tasks import MAX_ACTIVE_PER_CHAT, ScheduleError, plan_schedule
+from app.scheduler.tasks import MAX_ACTIVE_PER_CHAT, ScheduleError, cron_next, plan_schedule
 from app.telegram.limiter import SendLimiter
 from tests.test_actions import ActionFakeBot
 from tests.test_agent import add_agent_model, authorize_chat
@@ -85,7 +85,7 @@ async def test_schedule_list_cancel(db_sessionmaker, bot_row):
     out = await schedule_task(ctx, "Remind Alice to bring the grill", at=soon)
     assert out.startswith("Scheduled task #")
     out = await schedule_task(ctx, "Post the week's events", repeat="0 9 * * 1")
-    assert "recurring (0 9 * * 1)" in out
+    assert "recurring (0 9 * * 1 in UTC)" in out
     assert "at most once an hour" in await schedule_task(ctx, "spam", repeat="*/5 * * * *")
 
     async with db_sessionmaker() as s:
@@ -99,20 +99,57 @@ async def test_schedule_list_cancel(db_sessionmaker, bot_row):
     assert "No task #999" in await cancel_task(ctx, 999)
 
 
-async def test_tasks_cannot_breed_and_are_capped(db_sessionmaker, bot_row):
+async def test_task_chains_are_depth_bounded_and_capped(db_sessionmaker, bot_row):
     chat, run, ctx = await _member_run(db_sessionmaker, bot_row, ActionFakeBot())
     soon = datetime.now(timezone.utc) + timedelta(hours=2)
     async with db_sessionmaker() as s:
+        parent = AgentTask(chat_id=chat.id, task="early traffic check", run_at=soon,
+                           next_fire_at=soon, depth=1, created_by_name="Dina",
+                           created_by_user_id=7)
+        s.add(parent)
+        await s.flush()
+        r = await s.get(AgentRun, run.id)
+        r.trigger, r.task_id = "task", parent.id
+        await s.commit()
+        parent_id = parent.id
+    # A task's run may schedule its follow-up, one level deeper, same member.
+    assert (await schedule_task(ctx, "final leave-now reminder", at=soon)).startswith("Scheduled")
+    async with db_sessionmaker() as s:
+        child = (await s.execute(select(AgentTask).where(AgentTask.id != parent_id))).scalar_one()
+        assert (child.depth, child.created_by_name, child.created_by_user_id) == (2, "Dina", 7)
+        p = await s.get(AgentTask, parent_id)
+        p.depth = 3  # already at the limit
+        await s.commit()
+    assert "follow-ups deep" in await schedule_task(ctx, "one more", at=soon)
+
+    async with db_sessionmaker() as s:
+        (await s.get(AgentRun, run.id)).trigger = "workflow"
+        await s.commit()
+    assert "workflow runs can't create tasks" in await schedule_task(ctx, "x", at=soon)
+
+    async with db_sessionmaker() as s:
+        (await s.get(AgentRun, run.id)).trigger = "mention"
         for i in range(MAX_ACTIVE_PER_CHAT):
             s.add(AgentTask(chat_id=chat.id, task=f"t{i}", run_at=soon, next_fire_at=soon))
         await s.commit()
     assert "already has 25 active tasks" in await schedule_task(ctx, "one more", at=soon)
 
-    async with db_sessionmaker() as s:
-        r = await s.get(AgentRun, run.id)
-        r.trigger = "task"
-        await s.commit()
-    assert "only be created when a member asks" in await schedule_task(ctx, "breed", at=soon)
+
+def test_timezone_wall_clock_and_dst():
+    la = "America/Los_Angeles"
+    # Naive local time → correct offset on each side of the Nov 1 DST change.
+    run_at, *_ = plan_schedule(NOW, datetime(2026, 10, 31, 0, 0), None, None, la)
+    assert run_at == datetime(2026, 10, 31, 7, 0, tzinfo=timezone.utc)  # PDT −7
+    run_at, *_ = plan_schedule(NOW, datetime(2026, 11, 3, 0, 0), None, None, la)
+    assert run_at == datetime(2026, 11, 3, 8, 0, tzinfo=timezone.utc)  # PST −8
+    # Daily midnight in LA stays midnight local across the change.
+    _, cron, _, first = plan_schedule(NOW, None, "0 0 * * *", None, la)
+    assert first == datetime(2026, 10, 27, 7, 0, tzinfo=timezone.utc)
+    assert cron_next(cron, datetime(2026, 11, 1, 8, 0, tzinfo=timezone.utc), la) == (
+        datetime(2026, 11, 2, 8, 0, tzinfo=timezone.utc)
+    )
+    with pytest.raises(ScheduleError):
+        plan_schedule(NOW, None, "0 0 * * *", None, "California")
 
 
 # --- firing -----------------------------------------------------------------------

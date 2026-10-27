@@ -79,6 +79,8 @@ class AgentTaskOut(BaseModel):
     task: str
     kind: str  # once | recurring
     cron: str | None
+    timezone: str | None
+    depth: int
     run_at: datetime | None
     ends_at: datetime | None
     next_fire_at: datetime | None
@@ -109,6 +111,8 @@ async def _task_out(session: AsyncSession, t: AgentTask) -> AgentTaskOut:
         task=t.task,
         kind="recurring" if t.cron else "once",
         cron=t.cron,
+        timezone=t.timezone,
+        depth=t.depth,
         run_at=t.run_at,
         ends_at=t.ends_at,
         next_fire_at=t.next_fire_at,
@@ -150,7 +154,7 @@ async def update_task(
     if body.enabled and not t.enabled and t.status == "active":
         now = datetime.now(timezone.utc)
         if t.cron:
-            nxt = cron_next(t.cron, now)
+            nxt = cron_next(t.cron, now, t.timezone)
             ends_at = utc(t.ends_at)
             if ends_at is not None and nxt > ends_at:
                 raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "This task's end date has passed.")
