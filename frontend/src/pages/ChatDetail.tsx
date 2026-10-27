@@ -461,7 +461,7 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
   )
   // Optimistic assignment state so the checkbox responds instantly;
   // reconciled from the server on every (re)fetch. A ref mirrors it so the
-  // PUT body is computed synchronously \u2014 a setState updater's side-effect is
+  // PUT body is computed synchronously — a setState updater's side-effect is
   // NOT available before the next line (React batches), which previously sent
   // an empty list and un-assigned everything.
   const [assignedIds, setAssignedIds] = useState<number[]>([])
@@ -494,7 +494,7 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
       setAssigned(
         on ? assignedRef.current.filter((id) => id !== wf.id) : [...assignedRef.current, wf.id],
       )
-      toast('err', err instanceof ApiError ? err.message : 'Couldn\u2019t update the assignment')
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t update the assignment')
     }
   }
 
@@ -598,7 +598,7 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
                 aria-expanded={expanded}
                 onClick={toggleExpand}
               >
-                {expanded ? 'Hide details \u25be' : 'Details \u25b8'}
+                {expanded ? 'Hide details ▾' : 'Details ▸'}
               </button>
             )}
           </span>
@@ -606,11 +606,11 @@ function WorkflowsTab({ chatId }: { chatId: number }) {
         {assigned && !expanded && (
           <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
             {wf.type === 'scheduled'
-              ? `${wf.cron ?? ''} \u00b7 next ${wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '\u2014'}`
+              ? `${wf.cron ?? ''} · next ${wf.next_fire_at ? shortDateTime(wf.next_fire_at) : '—'}`
               : stageStory(wf.cursors[0], wf.episodes, wf.threshold, wf.examples_status)}
             {wf.type === 'intent' && wf.pending_messages > 0 && (
               <span className="muted">
-                {' \u00b7 '}
+                {' · '}
                 {wf.pending_messages} new message{wf.pending_messages === 1 ? '' : 's'} waiting for
                 the next check
               </span>
@@ -726,7 +726,7 @@ function mergeActivity(wf: ChatWorkflow): ActivityEntry[] {
     const parts: string[] = []
     const slots = Object.entries(f.slots)
       .map(([k, v]) => `${k}: ${v.value}`)
-      .join(' \u00b7 ')
+      .join(' · ')
     if (slots) parts.push(slots)
     // Strip the Telegram HTML markup the agent's reply carries (<b>, <pre>, …)
     // so the activity preview reads as plain text — same as the Runs tab and the
@@ -868,53 +868,101 @@ function ExpandedWorkflow({ wf, chatId }: { wf: ChatWorkflow; chatId: number }) 
 
 /* ---------------- Identity ---------------- */
 
-/** Who the bot is in this chat. Only the identity is editable; the system
-    rules (formatting, tools) are appended server-side and never shown. */
+/** Who the bot is in this chat: the names it answers to, then its identity
+    text. Saved independently. The system rules (formatting, tools) are
+    appended server-side and never shown. */
 function IdentityTab({ chatId }: { chatId: number }) {
-  const toast = useToast()
   const info = useQuery<ChatIdentity>(() => api.get(`/api/chats/${chatId}/identity`), [chatId])
-  const [text, setText] = useState<string | null>(null)
-  const [names, setNames] = useState<string | null>(null)
-  const [saving, setSaving] = useState(false)
-  useEffect(() => {
-    if (info.data && text === null) setText(info.data.identity)
-    if (info.data && names === null) setNames(info.data.names.join(', '))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [info.data])
-
-  if (info.loading || text === null || names === null) {
+  if (info.loading) {
     return (
-      <Card>
-        <div role="status" aria-label="Loading" className="stack" style={{ gap: 10 }}>
-          <SkeletonText w="40%" />
-          <SkeletonText w="100%" />
-          <SkeletonText w="90%" />
-          <SkeletonText w="70%" />
-        </div>
-      </Card>
+      <div className="stack">
+        {[2, 4].map((lines) => (
+          <Card key={lines}>
+            <div role="status" aria-label="Loading" className="stack" style={{ gap: 10 }}>
+              <SkeletonText w="35%" />
+              {Array.from({ length: lines }, (_, i) => (
+                <SkeletonText key={i} w={i % 2 ? '80%' : '100%'} />
+              ))}
+            </div>
+          </Card>
+        ))}
+      </div>
     )
   }
-  if (info.error) return <ErrorNote message={info.error} onRetry={() => void info.refetch()} />
-  const d = info.data!
-  const nameList = names
+  if (info.error || !info.data) {
+    return <ErrorNote message={info.error ?? 'Not found'} onRetry={() => void info.refetch()} />
+  }
+  return (
+    <div className="stack">
+      <NamesCard chatId={chatId} info={info.data} onSaved={() => void info.refetch()} />
+      <IdentityCard chatId={chatId} info={info.data} onSaved={() => void info.refetch()} />
+    </div>
+  )
+}
+
+function NamesCard({ chatId, info, onSaved }: { chatId: number; info: ChatIdentity; onSaved: () => void }) {
+  const toast = useToast()
+  const [names, setNames] = useState(info.names.join(', '))
+  const [saving, setSaving] = useState(false)
+  const list = names
     .split(',')
     .map((n) => n.trim())
     .filter(Boolean)
-  const namesDirty = nameList.join(', ') !== d.names.join(', ')
-  const dirty = text !== d.identity || namesDirty
-  const isDefault = text.trim() === d.default.trim()
+  const dirty = list.join(', ') !== info.names.join(', ')
+
+  async function save() {
+    setSaving(true)
+    try {
+      const out = await api.put<ChatIdentity>(`/api/chats/${chatId}/names`, { names: list })
+      setNames(out.names.join(', '))
+      toast('ok', out.names.length ? 'Names saved' : 'Names cleared')
+      onSaved()
+    } catch (err) {
+      toast('err', err instanceof ApiError ? err.message : 'Couldn’t save the names')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card>
+      <div className="card-title" style={{ margin: 0 }}>Names it answers to</div>
+      <p className="muted" style={{ fontSize: 12.5, margin: '6px 0 12px' }}>
+        Besides @mentions and replies. A message containing one of these as a whole word (any case)
+        invokes the bot; it stays quiet when the message isn’t meant for it. Comma-separated, up
+        to {info.max_names}.
+      </p>
+      <Field label="Names">
+        <input value={names} placeholder="Бот, Bot" onChange={(e) => setNames(e.target.value)} />
+      </Field>
+      <div className="row" style={{ gap: 8, marginTop: 12 }}>
+        <button className="btn" disabled={!dirty || saving} onClick={() => void save()}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {dirty && (
+          <button className="btn btn--quiet" disabled={saving} onClick={() => setNames(info.names.join(', '))}>
+            Discard changes
+          </button>
+        )}
+      </div>
+    </Card>
+  )
+}
+
+function IdentityCard({ chatId, info, onSaved }: { chatId: number; info: ChatIdentity; onSaved: () => void }) {
+  const toast = useToast()
+  const [text, setText] = useState(info.identity)
+  const [saving, setSaving] = useState(false)
+  const dirty = text !== info.identity
+  const isDefault = text.trim() === info.default.trim()
 
   async function save(next: string | null) {
     setSaving(true)
     try {
-      const out = await api.put<ChatIdentity>(`/api/chats/${chatId}/identity`, {
-        identity: next,
-        names: nameList,
-      })
+      const out = await api.put<ChatIdentity>(`/api/chats/${chatId}/identity`, { identity: next })
       setText(out.identity)
-      setNames(out.names.join(', '))
       toast('ok', out.customized ? 'Identity saved' : 'Identity reset to the default')
-      void info.refetch()
+      onSaved()
     } catch (err) {
       toast('err', err instanceof ApiError ? err.message : 'Couldn’t save the identity')
     } finally {
@@ -925,16 +973,16 @@ function IdentityTab({ chatId }: { chatId: number }) {
   return (
     <Card>
       <div className="page-head-row">
-        <div className="card-title" style={{ margin: 0 }}>Who the bot is in this chat</div>
-        <span className={`pill pill--${d.customized ? 'accent' : 'idle'}`}>
+        <div className="card-title" style={{ margin: 0 }}>Personality</div>
+        <span className={`pill pill--${info.customized ? 'accent' : 'idle'}`}>
           <span className="lamp" aria-hidden />
-          {d.customized ? 'custom' : 'default'}
+          {info.customized ? 'custom' : 'default'}
         </span>
       </div>
       <p className="muted" style={{ fontSize: 12.5, margin: '6px 0 12px' }}>
-        Personality, tone, language, what to avoid. Formatting and tool rules are added
-        automatically and don’t need repeating here. Placeholders:{' '}
-        {Object.entries(d.placeholders).map(([k, v], i) => (
+        Who the bot is here: tone, language, what to avoid. Formatting and tool rules are added
+        automatically and don’t need repeating. Placeholders:{' '}
+        {Object.entries(info.placeholders).map(([k, v], i) => (
           <span key={k}>
             {i > 0 && ', '}
             <code title={v}>{k}</code>
@@ -942,21 +990,11 @@ function IdentityTab({ chatId }: { chatId: number }) {
         ))}
         .
       </p>
-      <Field
-        label="Also answers to"
-        hint={`Comma-separated, up to ${d.max_names}. A message containing one of these as a whole word (any case) invokes the bot, like an @mention; it stays quiet when the message isn\u2019t meant for it.`}
-      >
-        <input
-          value={names}
-          placeholder="Бот, Bot"
-          onChange={(e) => setNames(e.target.value)}
-        />
-      </Field>
-      <Field label="Identity" hint={`${text.length} / ${d.max_chars} characters`}>
+      <Field label="Identity" hint={`${text.length} / ${info.max_chars} characters`}>
         <textarea
           rows={14}
           value={text}
-          maxLength={d.max_chars}
+          maxLength={info.max_chars}
           onChange={(e) => setText(e.target.value)}
         />
       </Field>
@@ -969,18 +1007,11 @@ function IdentityTab({ chatId }: { chatId: number }) {
           {saving ? 'Saving…' : 'Save'}
         </button>
         {dirty && (
-          <button
-            className="btn btn--quiet"
-            disabled={saving}
-            onClick={() => {
-              setText(d.identity)
-              setNames(d.names.join(', '))
-            }}
-          >
+          <button className="btn btn--quiet" disabled={saving} onClick={() => setText(info.identity)}>
             Discard changes
           </button>
         )}
-        {(d.customized || !isDefault) && (
+        {(info.customized || !isDefault) && (
           <button className="btn btn--quiet" disabled={saving} onClick={() => void save(null)}>
             Reset to default
           </button>

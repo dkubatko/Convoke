@@ -305,7 +305,7 @@ def test_mentions_name_whole_word_any_case():
 async def test_name_invokes_agent_and_may_stand_down(db_sessionmaker, bot_row, monkeypatch, client):
     fake = ActionFakeBot()
     chat = await authorize_chat(db_sessionmaker, fake, bot_row)
-    put = await client.put(f"/api/chats/{chat.id}/identity", json={"identity": None, "names": ["Бот", "бот", " Bot "]})
+    put = await client.put(f"/api/chats/{chat.id}/names", json={"names": ["Бот", "бот", " Bot "]})
     assert put.json()["names"] == ["Бот", "Bot"]
 
     await run_update(db_sessionmaker, fake, bot_row, message_update(40, 41, "этот робот опять"))
@@ -331,5 +331,5 @@ async def test_name_invokes_agent_and_may_stand_down(db_sessionmaker, bot_row, m
     async with db_sessionmaker() as s:
         assert (await s.get(AgentRun, runs[0].id)).status == "declined"
 
-    too_long = await client.put(f"/api/chats/{chat.id}/identity", json={"names": ["x" * 40]})
+    too_long = await client.put(f"/api/chats/{chat.id}/names", json={"names": ["x" * 40]})
     assert too_long.status_code == 422

@@ -1,7 +1,7 @@
 """Memory tools attached to every agent run."""
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from pydantic_ai import RunContext
@@ -293,13 +293,17 @@ async def send_poll(
     anonymous: bool = False,
     description: str | None = None,
     close_at: datetime | None = None,
+    timezone: str | None = None,
 ) -> str:
     """Post a native Telegram poll in this chat, right after your reply. Use
     it when members need to pick or vote on something (dates, places,
     options). Keep it non-anonymous unless asked otherwise: then you can see
     who voted for what with get_poll — votes on polls members post themselves
-    are invisible to you. Up to 12 options; close_at (ISO datetime) closes it
-    automatically."""
+    are invisible to you. Up to 12 options; `close_at` closes it
+    automatically — write it as local wall-clock and pass `timezone` (IANA
+    name, e.g. "America/Los_Angeles"; DST applied for you), or give an
+    explicit offset. Without either, it's read in the transcript timestamps'
+    timezone."""
     question = question.strip()
     options = [o.strip() for o in options if o and o.strip()]
     if not question or len(question) > MAX_POLL_QUESTION:
@@ -313,8 +317,11 @@ async def send_poll(
     close_date = None
     if close_at is not None:
         if close_at.tzinfo is None:
-            close_at = close_at.replace(tzinfo=get_tzinfo())
-        delta = (close_at - datetime.now(timezone.utc)).total_seconds()
+            try:
+                close_at = close_at.replace(tzinfo=task_rules.zone(timezone))
+            except task_rules.ScheduleError as e:
+                return f"Not posted: {e}"
+        delta = (close_at - datetime.now(UTC)).total_seconds()
         if not 5 <= delta <= 2_628_000:  # Telegram: 5s to ~30 days ahead
             return "close_at must be between a few seconds and 30 days from now."
         close_date = int(close_at.timestamp())
@@ -397,7 +404,7 @@ async def schedule_task(
     at: datetime | None = None,
     repeat: str | None = None,
     ends: datetime | None = None,
-    timezone_name: str | None = None,
+    timezone: str | None = None,
 ) -> str:
     """Schedule something for yourself to do later in this chat (and this
     topic): a reminder, a check-in, a recurring post. When it's due you are
@@ -410,12 +417,13 @@ async def schedule_task(
     - `repeat`: 5-field cron for a recurring task (e.g. "0 9 * * 1" =
       Mondays 9:00), at most hourly; optional `ends` stops it earlier than
       the default of one year.
-    `timezone_name`: the IANA zone the schedule means (e.g.
+    `timezone`: the IANA zone the schedule means (e.g.
     "America/Los_Angeles") — pass it whenever the people asking live in a
     known zone, and write `at`/`ends` as local wall-clock without an offset:
     the zone's daylight-saving rules are applied for you. Without it, times
-    are read in the transcript timestamps' timezone. A task's own run may schedule a follow-up (e.g. check
-    traffic early, then set the final reminder), a few levels deep at most.
+    are read in the transcript timestamps' timezone. A task's own run may
+    schedule a follow-up (e.g. check traffic early, then set the final
+    reminder), a few levels deep at most.
     Limits: at most a year ahead, at most 25 active tasks per chat. Confirm
     to the member what you scheduled and when it first runs."""
     task = (task or "").strip()
@@ -423,10 +431,10 @@ async def schedule_task(
         return "The task needs instructions — what should happen when it's due?"
     if len(task) > task_rules.MAX_TASK_CHARS:
         return f"Keep the task under {task_rules.MAX_TASK_CHARS} characters."
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     try:
         run_at, cron, ends_at, first = task_rules.plan_schedule(
-            now, at, repeat, ends, timezone_name
+            now, at, repeat, ends, timezone
         )
     except task_rules.ScheduleError as e:
         return f"Not scheduled: {e}"
@@ -474,7 +482,7 @@ async def schedule_task(
             task=task,
             run_at=run_at,
             cron=cron,
-            timezone=timezone_name or None,
+            timezone=timezone or None,
             depth=depth,
             ends_at=ends_at,
             next_fire_at=first,
@@ -485,7 +493,7 @@ async def schedule_task(
         session.add(row)
         await session.commit()
         task_id = row.id
-    tz = task_rules.zone(timezone_name)
+    tz = task_rules.zone(timezone)
     local = f"{first.astimezone(tz):%Y-%m-%d %H:%M %Z} ({tz.key})"
     if cron:
         return (
@@ -511,7 +519,7 @@ async def list_tasks(ctx: RunContext[AgentDeps]) -> str:
         return "No scheduled tasks in this chat."
     lines = []
     for t in rows:
-        when = f"recurring ({t.cron} in {t.timezone or 'UTC'})" if t.cron else "once"
+        when = f"recurring ({t.cron} in {task_rules.zone(t.timezone).key})" if t.cron else "once"
         nxt = render_ts(t.next_fire_at) if t.next_fire_at else "—"
         paused = " [paused by the operator]" if not t.enabled else ""
         by = f", asked by {t.created_by_name}" if t.created_by_name else ""
@@ -923,7 +931,7 @@ async def remember(ctx: RunContext[AgentDeps], fact: str, key: str | None = None
         note.text = fact
         note.embedding = embedding
         note.created_by_run_id = ctx.deps.run_id
-        note.updated_at = datetime.now(timezone.utc)
+        note.updated_at = datetime.now(UTC)
         await session.commit()
     return f"Remembered{f' under key {key!r}' if key else ''}."
 

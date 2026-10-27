@@ -51,8 +51,10 @@ class IdentityOut(BaseModel):
 class IdentityIn(BaseModel):
     # None / blank / identical to the default → back to the default.
     identity: str | None = Field(default=None, max_length=MAX_IDENTITY_CHARS)
-    # None = leave the names unchanged.
-    names: list[str] | None = Field(default=None, max_length=MAX_NAMES)
+
+
+class NamesIn(BaseModel):
+    names: list[str] = Field(default_factory=list, max_length=MAX_NAMES)
 
 
 def _identity_out(chat: Chat) -> IdentityOut:
@@ -81,15 +83,25 @@ async def set_identity(
     # Storing the default verbatim would freeze it: a later improvement to
     # DEFAULT_IDENTITY must still reach chats that never customized.
     chat.identity = text if text and text != DEFAULT_IDENTITY.strip() else None
-    if body.names is not None:
-        names = normalize_names(body.names)
-        too_long = [n for n in names if len(n) > MAX_NAME_CHARS]
-        if too_long:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"Names can be at most {MAX_NAME_CHARS} characters: {too_long[0]!r}",
-            )
-        chat.call_names = names or None
+    await session.commit()
+    return _identity_out(chat)
+
+
+@router.put("/chats/{chat_id}/names", response_model=IdentityOut)
+async def set_names(
+    chat_id: int, body: NamesIn, session: AsyncSession = Depends(get_session)
+) -> IdentityOut:
+    """Names the bot answers to in this chat — saved independently of the
+    identity text."""
+    chat = await _chat(session, chat_id)
+    names = normalize_names(body.names)
+    too_long = [n for n in names if len(n) > MAX_NAME_CHARS]
+    if too_long:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Names can be at most {MAX_NAME_CHARS} characters: {too_long[0]!r}",
+        )
+    chat.call_names = names or None
     await session.commit()
     return _identity_out(chat)
 

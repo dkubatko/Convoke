@@ -232,3 +232,19 @@ async def test_tool_validation(db_sessionmaker, bot_row):
     for _ in range(4):
         await send_location(ctx, 1.0, 2.0)
     assert "Action limit reached" in await send_location(ctx, 1.0, 2.0)
+
+
+async def test_send_poll_close_at_uses_timezone(db_sessionmaker, bot_row):
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    fake = ActionFakeBot()
+    chat = await authorize_chat(db_sessionmaker, fake, bot_row)
+    ctx = ctx_for(db_sessionmaker, chat.id)
+    la = ZoneInfo("America/Los_Angeles")
+    local = (datetime.now(la) + timedelta(days=2)).replace(tzinfo=None, microsecond=0)
+    assert "posted right after" in await send_poll(ctx, "q", ["a", "b"], close_at=local,
+                                                   timezone="America/Los_Angeles")
+    assert ctx.deps.actions[0].params["close_date"] == int(local.replace(tzinfo=la).timestamp())
+    assert "isn't a timezone name" in await send_poll(ctx, "q", ["a"], close_at=local,
+                                                      timezone="Pacific Time")
