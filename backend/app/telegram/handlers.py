@@ -25,6 +25,7 @@ from aiogram.types import Poll as TgPoll
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.identity import mentions_name
 from app.media.render import message_body
 from app.members import member_display_name, upsert_member
 from app.memory.chunker import reply_quote
@@ -303,7 +304,7 @@ async def handle_message(session: AsyncSession, bot_row: Bot, msg: TgMessage) ->
         else None
     )
 
-    trigger = _agent_trigger(msg, bot_row, text)
+    trigger = _agent_trigger(msg, bot_row, text, chat.call_names)
     # An unmonitored thread is fully ignored: no proactive workflows, no memory,
     # and no agent replies — not even to a direct @mention or reply.
     if trigger is not None and await _thread_monitored(session, chat.id, msg.message_thread_id):
@@ -551,9 +552,11 @@ async def handle_poll_answer(session: AsyncSession, answer: PollAnswer) -> None:
         vote.voted_at = _utcnow()
 
 
-def _agent_trigger(msg: TgMessage, bot_row: Bot, text: str) -> str | None:
-    """A message invokes the agent when it @mentions the bot or replies to
-    one of the bot's messages."""
+def _agent_trigger(
+    msg: TgMessage, bot_row: Bot, text: str, call_names: list[str] | None = None
+) -> str | None:
+    """A message invokes the agent when it @mentions the bot, replies to one
+    of the bot's messages, or contains one of the chat's names for it."""
     reply_to = msg.reply_to_message
     if (
         reply_to is not None
@@ -569,6 +572,10 @@ def _agent_trigger(msg: TgMessage, bot_row: Bot, text: str) -> str | None:
             after = text[m.end() : m.end() + 1]
             if not (after.isalnum() or after == "_"):
                 return "mention"
+    if mentions_name(text, call_names):
+        # Over-firing is the point: the agent decides whether the message was
+        # meant for it and may stand down (NO_ACTION).
+        return "name"
     return None
 
 

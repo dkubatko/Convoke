@@ -292,7 +292,8 @@ class IntentSweeper:
             )
             messages = list(reversed(rows))
 
-            # Messages that directly invoked the bot (@mention or reply-to-bot)
+            # Messages that directly invoked the bot (@mention, reply-to-bot, or
+            # one of its names)
             # already got their own immediate agent run at ingest. The workflow
             # sweeper must not ALSO fire on them: like the bot's own sends, they
             # stay visible as context but never count as unevaluated work.
@@ -303,7 +304,7 @@ class IntentSweeper:
                     await session.execute(
                         select(AgentRun.trigger_tg_message_id).where(
                             AgentRun.chat_id == chat_id,
-                            AgentRun.trigger.in_(("mention", "reply")),
+                            AgentRun.trigger.in_(("mention", "reply", "name")),
                             AgentRun.trigger_tg_message_id > min_cursor,
                         )
                     )

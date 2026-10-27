@@ -351,6 +351,8 @@ export interface ChatIdentity {
   customized: boolean
   placeholders: Record<string, string>
   max_chars: number
+  names: string[]
+  max_names: number
 }
 
 // A task the agent scheduled in a chat at a member's request.

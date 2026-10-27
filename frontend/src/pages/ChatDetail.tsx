@@ -874,13 +874,15 @@ function IdentityTab({ chatId }: { chatId: number }) {
   const toast = useToast()
   const info = useQuery<ChatIdentity>(() => api.get(`/api/chats/${chatId}/identity`), [chatId])
   const [text, setText] = useState<string | null>(null)
+  const [names, setNames] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   useEffect(() => {
     if (info.data && text === null) setText(info.data.identity)
+    if (info.data && names === null) setNames(info.data.names.join(', '))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [info.data])
 
-  if (info.loading || text === null) {
+  if (info.loading || text === null || names === null) {
     return (
       <Card>
         <div role="status" aria-label="Loading" className="stack" style={{ gap: 10 }}>
@@ -894,14 +896,23 @@ function IdentityTab({ chatId }: { chatId: number }) {
   }
   if (info.error) return <ErrorNote message={info.error} onRetry={() => void info.refetch()} />
   const d = info.data!
-  const dirty = text !== d.identity
+  const nameList = names
+    .split(',')
+    .map((n) => n.trim())
+    .filter(Boolean)
+  const namesDirty = nameList.join(', ') !== d.names.join(', ')
+  const dirty = text !== d.identity || namesDirty
   const isDefault = text.trim() === d.default.trim()
 
   async function save(next: string | null) {
     setSaving(true)
     try {
-      const out = await api.put<ChatIdentity>(`/api/chats/${chatId}/identity`, { identity: next })
+      const out = await api.put<ChatIdentity>(`/api/chats/${chatId}/identity`, {
+        identity: next,
+        names: nameList,
+      })
       setText(out.identity)
+      setNames(out.names.join(', '))
       toast('ok', out.customized ? 'Identity saved' : 'Identity reset to the default')
       void info.refetch()
     } catch (err) {
@@ -931,6 +942,16 @@ function IdentityTab({ chatId }: { chatId: number }) {
         ))}
         .
       </p>
+      <Field
+        label="Also answers to"
+        hint={`Comma-separated, up to ${d.max_names}. A message containing one of these as a whole word (any case) invokes the bot, like an @mention; it stays quiet when the message isn\u2019t meant for it.`}
+      >
+        <input
+          value={names}
+          placeholder="Бот, Bot"
+          onChange={(e) => setNames(e.target.value)}
+        />
+      </Field>
       <Field label="Identity" hint={`${text.length} / ${d.max_chars} characters`}>
         <textarea
           rows={14}
@@ -948,7 +969,14 @@ function IdentityTab({ chatId }: { chatId: number }) {
           {saving ? 'Saving…' : 'Save'}
         </button>
         {dirty && (
-          <button className="btn btn--quiet" disabled={saving} onClick={() => setText(d.identity)}>
+          <button
+            className="btn btn--quiet"
+            disabled={saving}
+            onClick={() => {
+              setText(d.identity)
+              setNames(d.names.join(', '))
+            }}
+          >
             Discard changes
           </button>
         )}

@@ -7,7 +7,11 @@ tool guidance — runtime.SYSTEM_RULES) stay in code and invisible, so editing
 a personality can never break delivery or tool use.
 """
 
+import re
+
 MAX_IDENTITY_CHARS = 8000
+MAX_NAMES = 10
+MAX_NAME_CHARS = 32
 
 # Placeholders an identity may use; filled per run. Plain substitution, not
 # str.format: operator text with other braces must pass through untouched.
@@ -31,3 +35,22 @@ def render_identity(identity: str | None, *, name: str, username: str, chat_titl
     for key, value in (("{name}", name), ("{username}", username), ("{chat_title}", chat_title)):
         text = text.replace(key, value)
     return text
+
+
+def normalize_names(names: list[str] | None) -> list[str]:
+    """Trimmed, non-empty, de-duplicated (case-insensitively), in order."""
+    out: list[str] = []
+    for n in names or []:
+        n = " ".join(str(n).split())
+        if n and n.lower() not in {o.lower() for o in out}:
+            out.append(n)
+    return out
+
+
+def mentions_name(text: str, names: list[str] | None) -> bool:
+    """True when `text` contains one of the names as a whole word, any case —
+    "Бот, скажи" and "спроси бот" match; "робот" and "ботинки" don't."""
+    for name in names or []:
+        if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text, re.IGNORECASE):
+            return True
+    return False

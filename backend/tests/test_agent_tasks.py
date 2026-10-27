@@ -285,3 +285,51 @@ async def test_tasks_api_pause_resume_delete(db_sessionmaker, bot_row, client):
         run = (await s.execute(select(AgentRun).where(AgentRun.status == "done"))).scalar_one()
         assert run.task_id is None or run.task_id == rec_id  # SQLite doesn't enforce SET NULL
     assert (await client.get("/api/chats/999/tasks")).status_code == 404
+
+
+# --- names the bot answers to -------------------------------------------------------
+
+
+def test_mentions_name_whole_word_any_case():
+    from app.agents.identity import mentions_name, normalize_names
+
+    names = normalize_names([" Бот ", "bot", "Bot", "", "Огурчик"])
+    assert names == ["Бот", "bot", "Огурчик"]
+    for text in ("Бот, скажи", "спроси бот что-нибудь", "БОТ!", "hey bot?", "огурчик где ты"):
+        assert mentions_name(text, names), text
+    for text in ("робот пришёл", "ботинки", "работа", "robotics", "botany"):
+        assert not mentions_name(text, names), text
+    assert not mentions_name("Бот, привет", None)
+
+
+async def test_name_invokes_agent_and_may_stand_down(db_sessionmaker, bot_row, monkeypatch, client):
+    fake = ActionFakeBot()
+    chat = await authorize_chat(db_sessionmaker, fake, bot_row)
+    put = await client.put(f"/api/chats/{chat.id}/identity", json={"identity": None, "names": ["Бот", "бот", " Bot "]})
+    assert put.json()["names"] == ["Бот", "Bot"]
+
+    await run_update(db_sessionmaker, fake, bot_row, message_update(40, 41, "этот робот опять"))
+    await run_update(db_sessionmaker, fake, bot_row, message_update(42, 43, "бот, как дела?"))
+    async with db_sessionmaker() as s:
+        runs = (await s.execute(select(AgentRun))).scalars().all()
+        await add_agent_model(s)
+        await s.commit()
+    assert [(r.trigger, r.trigger_tg_message_id) for r in runs] == [("name", 43)]
+
+    seen = {}
+    real_build = runtime.build_agent
+
+    def capture(model, instructions, *a, **kw):
+        seen["instructions"] = instructions
+        return real_build(model, instructions, *a, **kw)
+
+    monkeypatch.setattr(runtime, "build_agent", capture)
+    monkeypatch.setattr(runtime, "build_model", lambda provider: media_model([], "NO_ACTION: not for me"))
+    await execute_run(db_sessionmaker, FakeEmbedder(), SendLimiter(), fake, runs[0].id)
+    assert "contains one of your names" in seen["instructions"]
+    assert "Members also call you by name: 'Бот', 'Bot'." in seen["instructions"]
+    async with db_sessionmaker() as s:
+        assert (await s.get(AgentRun, runs[0].id)).status == "declined"
+
+    too_long = await client.put(f"/api/chats/{chat.id}/identity", json={"names": ["x" * 40]})
+    assert too_long.status_code == 422

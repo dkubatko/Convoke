@@ -200,6 +200,7 @@ async def execute_run(
     is_workflow = run.trigger == "workflow"
     is_task = run.trigger == "task"
     is_reply = run.trigger == "reply"
+    is_name = run.trigger == "name"
     thread_id = run.thread_id
     trigger_message_id = run.trigger_tg_message_id
     request_text = run.request_text
@@ -319,7 +320,19 @@ async def execute_run(
                 "from you, reply with exactly NO_ACTION: <one short reason> — "
                 "nothing will be posted to the chat."
                 if is_reply
+                else "You were invoked because a member's message (shown last in the recent "
+                "messages) contains one of your names. It may be about you rather than to "
+                "you — if it isn't addressed to you or needs nothing from you, reply with "
+                "exactly NO_ACTION: <one short reason> — nothing will be posted to the chat."
+                if is_name
                 else "You were invoked by a member's message (shown last in the recent messages)."
+            )
+            + (
+                " Members also call you by name: "
+                + ", ".join(repr(n) for n in chat.call_names)
+                + "."
+                if chat.call_names
+                else ""
             )
             + requester_note
             + (
@@ -432,7 +445,7 @@ async def execute_run(
         # immediately re-fire (and the classifier sees WHY nothing happened).
         # Workflow runs and replies to the bot may decline; a mention is
         # always answered.
-        declined = (is_workflow or is_task or is_reply) and reply_text.upper().startswith(
+        declined = (is_workflow or is_task or is_reply or is_name) and reply_text.upper().startswith(
             "NO_ACTION"
         )
 

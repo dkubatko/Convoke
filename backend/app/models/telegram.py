@@ -83,6 +83,9 @@ class Chat(Base):
     # default (app.agents.identity.DEFAULT_IDENTITY); the hidden system rules
     # are appended to either.
     identity: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Plain names members call the bot by ("Бот", "Bot"): a message containing
+    # one as a whole word invokes the agent, like an @mention.
+    call_names: Mapped[list | None] = mapped_column(NullableJSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

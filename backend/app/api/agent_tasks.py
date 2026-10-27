@@ -8,7 +8,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.identity import DEFAULT_IDENTITY, MAX_IDENTITY_CHARS, PLACEHOLDERS
+from app.agents.identity import (
+    DEFAULT_IDENTITY,
+    MAX_IDENTITY_CHARS,
+    MAX_NAME_CHARS,
+    MAX_NAMES,
+    PLACEHOLDERS,
+    normalize_names,
+)
 from app.api.workflows import ChatRunOut
 from app.core.db import get_session
 from app.core.security import require_operator
@@ -36,11 +43,16 @@ class IdentityOut(BaseModel):
     customized: bool
     placeholders: dict[str, str]
     max_chars: int
+    # Names members call the bot by; a whole-word mention invokes it.
+    names: list[str]
+    max_names: int
 
 
 class IdentityIn(BaseModel):
     # None / blank / identical to the default → back to the default.
     identity: str | None = Field(default=None, max_length=MAX_IDENTITY_CHARS)
+    # None = leave the names unchanged.
+    names: list[str] | None = Field(default=None, max_length=MAX_NAMES)
 
 
 def _identity_out(chat: Chat) -> IdentityOut:
@@ -50,6 +62,8 @@ def _identity_out(chat: Chat) -> IdentityOut:
         customized=chat.identity is not None,
         placeholders=PLACEHOLDERS,
         max_chars=MAX_IDENTITY_CHARS,
+        names=chat.call_names or [],
+        max_names=MAX_NAMES,
     )
 
 
@@ -67,6 +81,15 @@ async def set_identity(
     # Storing the default verbatim would freeze it: a later improvement to
     # DEFAULT_IDENTITY must still reach chats that never customized.
     chat.identity = text if text and text != DEFAULT_IDENTITY.strip() else None
+    if body.names is not None:
+        names = normalize_names(body.names)
+        too_long = [n for n in names if len(n) > MAX_NAME_CHARS]
+        if too_long:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Names can be at most {MAX_NAME_CHARS} characters: {too_long[0]!r}",
+            )
+        chat.call_names = names or None
     await session.commit()
     return _identity_out(chat)
 
